@@ -192,14 +192,33 @@ summary = "OpenDuo's touch and pen pieces for the Surface Duo 2 (not the runtime
 description = """duo2-touchd (built from source with the Android NDK), its unit, the udev
 rule and the sleep hook, the calibration, the pen's Bluetooth daemon and the
 pen tools. The touch runtime it runs in (Microsoft's heat processor and the
-stock libraries) may not be redistributed: every owner builds it from their
-own phone (scripts/build-touch-runtime.sh), a post-install step."""
+stock libraries) may not be redistributed: duo2-stock-import
+(openduo-stock-surface-duo2) builds it on the phone from the phone's own
+stock partitions."""
 depends = ["python3", "systemd", "udev", "bluez"]
 enable = ["duo2-touchd.service", "duo2-pend.service"]
 restart = ["duo2-pend.service"]
 check = ["/etc/systemd/system/duo2-touchd.service", "/usr/local/sbin/duo2-pend",
          "/usr/local/lib/duo2-touch-tools/pen-fw.py", "/usr/local/lib/duo2-touch/duo2-touchd",
          "/etc/duo2/touch-calibration", "enabled:duo2-touchd.service", "enabled:duo2-pend.service"]
+
+[package.openduo-stock-surface-duo2]
+component = "stock"
+arch = "all"
+device = true
+summary = "OpenDuo's import of the Surface Duo 2's own stock firmware"
+description = """duo2-stock-import reads the phone's own stock partitions (modem, Bluetooth,
+DSP, persist, and vendor, system and system_ext inside super) and installs
+what OpenDuo may not ship: the DSP, modem, WiFi, Bluetooth, GPU and video
+firmware, the touch runtime, the sensor configuration with this phone's
+calibration, the camera tables and the power profile. It runs once at the
+first boot (duo2-stock-import.service) and reads, never writes, the stock
+partitions."""
+depends = ["python3", "e2fsprogs", "mtools", "systemd", "udev"]
+enable = ["duo2-stock-import.service"]
+check = ["/usr/local/sbin/duo2-stock-import", "/usr/local/lib/duo2-stock/duo2stock.py",
+         "/usr/local/lib/duo2-stock/scripts/collect-firmware.sh",
+         "/etc/systemd/system/duo2-stock-import.service", "enabled:duo2-stock-import.service"]
 
 [package.openduo-android]
 component = "android"

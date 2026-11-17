@@ -12,10 +12,11 @@ back ([docs/RESTORE.md](docs/RESTORE.md)). It boots through the
 [WOA Project](https://github.com/WOA-Project)'s UEFI for the Surface Duo 2 and
 systemd-boot. There is no Android kernel and no Android underneath.
 
-> **Status: development preview (0.1.0-dev).** There is no downloadable image
-> yet: you build your own from this repository and your phone's stock
-> firmware ([docs/INSTALL.md](docs/INSTALL.md)). Installing wipes the phone.
-> Everything in the table below was tested on one phone, the maintainer's.
+> **Status: development preview (0.1.0-dev).** A release image and one script
+> on a Linux computer install it ([docs/INSTALL.md](docs/INSTALL.md));
+> the image carries no vendor file, the phone's own firmware is read from its
+> stock partitions at the first start. Installing wipes the phone. Everything
+> in the table below was tested on one phone, the maintainer's.
 
 OpenDuo is not affiliated with, endorsed by or sponsored by Microsoft.
 "Surface" and "Surface Duo" are trademarks of the Microsoft group of
@@ -53,11 +54,13 @@ mode the phone is turned, with the desk panel above the keyboard.
   updates and snapshots ([maint/](maint/)), optional encryption
   ([homecrypt/](homecrypt/README.md)), developer mode ([devmode/](devmode/README.md)).
 - **Android apps** through [Waydroid](https://waydro.id) ([android/](android/)).
-- **Firmware comes from your own phone's stock images**, never from this
-  repository: the DSP, modem, WiFi, Bluetooth, GPU and video firmware, and
+- **Firmware comes from your own phone**, never from this repository or an
+  image: the DSP, modem, WiFi, Bluetooth, GPU and video firmware, and
   Microsoft's touch heat-map library (closed source, not redistributable),
   which the touch daemon (adapted from [luma-duo2](https://github.com/none24smu/luma-duo2))
-  loads. The scripts that extract them are in [`scripts/`](scripts/).
+  loads. [`duo2-stock-import`](stock/README.md) reads them from the phone's
+  own stock partitions at its first start; the host-side scripts in
+  [`scripts/`](scripts/) do the same from Microsoft's recovery image.
 
 ## Hardware status
 

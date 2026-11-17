@@ -792,7 +792,7 @@ notifications, dock, lock screen client, the overview's card labels) is
   a panel left on its black first frame (no planes) while the other panel
   came up often stayed dark (the left; seconds, until a new frame or a
   brightness change), although every frame went out and the display
-  registers were as on a good wake (`tools/wake-capture.py`). Both panels in
+  registers were as on a good wake (a capture after every wake). Both panels in
   ONE commit (until 2026-11-08): 5 of 7 dark; one commit per panel: about 2
   in 3; the left alone through a wake commit and one modeset per panel: 4 of
   4 good each. On each CRTC's event Smithay re-reads the
@@ -1998,15 +1998,12 @@ down).
 
 ### A wake that does not reach a panel
 
-`tools/wake-capture.py` (copied to the phone, run as root, e.g. as a
-transient unit: `sudo systemd-run --unit=duo2-wake-capture --collect
-/usr/bin/python3 -I /var/tmp/wake-capture.py /var/tmp/duo2-wake --regs
---limit 1800`) follows the event stream and, 0.7 s and 3 s after every
-wake, saves the DRM atomic state, the encoders' status and (`--regs`,
-only while both connectors are on: the snapshot reads the DSI PHYs
-unpowered otherwise) the display register snapshot (`dri/0/kms`). Someone
-watching the panels says which wakes were dark; the files of a dark and a
-good wake are then compared block by block.
+A capture tool (kept in the development repository) follows the event
+stream and, 0.7 s and 3 s after every wake, saves the DRM atomic state, the
+encoders' status and, while both connectors are on (the snapshot reads the
+DSI PHYs unpowered otherwise), the display register snapshot
+(`dri/0/kms`). Someone watching the panels says which wakes were dark; the
+files of a dark and a good wake are then compared block by block.
 
 ### Testing without fingers
 
@@ -2030,11 +2027,8 @@ Since 2026-11-07 the tool writes the events into the clone itself with the
 planned timing; `evemu-play` had delivered a whole tap at once (a
 zero-length touch, which GTK sometimes ignored).
 
-`tools/teardown-repro.py` (not installed: copy it to the phone; `text` and
-`toplevel` run as the user after `. /run/duo-wc/session.env`, `layer` needs
-`duoctl exec-trusted --wayland --` as the administrator; plain Python,
-nothing drawn) is a client that
-dies while it has the keyboard, in the object order that used to abort duo-wc
+A test client (kept in the development repository; plain Python, nothing
+drawn) dies while it has the keyboard, in the object order that used to abort duo-wc
 (see "Client teardown" below): `layer`, `text` (a text-input enabled, the
 on-screen keyboard comes up) or `toplevel`, then `exit` or `kill`
 (SIGKILL). It prints `focus` when the keyboard was on it; duo-wc logs
@@ -2223,7 +2217,7 @@ teardown::tests::unguarded_focus_change_aborts` (SIGABRT); the guarded
 path is `teardown::tests::a_focus_change_inside_a_dying_clients_teardown_waits`.
 
 On the phone, with the fix:
-- `tools/teardown-repro.py`, 330 runs (layer 210, toplevel 90, text with
+- the test client, 330 runs (layer 210, toplevel 90, text with
   the on-screen keyboard up 30; half closing, half SIGKILL): every run had
   the keyboard when it died, every teardown was the old crash's case (330
   `gone with its client, which has the keyboard` lines), duo-wc's PID
@@ -2337,7 +2331,7 @@ Same kernel and Mesa; screenshots, `get_state`, the journal, touches through
 - **Folded back** (duo-posed `--fake`, acting): flip_p_left -> `single
   DSI-1`, DSI-2 off, a tap on DSI-2 `touch on a dark panel, not delivered`;
   turned accelerometer readings -> rotation 90 on both panels, back -> 0.
-- **Video** (`tools/video-measure.sh`, Chromium 156, fullscreen across both
+- **Video** (Chromium 156, fullscreen across both
   panels at 2.5 with its own fractional scale, dmabufs; no hardware video
   decoder: no `/dev/video*`, VA-API fails to initialise):
 

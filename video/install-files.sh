@@ -18,7 +18,7 @@
 #
 # The Raspberry Pi OS builds that duo2-youtube prefers when present
 # (/opt/duo2-chromium-rpi, /opt/duo2-ffmpeg-v4l2) are not installed here:
-# scripts/duo2-video-test install-rpi.
+# an experiment, kept in the development repository.
 #
 #   install-files.sh [--launcher]
 set -eu

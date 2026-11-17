@@ -10,9 +10,8 @@
 // VideoDecoder.isConfigSupported. YouTube then picks VP9 (or H.264).
 //
 // HIDDEN is the list of codec strings to deny (a contentType or codec string
-// containing one of them is refused). The test variant of
-// scripts/duo2-video-test ("h264") adds VP9 and VP8, so that only H.264 is
-// left.
+// containing one of them is refused). The -h264 variant (video/install-files.sh
+// makes it) adds VP9 and VP8, so that only H.264 is left.
 (() => {
     'use strict';
     const HIDDEN = ['av01'];

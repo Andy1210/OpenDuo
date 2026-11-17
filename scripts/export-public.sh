@@ -41,8 +41,9 @@
 set -euo pipefail
 R=$(cd "$(dirname "$0")/.." && pwd)
 
-# Not public: the development logs (Hungarian), and documents tied to the
-# developer's own network. Keep this list in step with CONTRIBUTING.md.
+# Not public: the development logs (Hungarian), documents tied to the
+# developer's own network, and the experiments and research tools. Keep the
+# documents in step with CONTRIBUTING.md.
 EXCLUDE=(
     docs/BRINGUP.md
     docs/AUDIO.md
@@ -52,6 +53,33 @@ EXCLUDE=(
     docs/RESEARCH.md
     docs/VIDEO.md
     docs/VOLTE.md
+    # Experiments, research and one-off probes (the owner, 2026-11-17): kept
+    # here, never exported; no exported file may name them (check 4). Tools
+    # that check the hardware stay public.
+    video/fetch-rpi-builds.sh
+    video/browser-video-measure
+    video/web/mse.html
+    video/web/codecs.html
+    scripts/duo2-video-browser
+    compositor/duo-wc/tools/video-measure.sh
+    compositor/duo-wc/tools/video/test.html
+    compositor/duo-wc/tools/wake-capture.py
+    compositor/duo-wc/tools/ctl-swap-repro.sh
+    compositor/duo-wc/tools/teardown-repro.py
+    rootfs/overlay/usr/local/sbin/duo2-wifi-mac-trial
+    rootfs/overlay/usr/local/sbin/duo2-sleeptest
+    devmode/devtools-experiments.list
+    scripts/install-factory-addr.sh
+    telephony/volte-trial-install.sh
+    touch/tools/pen-ab-check.py
+    touch/tools/pen-bt-trace.py
+    touch/tools/pen-drop-capture.sh
+    touch/tools/pen-hover-timing.py
+    touch/tools/pen-keepalive-check.py
+    touch/tests/test_pen_hover_timing.py
+    scripts/probe-android.sh
+    scripts/duo2-camera-probe
+    scripts/duo2-gpu-wake-test
 )
 # Never public, whatever git says (they are ignored; tracked would be a mistake).
 PRIVATE_RE='^(out|src|firmware|dumps|backups)/|^local\.env$|^local\.env\.(?!example$)|^local\.personal-data$|^local\.export-deny$'

@@ -54,6 +54,27 @@ Development state: `0.1.0-dev`. The first public release will be 0.1.0.
 - Video playback in the browser with hardware decoding.
 - Pen-aware games and tools, for example Nibfair.
 
+### Install
+- A release image (root and ESP, built from OpenDuo's own packages, so updates
+  work from the first start) and one script on a Linux computer,
+  `scripts/install-openduo.sh`: it backs up every partition of the phone
+  (checked), partitions, writes the images and the WOA UEFI (pinned downloads,
+  checked), and never touches the modem's partitions or another phone.
+- No vendor file in any image: `duo2-stock-import` reads the firmware, the touch
+  runtime, the sensor calibration, the camera tables and the power profile from
+  the phone's own stock partitions at the first start, then restarts once.
+- Tried end to end on a phone put back to stock Android: the installer (about
+  4 minutes from a computer), the first start with the firmware import, and
+  the way back to Android ([docs/RESTORE.md](docs/RESTORE.md)).
+- The installer numbers its steps, says how long each one usually takes and
+  took, shows the progress of the big copies (percent, speed, time left), and
+  explains "no permissions" from adb or fastboot on Linux; `udev-rules.sh`
+  (next to it in the release) sets up the USB access once.
+- WiFi works from the first start: the image enables `wpa_supplicant@wlan0`
+  with an empty configuration that Settings > WiFi saves networks into.
+- The first start's clock begins at the image's build date instead of a date
+  months earlier, until the network sets it.
+
 ### Security
 - Firewall closed by default; SSH only in developer mode, key login only.
 - Optional encryption of user data tied to the PIN (fscrypt, direct boot,
@@ -61,6 +82,11 @@ Development state: `0.1.0-dev`. The first public release will be 0.1.0.
 - Bug reports with personal identifiers masked.
 
 ### Fixed
+- A network saved in Settings > WiFi no longer leaves wpa_supplicant's
+  configuration, with the network's key, readable by every user.
+- The image no longer carries the D-Bus machine id made during its build
+  (the same on every phone): D-Bus reads the phone's own, made at its first
+  start.
 - The lock screen's keypad digits sit in the middle of their circles.
 - A new kernel's health check read the compositor and touch as failed while
   they ran, so every packaged kernel went back to the previous one.

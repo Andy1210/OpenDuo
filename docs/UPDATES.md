@@ -316,6 +316,19 @@ What the GitHub repository needs:
 
 and GitHub Pages set to deploy from the `gh-pages` branch.
 
+**By hand** (the first repository, 0.1.0-dev, was made this way): the
+packages of `scripts/build-release.sh` (the same ones the image installs) and
+the camera rebuilds, signed with the signing subkey, into a tree for the
+`gh-pages` branch; the workflow's later runs add to it (reprepro's `conf/`
+and `db/` are published with it for that reason):
+
+```sh
+GNUPGHOME=out/signing/gnupg packaging/repo.sh out/gh-pages/apt add testing \
+    out/packages/debs/*.deb $(find out/camera-debs -name '*.deb' ! -name '*-dbgsym_*')
+GNUPGHOME=out/signing/gnupg packaging/repo.sh out/gh-pages/apt promote
+touch out/gh-pages/.nojekyll    # and an index.html; then push it as gh-pages
+```
+
 ## Building and testing locally
 
 ```sh
@@ -547,9 +560,11 @@ The steps, with the phone on the charger and an ssh session open:
 
 - The first phone (2026-11-17) went over from its hand-installed files to the
   packages with the steps above, from a LAN test repository. The public repository is not published yet.
-- The image does not install from the packages yet: `scripts/build-images.sh`
-  still runs the same installers directly (the same files, owned by no
-  package). Building the image from the repository is the next step.
+- The published image is installed from the packages
+  (`scripts/build-release.sh`: `build-images.sh` with `INSTALL_FROM=packages`,
+  the kernel package's entry blessed on the ESP). A developer's image
+  (`scripts/build-images.sh` alone) still runs the same installers directly
+  (the same files, owned by no package).
 - The image's overlay (`rootfs/overlay`: fstab, the USB gadget, the factory
   addresses, udev rules, the audio profiles) is in no package yet, except the
   touch files; an `openduo-base-surface-duo2` would carry it.

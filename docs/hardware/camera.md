@@ -59,7 +59,6 @@ Run on the phone, as root, one module at a time (the scripts only read, or
 stream test patterns):
 
 ```sh
-sudo duo2-camera-probe camera          # PMICs, camcc, CCI, sensors, CAMSS, heap
 sudo FRAMES=16 duo2-camera-stream uw   # or front, tele, wide; MODE=WxH; tpg 0 1
 cam -l                                 # as the GUI user
 scripts/duo2-camera-colour             # colour check, as the GUI user (video group)

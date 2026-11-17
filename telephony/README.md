@@ -26,7 +26,7 @@ rmtfs (starts the modem) ──> duo2-modem-lpm ──> ModemManager (qcom-soc p
 | `30-wwan.network` | `/etc/systemd/network` | networkd leaves the modem's devices alone |
 | `duo2-callaudio` + `systemd/user/duo2-callaudio.service` + `callaudio.conf` + `dbus/org.mobian_project.CallAudio.service` | `/usr/local/lib/duo2-telephony`, `/etc/systemd/user`, `/etc/duo2/callaudio.conf`, `/usr/local/share/dbus-1/services` | the audio side of a call (below, "Call audio"): callaudiod's D-Bus interface for Calls (earpiece / speaker by card profile, mute), holds the sound card's voice front ends open while a call is up, mirrors the call volume into the WSA gain (capped per output) and the mute into the DSP's uplink |
 | `81voltd/` (`build.sh`, `Dockerfile`, `patches/`) + `systemd/81voltd.service` | `/usr/local/sbin/81voltd`, `/etc/systemd/system` (NOT enabled) | the IMS Data service for VoLTE (QRTR service 770): our build of 81voltd 1.2.0 with six patches; below, "VoLTE" |
-| `duo2-volte`, `duo2-imsa`, `volte-trial-install.sh` | `/usr/local/sbin` (by `volte-trial-install.sh`, not in the image yet) | the VoLTE trial: `status` / `start` / `watch` / `undo`, and a read-only IMSA probe (IMS registration) |
+| `duo2-volte`, `duo2-imsa` | `/usr/local/sbin` (put there by hand for the trial, not in the image yet) | the VoLTE trial: `status` / `start` / `watch` / `undo`, and a read-only IMSA probe (IMS registration) |
 | `debug/imsd-logger` | (not installed) | debug only: serves QRTR service 770 with no-op answers and logs the modem's requests |
 | `tests/test_bearers.py` | (not installed) | duo2-wwan and other programs' bearers (IMS), with a stand-in ModemManager |
 | `session-start` + `systemd/user/*` | `/usr/local/lib/duo2-telephony`, `/etc/systemd/user` | Calls (`--daemon`) and Chatty (`--gapplication-service`) in the background once duo-wc's session is up |
@@ -303,7 +303,8 @@ and over QRTR a client is its process's socket, so qmicli cannot bind in one
 run and query in the next; duo2-imsa binds (the client's own state) and asks
 on one socket. Exit 0 = registered.
 
-**The trial** (`sudo duo2-volte ...` after `telephony/volte-trial-install.sh`):
+**The trial** (`sudo duo2-volte ...`, with 81voltd, duo2-volte and duo2-imsa on the phone and the
+current duo2-wwan):
 
 ```sh
 sudo duo2-volte status        # read-only, no identifiers

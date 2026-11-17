@@ -20,8 +20,8 @@
 #
 # Image components (no argument: all of these): duo-wc duo-shell duo-apps
 # duo-settings duo-screencast battery power telephony plymouth android maint
-# hotspot firewall homecrypt devmode sensors. Package-only components (named
-# explicitly): touch nibfair.
+# hotspot firewall homecrypt devmode sensors stock. Package-only components
+# (named explicitly): touch nibfair.
 set -euo pipefail
 R=$(cd "$(dirname "$0")/../.." && pwd)
 O=$R/out
@@ -30,7 +30,7 @@ mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)
 shift
 IMAGE_COMPONENTS="duo-wc duo-shell duo-apps duo-settings duo-screencast battery power telephony plymouth
-android maint hotspot firewall homecrypt devmode sensors"
+android maint hotspot firewall homecrypt devmode sensors stock"
 # shellcheck disable=SC2086  # the list is split into words on purpose
 [ $# -gt 0 ] || set -- $IMAGE_COMPONENTS
 mkdir -p "$OUT"
@@ -106,7 +106,9 @@ for c in "$@"; do
         V=$R/rootfs/overlay
         mkdir -p "$d/tools" "$d/files"
         cp -a "$R/touch/install-files.sh" "$d/"
-        cp -a "$R"/touch/tools/*.py "$R/touch/tools/pen-drop-capture.sh" "$d/tools/"
+        for f in "$R"/touch/tools/*.py "$R"/touch/tools/*.sh; do
+            [ ! -e "$f" ] || cp -a "$f" "$d/tools/"
+        done
         (cd "$V" && cp -a --parents etc/systemd/system/duo2-touchd.service usr/lib/udev/rules.d/90-duo2-touch.rules \
             usr/lib/systemd/system-sleep/duo2-touchd usr/local/sbin/duo2-touch-calibration \
             etc/duo2/touch-calibration etc/duo2/touch-mode etc/duo2/pen.conf \
@@ -114,9 +116,18 @@ for c in "$@"; do
             "$d/files/")
         if [ -x "$O/touchd/duo2-touchd" ]; then
             cp -a "$O/touchd/duo2-touchd" "$d/duo2-touchd"
+            # the liblog shim the runtime loads beside it (the same build)
+            [ ! -f "$O/touchd/liblog-stderr.so" ] || cp -a "$O/touchd/liblog-stderr.so" "$d/liblog-stderr.so"
         else
             echo "stage-components: no out/touchd/duo2-touchd (touch/build-touchd.sh): touch staged without the daemon" >&2
         fi
+        ;;
+    stock)
+        # duo2-stock-import and the host recipes it runs on the phone
+        tree "$R/stock" "$d"
+        mkdir -p "$d/scripts"
+        cp -a "$R/scripts/collect-firmware.sh" "$R/scripts/mdt2mbn.py" "$R/scripts/camx-sensor-tables.py" \
+            "$R/scripts/camx-module-dump.py" "$R/scripts/axml2xml.py" "$d/scripts/"
         ;;
     nibfair)
         need "$R/apps/nibfair/out/nibfair" apps/nibfair/build-aarch64.sh

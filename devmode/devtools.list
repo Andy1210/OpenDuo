@@ -2,14 +2,13 @@
 # debugging programs, installed only while Developer mode is on. One
 # installed path per line; duo-devmode keeps their copies in
 # /usr/local/lib/openduo-devtools (root's) and installs or removes them when
-# the switch changes and at every boot (duo-devmode-sync.service).
+# the switch changes and at every boot (duo-devmode-sync.service). Lists
+# beside this one (devtools-*.list) are appended to it when it is installed
+# (devmode/install-files.sh).
 #
-# Sleep: one timed suspend with the SoC's sleep counters
-/usr/local/sbin/duo2-sleeptest
 # Audio bring-up: a test tone on the speakers
 /usr/local/sbin/duo2-tone
-# WiFi bring-up: the factory MAC with a way back; joining a network by hand
-/usr/local/sbin/duo2-wifi-mac-trial
+# WiFi: joining a network by hand
 /usr/local/sbin/duo2-wifi-join
 # VoLTE bring-up: the IMS data service's logger (telephony/debug/imsd-logger)
 /usr/local/sbin/duo2-imsd-logger

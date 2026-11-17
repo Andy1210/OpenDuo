@@ -104,29 +104,6 @@ modified for duo2-os; how it works and the history: docs/hardware/touch.md.
   the side button, the pen device), and counts the
   fingers that reach it while the pen is near (the palm check); every event
   is printed on stdout too.
-- `tools/pen-drop-capture.sh` (root, by hand, never armed): why the pen drops
-  its Bluetooth link near the screen. `pen-bt-trace.py capture` (btmon and the
-  digitizer's AutoBond reports, every address a role) plus the journal of
-  duo-wc, the kernel, bluetoothd, seatd, duo2-pend and duo2-touchd, and the
-  pen's HID descriptor and input devices at its first link, into
-  `/run/duo2-penbt` (0700; the btsnoop holds link keys: delete it after). A
-  second argument adds `pen-bt-trace.py`'s raw scan, which switches Bluetooth
-  off for that long: only with the owner's go.
-- `tools/pen-hover-timing.py` (root, by hand, read-only): how evenly the pen's
-  reports reach the system while it hovers and writes (intervals, gaps, motion
-  statistics per report, no positions stored) and whether the pen's Bluetooth
-  link coming and going lines up with gaps; `--start-on-pen` waits for the
-  pen's first hover, so another capture can start on the same cue. Two kinds
-  of interval: between new positions (what moves the cursor) and between any
-  frames (what libinput's 50 ms proximity timer sees); and libinput's own
-  proximity events, from `libinput debug-events` on each pen device (a fresh
-  context, as after a boot: only its proximity lines are kept), against the
-  device's (`--no-libinput` leaves that out).
-- `tools/pen-ab-check.py` (root, by hand, read-only): whether the stock HAL's
-  rule turns the pen id of AutoBond's 0x6e into the pen's Bluetooth identity
-  address (SHA-1 over a 16-byte constant of the stock HAL and the id; the
-  constant comes from the phone's own stock image and stays root's). Prints
-  only yes / no.
 - `tools/pen-fw.py`: the Slim Pen 2's firmware over Bluetooth (Microsoft's
   CFU on the pen's own BLE HID): `find`, `version` (read-only, compared with
   a firmware folder), `update` (a dry run; `--go` updates, only with the

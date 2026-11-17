@@ -21,8 +21,12 @@
 #   ALLOW_DIRTY=1       build from uncommitted changes (the version says .dirty)
 set -euo pipefail
 R=$(cd "$(dirname "$0")/.." && pwd)
-# shellcheck source=/dev/null
-[ -f "$R/local.env" ] && . "$R/local.env"
+# OPENDUO_RELEASE=1 (scripts/build-release.sh): only the environment counts
+# (local.env may point the keyring at a test repository on the LAN).
+if [ "${OPENDUO_RELEASE:-}" != 1 ] && [ -f "$R/local.env" ]; then
+    # shellcheck source=/dev/null
+    . "$R/local.env"
+fi
 O=$R/out/packages
 KOUT=${KOUT:-out/linux}
 KSRC=${KSRC:-src/linux}

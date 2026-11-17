@@ -143,7 +143,7 @@ start() {
     has_ims_profile || die "the active carrier config ($cfg) has no 'ims' data profile"
     call_busy && die "a call is in progress: not now"
     grep -q 'def own_apn' /usr/local/sbin/duo2-wwan ||
-        die "duo2-wwan without the IMS bearer fix: install it first (telephony/volte-trial-install.sh)"
+        die "duo2-wwan without the IMS bearer fix: install the current one first (telephony/install.sh)"
     [ -x /usr/local/sbin/81voltd ] || die "no /usr/local/sbin/81voltd: install it first"
     systemctl is-active -q duo2-wwan || die "duo2-wwan is not running"
     local since mtime

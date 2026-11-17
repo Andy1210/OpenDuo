@@ -8,9 +8,12 @@
 # /duo2/initrd-boot.img. The rescue entry's /duo2/initrd.img is never
 # written by the scripts: renew it by hand, only with one that has booted
 # as duo2.conf's (docs/hardware/boot.md).
+#
+# KOUT=DIR: the kernel build whose gen_init_cpio is used (default out/linux).
 set -euo pipefail
 R=$(cd "$(dirname "$0")/.." && pwd)
 O=$R/out
+KOUT=$(cd "${KOUT:-$O/linux}" && pwd)
 
 echo "== rescue initramfs"
 # busybox is not committed: fetch Debian's static arm64 build once.
@@ -35,6 +38,6 @@ dir /var 755 0 0
 file /bin/busybox /work/rescue/busybox 755 0 0
 file /init /work/rescue/init 755 0 0
 EOF
-docker run --rm -u "$(id -u):$(id -g)" -v "$R":/work duo2-build bash -c \
-    "/work/out/linux/usr/gen_init_cpio /work/out/initramfs.list | gzip -9 > /work/out/initrd.img"
+docker run --rm -u "$(id -u):$(id -g)" -v "$R":/work -v "$KOUT":/kout:ro duo2-build bash -c \
+    "/kout/usr/gen_init_cpio /work/out/initramfs.list | gzip -9 > /work/out/initrd.img"
 ls -la "$O/initrd.img"

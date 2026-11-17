@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         openssh-server sudo less nano ca-certificates locales \
         qrtr-tools tqftpserv rmtfs hexagonrpcd iio-sensor-proxy \
         libprotobuf-c1 polkitd python3 \
-        evtest usbutils pciutils e2fsprogs dosfstools parted libinput-tools \
+        evtest usbutils pciutils e2fsprogs dosfstools mtools parted libinput-tools \
         systemd-boot-efi systemd-boot-tools \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 # Sensors: hexagonrpcd is Debian's, but the phone runs our patched build and
@@ -167,12 +167,33 @@ COPY firmware/ /lib/firmware/
 # scripts/lib/defaults.sh).
 ARG DUO2_USER
 ARG DEVELOPER_MODE=off
+# components: the components' installers (a developer's image); packages:
+# OpenDuo's own packages (scripts/build-release.sh), so dpkg owns their files
+# and updates work from the first boot. The packages run the same installers.
+ARG INSTALL_FROM=components
 COPY authorized_keys /tmp/authorized_keys
 # duo2-os's own components (staged by scripts/build-images.sh): duo-wc,
 # duo-shell, the app integration (duo-apps), the free half of the sensor
-# stack, duo-posed, duo-brightness.
+# stack, duo-posed, duo-brightness. Empty when installing from the packages.
 COPY components/ /tmp/components/
 COPY install-components.sh /tmp/install-components.sh
+# INSTALL_FROM=packages: the packages (debs/, the kernel's included) and the
+# ESP's hand-managed entries (esp-entries/: the kernel package's postinst
+# takes duo2.conf's options for its own entry, which lands under /boot/efi
+# and goes into the ESP image, scripts/filter-export.py --esp). That entry
+# is blessed here: it boots the same kernel as duo2.conf. The import of the
+# phone's own firmware (duo2-stock-import.service) is enabled by its package.
+# The machine id: empty here, made at the first start; D-Bus's copy
+# (/var/lib/dbus/machine-id, which dbus-uuidgen filled during the build) is a
+# link to it, or every phone would share the build's id.
+# WiFi: wpa_supplicant@wlan0 runs from the first start, with the overlay's
+# configuration (no network yet; Settings > WiFi saves the ones the user
+# joins into it, root's file, 0600). /usr/lib/clock-epoch: systemd starts the
+# clock no earlier than this file's time, so a new phone's first start (no RTC
+# date, no network yet) is at the build's date instead of systemd's own,
+# months older (file systems "in the future", certificates not yet valid).
+COPY debs/ /tmp/debs/
+COPY esp-entries/ /tmp/esp-entries/
 RUN test -n "$DUO2_USER" \
     && for g in video input render plugdev netdev; do getent group $g >/dev/null || groupadd -r $g; done \
     && useradd -m -s /bin/bash -G video,render,plugdev,netdev,audio,feedbackd "$DUO2_USER" \
@@ -187,9 +208,24 @@ RUN test -n "$DUO2_USER" \
     && chmod 0440 /etc/sudoers.d/duo2admin && visudo -cq \
     && rm /tmp/authorized_keys \
     && locale-gen \
-    && DEVELOPER_MODE="$DEVELOPER_MODE" bash /tmp/install-components.sh /tmp/components "$DUO2_USER" \
-    && rm -rf /tmp/components /tmp/install-components.sh \
+    && if [ "$INSTALL_FROM" = packages ]; then \
+           install -d -m 0755 /etc/duo2 && printf '%s\n' "$DUO2_USER" >/etc/duo2/gui-user \
+           && install -d -m 0700 /boot/efi/loader/entries \
+           && cp /tmp/esp-entries/duo2.conf /tmp/esp-entries/rescue.conf /boot/efi/loader/entries/ \
+           && apt-get update \
+           && DUO2_USER="$DUO2_USER" apt-get install -y --no-install-recommends /tmp/debs/*.deb \
+           && apt-get clean && rm -rf /var/lib/apt/lists/* \
+           && ls /boot/efi/loader/entries/openduo-*+*.conf >/dev/null \
+           && for e in /boot/efi/loader/entries/openduo-*+*.conf; do mv "$e" "${e%%+*}.conf"; done \
+           && rm /boot/efi/loader/entries/duo2.conf /boot/efi/loader/entries/rescue.conf; \
+       else \
+           DEVELOPER_MODE="$DEVELOPER_MODE" bash /tmp/install-components.sh /tmp/components "$DUO2_USER"; \
+       fi \
+    && rm -rf /tmp/components /tmp/install-components.sh /tmp/debs /tmp/esp-entries \
     && systemctl disable wpa_supplicant.service \
+    && chown root:root /etc/wpa_supplicant/wpa_supplicant-wlan0.conf \
+    && chmod 0600 /etc/wpa_supplicant/wpa_supplicant-wlan0.conf \
+    && systemctl enable wpa_supplicant@wlan0.service \
     && systemctl enable duo2-growfs-once.service \
     && systemctl enable systemd-networkd systemd-resolved systemd-timesyncd \
         duo2-usb-gadget serial-getty@ttyGS0 duo2-factory-addr duo-firewall \
@@ -206,7 +242,13 @@ RUN test -n "$DUO2_USER" \
     && mkdir -p /etc/systemd/system/ssh.service.d \
     && printf '[Unit]\nAfter=duo2-ssh-hostkeys.service\nWants=duo2-ssh-hostkeys.service\n' > /etc/systemd/system/ssh.service.d/hostkeys.conf \
     && systemctl enable duo2-ssh-hostkeys \
-    && : > /etc/machine-id
-COPY duo2-release /etc/duo2-release
+    && : > /etc/machine-id \
+    && rm -f /var/lib/dbus/machine-id && ln -s /etc/machine-id /var/lib/dbus/machine-id \
+    && touch /usr/lib/clock-epoch
+# From the packages, openduo-release writes both (the same stamp).
+COPY duo2-release /tmp/duo2-release
 COPY install-os-release.sh /tmp/install-os-release.sh
-RUN sh /tmp/install-os-release.sh && rm /tmp/install-os-release.sh
+RUN if ! dpkg-query -W -f='${Status}' openduo-release 2>/dev/null | grep -q 'install ok installed'; then \
+        install -m 0644 /tmp/duo2-release /etc/duo2-release && sh /tmp/install-os-release.sh; \
+    fi \
+    && rm /tmp/duo2-release /tmp/install-os-release.sh

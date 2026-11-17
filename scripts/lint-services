@@ -1,6 +1,7 @@
 #!/bin/bash
 # Lint the system services and their tools (touch, power, telephony, hotspot,
-# sensors, android, maint, battery, camera, video, devmode, firewall, homecrypt, rootfs):
+# sensors, android, maint, battery, camera, video, devmode, firewall, homecrypt, rootfs,
+# stock):
 # Python with ruff (each component's ruff.toml), shell with shellcheck, C/C++
 # with clang-format (touch/.clang-format). Extensionless scripts are found by
 # their #! line, so they are checked too.
@@ -18,7 +19,7 @@ fix=0
 [ "${1:-}" = --fix ] && { fix=1; shift; }
 comps=("$@")
 [ ${#comps[@]} -gt 0 ] || comps=(touch power telephony hotspot sensors android maint battery
-    camera video devmode firewall homecrypt rootfs)
+    camera video devmode firewall homecrypt rootfs stock)
 tool() { if [ -n "${LINT_BIN:-}" ] && [ -x "$LINT_BIN/$1" ]; then echo "$LINT_BIN/$1"; else command -v "$1"; fi; }
 RUFF=$(tool ruff) || { echo "lint-services: no ruff (pip install ruff)" >&2; exit 2; }
 SHELLCHECK=$(tool shellcheck) || { echo "lint-services: no shellcheck (pip install shellcheck-py)" >&2; exit 2; }

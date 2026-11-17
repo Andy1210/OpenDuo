@@ -36,7 +36,14 @@ rm -rf "$L.old"
 mv "$L.new" "$L"
 rm -rf "$L.old"
 install -m 0755 duo-devmode /usr/local/sbin/duo-devmode
-install -m 0644 devtools.list "$L/devtools.list"
+# devtools.list and the lists beside it (devtools-*.list), as one
+{
+    cat devtools.list
+    for f in devtools-*.list; do
+        [ ! -f "$f" ] || cat "$f"
+    done
+} >"$L/devtools.list"
+chmod 0644 "$L/devtools.list"
 install -m 0644 duo-devmode-sync.service /etc/systemd/system/duo-devmode-sync.service
 systemctl enable duo-devmode-sync.service >/dev/null 2>&1 ||
     { install -d /etc/systemd/system/multi-user.target.wants &&

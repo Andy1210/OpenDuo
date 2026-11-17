@@ -1,21 +1,24 @@
 # Installing OpenDuo on a Surface Duo 2
 
-This guide takes a Surface Duo 2 from stock Android to OpenDuo. Read it to
-the end, and read [RESTORE.md](RESTORE.md) as well, before you start.
+This guide takes a Surface Duo 2 from stock Android to OpenDuo with one
+script on a computer, `scripts/install-openduo.sh`. Read it to the end, and
+read [RESTORE.md](RESTORE.md) as well, before you start.
 
 > **Warning.**
-> - Unlocking the bootloader **erases everything on the phone**.
-> - Step 5 **deletes Android's user data partition**. Android can be put
->   back ([RESTORE.md](RESTORE.md)), but only with the backups of step 4.
+> - Unlocking the bootloader (step 2) **erases everything on the phone**.
+> - The install **replaces Android's user data partition**. Android can be
+>   put back ([RESTORE.md](RESTORE.md)) with the backup the script makes.
 > - Some partitions hold data that exists **only on your phone** (IMEI and
 >   modem calibration, sensor calibration, the touch panels' alignment, the
->   factory WiFi and Bluetooth addresses). Without the step 4 backup, a
->   mistake there cannot be undone by anyone.
-> - OpenDuo is a development preview. This guide was written from the
->   maintainer's own install; the full sequence has **not yet been repeated
->   end to end on a fresh phone**. Steps that are not scripted yet are
->   marked **TODO**. If anything looks different from what is described
->   here, stop and ask (open an issue) before you go on.
+>   factory WiFi and Bluetooth addresses). The script saves them before it
+>   writes anything and never writes them; keep that backup in two places.
+> - OpenDuo is a development preview. The whole way described here was tried
+>   once, on the maintainer's phone (November 2026): from stock Android, the
+>   script on a Linux computer (x86-64, Google's platform-tools: adb 1.0.41,
+>   fastboot 37), the first start with the firmware import, and back to
+>   Android ([RESTORE.md](RESTORE.md)). Other computers and other Android
+>   releases are untested. If anything looks different from what is
+>   described here, stop and ask (open an issue) before you go on.
 
 The Surface Duo 2 only. The original Surface Duo (SM8150) is a different
 phone and is not supported.
@@ -24,133 +27,119 @@ phone and is not supported.
 
 **The phone**
 
-- A Surface Duo 2 on stock Android, updated to the last Microsoft release
-  (2023.501.541; the scripts' defaults and this guide use that version, and
-  other versions are untested).
+- A Surface Duo 2 on stock Android, updated to Microsoft's last release,
+  **2023.501.541** (Settings > System > System updates). Other releases
+  should work but are untested.
+- **Android started at least once after its last update.** An update is
+  finished only at the next start of Android, and OpenDuo reads its firmware
+  from the partitions that update wrote.
 - Charged above 60 %, and a USB-C data cable.
 
-**A computer** (the "host"): Linux on x86_64. OpenDuo is developed on an
-Ubuntu 24.04 host; other distributions should work with the same tools.
+**A computer**: Linux on x86_64 (developed on Ubuntu 24.04), with:
 
-- `git`, `python3`, `adb` and `fastboot` (Debian/Ubuntu: `adb fastboot`,
-  or Google's platform-tools), `unzip`, `curl`.
-- Docker, and arm64 emulation for it (the root file system is built as
-  arm64 under QEMU): for example `sudo apt install qemu-user-static
-  binfmt-support`, or `docker run --privileged --rm tonistiigi/binfmt
-  --install arm64`.
-- About 60 GB of free disk space (the kernel tree and build, the unpacked
-  stock firmware, the images and several Docker images) and a few hours for
-  the first build.
+- `adb` and `fastboot`: Google's platform-tools
+  (developer.android.com/tools/releases/platform-tools) or the `adb` and
+  `fastboot` packages of your distribution;
+- `curl`, `python3`, `xz` and `sha256sum` (most systems have them);
+- about 10 GB of free disk space;
+- on Linux, USB access to the phone for your user (below, "USB permissions
+  on Linux": one helper script, run once with `sudo`).
 
-**Downloads**
-
-| What | Where | Used in |
-|---|---|---|
-| Microsoft's recovery image for your phone (a full OTA package, `ota_c1-12-customer_2023.501.541.zip` for the version above) | Microsoft's Surface recovery image page (support.microsoft.com, "Download a recovery image for your Surface"; it asks for the serial number) | steps 2, 10, and [RESTORE.md](RESTORE.md) |
-| WOA Project's UEFI for the Surface Duo 2, release 2611.01, the "Secure Boot Disabled, Fast Boot" package | the WOA Project ([github.com/WOA-Project](https://github.com/WOA-Project), [mu_andromeda_platforms](https://github.com/WOA-Project/mu_andromeda_platforms) releases) | steps 8, 9 |
-| WOA Project's headless recovery for the Surface Duo 2 (`surfaceduo2-headless.img`), its `parted`, and its file-system tools (`surfaceduo2-twrp-fssupport.tar`, only for repairs) | the WOA Project's Surface Duo 2 installation guide ([SurfaceDuo-Guides](https://github.com/WOA-Project/SurfaceDuo-Guides)) | steps 4, 5, 7 |
-| Linux v7.3.4 source | kernel.org (stable tree) | step 6 |
-| Android NDK r27c (to build the touch daemon) | developer.android.com/ndk | step 10 |
-
-**TODO:** confirm the exact download pages of the WOA files (the headless
-recovery, `parted` and the fssupport tarball) in the end-to-end test.
-
-The files OpenDuo was developed with have these SHA-256 sums:
+**OpenDuo's release files**, from the repository's Releases page, in one
+directory:
 
 ```
-bd2f8bf24369ee3b48d46a4edca247081151712adfcc5f2b2e4d03bd6aabe14f  Surface.Duo.2.UEFI-v2611.01.Secure.Boot.Disabled.Fast.Boot.zip
-2be81b91abc40691b8829f6b870c6b1d8a668c6b23a4ff1fe22e7c9afe93e353  uefi_nosb.img (inside that zip)
-d38809648d423b9700e1f2db7d810a9f406b2d0c08f47b9e9461617a5c317bef  surfaceduo2-headless.img
-14fcc974bb9c87d26174a9bbe15659cf07d3a63eb5f950aaf1158257244f7b43  parted
-70bd9878108aad0cea20e11cfecc6148725a9683dd86e2755ad73128f8bdb46e  surfaceduo2-twrp-fssupport.tar
+openduo-VERSION-surface-duo2-rootfs.img.xz   the root file system
+openduo-VERSION-surface-duo2-esp.img.xz      the boot partition (systemd-boot, the kernel)
+SHA256SUMS
+install-openduo.sh                           (or scripts/install-openduo.sh in a clone)
+udev-rules.sh                                USB access on Linux (or scripts/udev-rules.sh)
 ```
 
-Put them where the repository's scripts look by default (all of these
-directories are ignored by git; nothing in them may ever be committed):
+Check them before you use them: `sha256sum -c --ignore-missing SHA256SUMS`
+in that directory.
 
-```
-firmware/ota-2023.501.541/        the OTA's payload.bin (step 2 unpacks it into img/)
-firmware/uefi/2611.01/            the UEFI zip
-firmware/woa-tools/               surfaceduo2-headless.img, parted, surfaceduo2-twrp-fssupport.tar
-firmware/partitions/              your phone's partition backups (step 4)
-```
+You can also build them yourself (`scripts/build-release.sh`,
+[CONTRIBUTING.md](../CONTRIBUTING.md)).
+
+No Microsoft or Qualcomm file is in them, and you do not download one: at its
+first start OpenDuo reads the firmware, the touch library and the sensor
+calibration from your phone's own stock partitions, which stay on the phone
+([stock/README.md](../stock/README.md)). The script downloads the
+[WOA Project](https://github.com/WOA-Project)'s UEFI (release 2611.01, which
+boots OpenDuo) and its recovery tools from pinned addresses and checks them
+by sha256; OpenDuo does not redistribute them.
 
 ## Two things to know first
 
 **Fastboot with the buttons.** Hold **Power for about 20 seconds**, until the
 phone vibrates; let go; then hold **only Volume Down**. The phone shows the
-bootloader and `fastboot devices` lists it (USB id `045e:0c2f`). Never press
-both volume keys together while it starts: that enters the Qualcomm
-emergency download mode (`05c6:9008`); if it happens, hold Power and Volume
-Down for about 30 seconds.
+bootloader and `fastboot devices` lists it. Never press both volume keys
+together while it starts: that enters the Qualcomm emergency download mode
+(USB id `05c6:9008`); if it happens, hold Power and Volume Down for about 30
+seconds.
 
-**`fastboot flash` wedges this bootloader.** After any `fastboot flash`
-finishes, the Surface Duo 2's bootloader stops answering (`getvar` and
-`reboot` hang), although the write itself completed. Force it back into
-fastboot with the buttons (above) after every flash. That is why this guide
-writes partitions with `dd` from the WOA recovery instead. `fastboot boot`
-(start an image from RAM, write nothing) is not affected.
+**No `fastboot flash`.** After any `fastboot flash` the Surface Duo 2's
+bootloader stops answering until you force it back into fastboot with the
+buttons. The script never uses it: it writes from the WOA recovery, which it
+starts from RAM with `fastboot boot` (that writes nothing).
 
-## 1. Back up your data (stock Android)
+## USB permissions on Linux
 
-Turn on Developer options (in Settings, under About, tap "Build number"
-seven times) and, in Developer options, **USB debugging**; connect the phone
-and accept the computer's key on the phone.
+On Linux, adb and fastboot may only open a USB device that a udev rule gives
+your user. The phone shows up as two USB vendors during the install:
+
+| Mode | USB vendor | Seen as |
+|---|---|---|
+| the bootloader (fastboot) | `045e` (Microsoft) | `fastboot getvar product`: `surfaceduo2` |
+| the WOA recovery the script starts | `18d1` (Google) | `adb devices -l`: product `twrp_I006D`, the same serial as in fastboot |
+
+Without a rule, `adb devices` or `fastboot devices` says **"no
+permissions"**, and the script stops and names this fix. Run the helper
+from the release once:
 
 ```sh
-git clone https://github.com/Andy1210/OpenDuo.git
-cd OpenDuo
-adb devices                                   # note the phone's serial
+sudo sh udev-rules.sh
+```
+
+It writes `/etc/udev/rules.d/51-surface-duo.rules`, reloads udev and
+re-applies the rules to the USB devices (`sudo sh udev-rules.sh --remove`
+takes them away again). The two lines it writes, if you prefer to do it by
+hand (`GROUP="plugdev"` only where that group exists):
+
+```
+SUBSYSTEM=="usb", ATTR{idVendor}=="045e", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="18d1", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+```
+
+followed by `sudo udevadm control --reload` and `sudo udevadm trigger`.
+
+Then **unplug the phone and plug it in again**. An adb server that was
+already running may keep seeing the phone without permission: unplug and plug
+in once more, or run `adb kill-server` when no other phone is in use (it
+stops adb for every device on this computer). With other phones that must
+stay connected, a second adb server on another port leaves the first alone:
+a two-line wrapper (`#!/bin/sh` and `exec adb -P 5038 "$@"`) given to the
+script as `ADB=/path/to/wrapper`.
+
+## 1. Save your data (stock Android)
+
+Turn on Developer options (Settings > About, tap "Build number" seven times)
+and, in Developer options, **USB debugging**. Connect the phone and accept
+the computer's key on the phone. Then, in a clone of the repository:
+
+```sh
+adb devices -l                       # the phone: model:Surface_Duo_2
 ADB_SERIAL=<serial> scripts/backup-userdata.sh /path/to/backup/dir
 ```
 
-`scripts/backup-userdata.sh` only reads from the phone. It copies the shared
-storage (photos, downloads, documents...), the contacts, SMS and call log as
-text, and the lists of installed apps, then compares file counts and sizes
-(`VERIFY.txt`). It cannot copy app data that Android keeps private (no root):
-use the apps' own backups for those. Run it again to continue an interrupted
-backup.
+`scripts/backup-userdata.sh` only reads from the phone: the shared storage
+(photos, downloads, documents...), the contacts, SMS and call log as text,
+and the list of installed apps, checked by file counts and sizes
+(`VERIFY.txt`). App data Android keeps private cannot be copied without
+root: use the apps' own backups for those.
 
-Optional: `scripts/probe-android.sh` records the phone's hardware facts
-(read only, no root) into `dumps/`, which is useful when something differs
-from this guide. `dumps/` holds identifiers: never commit or post it.
-
-## 2. Unpack the stock firmware (host)
-
-OpenDuo needs files from Microsoft's stock images: DSP, modem, WiFi,
-Bluetooth, GPU and video firmware, the touch library and the sensor
-configuration. They may not be redistributed, so you take them from the
-recovery image of your own phone.
-
-```sh
-mkdir -p firmware/ota-2023.501.541
-unzip -d firmware/ota-2023.501.541 /path/to/ota_c1-12-customer_2023.501.541.zip payload.bin
-python3 -I scripts/payload-extract.py firmware/ota-2023.501.541/payload.bin \
-    firmware/ota-2023.501.541/img
-```
-
-`payload-extract.py` writes one `.img` per partition and checks each against
-the SHA-256 in the package (every line must say `ok`).
-
-Then take the firmware out of three of those images into `firmware/stock/`
-and assemble the tree OpenDuo installs into `/lib/firmware`.
-**TODO: the first part is not a script yet.** These commands (mtools and
-e2fsprogs on the host) reproduce, byte for byte, the tree the maintainer's
-phone runs:
-
-```sh
-I=firmware/ota-2023.501.541/img
-mkdir -p firmware/stock/modem firmware/stock/bt firmware/stock/vendor
-MTOOLS_SKIP_CHECK=1 mcopy -s -n -i $I/modem.img ::image firmware/stock/modem/
-MTOOLS_SKIP_CHECK=1 mcopy -s -n -i $I/bluetooth.img ::image firmware/stock/bt/
-debugfs -R "rdump /firmware firmware/stock/vendor" $I/vendor.img
-scripts/collect-firmware.sh              # firmware/stock -> firmware/linux
-```
-
-`collect-firmware.sh` ends with `firmware tree: .../firmware/linux (269
-files, ...)`.
-
-## 3. Unlock the bootloader (erases the phone)
+## 2. Unlock the bootloader (erases the phone)
 
 1. In Developer options, turn on **OEM unlocking**.
 2. Unlock:
@@ -158,319 +147,215 @@ files, ...)`.
    ```sh
    adb reboot bootloader
    fastboot devices                  # the phone is listed
-   fastboot flashing unlock          # confirm on the phone with the volume keys and Power
+   fastboot flashing unlock          # confirm on the phone (volume keys, then Power)
    fastboot getvar unlocked          # "unlocked: yes"
    ```
 
-The phone erases itself and starts Android as new. You do not need to set
-it up again for the next step.
+The phone erases itself and starts Android as new. Go through Android's setup
+only as far as Developer options and USB debugging again, or leave the phone
+in fastboot: the script starts from either.
 
-## 4. Back up the phone's own partitions
+## 3. Run the installer
 
-Start the WOA headless recovery **from RAM** (it writes nothing by itself)
-and get a root shell over adb:
-
-```sh
-fastboot boot firmware/woa-tools/surfaceduo2-headless.img
-adb devices                          # the phone is listed as "recovery"
-adb push firmware/woa-tools/parted /tmp/parted
-adb shell chmod 755 /tmp/parted
-```
-
-**Save the partition tables** of every storage unit (you need the numbers
-in [RESTORE.md](RESTORE.md)):
+First look, change nothing: `--dry-run` runs only `adb devices` and
+`fastboot devices` and prints every command it would run.
 
 ```sh
-B=firmware/partitions
-mkdir -p $B
-for d in sda sdb sdc sdd sde sdf; do
-    adb shell "/tmp/parted -s /dev/block/$d unit B print" > $B/parted-$d.txt
-done
+scripts/install-openduo.sh --backup ~/duo2-backup --images /path/to/release --dry-run
 ```
 
-**Save the partitions.** These hold data unique to your phone and must be
-saved: `persist` (sensor calibration and more), `modemst1`, `modemst2`,
-`fsg`, `fsc` (the modem's file system: IMEI and radio calibration), `sfpd`
-(the touch panels' alignment, the factory WiFi and Bluetooth addresses),
-`devinfo`, `misc`. Save `boot_a` and `boot_b` too: step 9 overwrites them.
-The maintainer saved every partition except `userdata` and `super` (69 of
-them). **TODO: this is not a script yet**; the loop below does the same:
+Then install:
 
 ```sh
-B=firmware/partitions
-for p in $(adb shell ls /dev/block/by-name/ | tr -d '\r'); do
-    case $p in userdata|super) continue ;; esac
-    adb exec-out "dd if=/dev/block/by-name/$p bs=4194304 2>/dev/null" > "$B/$p.img"
-    phone=$(adb shell "sha256sum /dev/block/by-name/$p" | cut -c1-64)
-    host=$(sha256sum "$B/$p.img" | cut -c1-64)
-    [ "$phone" = "$host" ] && echo "ok   $p" || echo "DIFFERENT $p"
-done
-(cd $B && sha256sum *.img > SHA256SUMS)
+scripts/install-openduo.sh --backup ~/duo2-backup --images /path/to/release
 ```
 
-Every line must say `ok`. Then copy `firmware/partitions/` to at least one
-more place that is not the phone and not this computer's only disk. Treat it
-like a password: it holds your phone's identifiers. Never commit, share or
-post it.
+`--backup` is where your phone's partitions are saved (it is created; pick a
+directory you keep). With the phone in Android (USB debugging on) or in
+fastboot, the script:
 
-Keep the recovery running for the next step.
+1. checks this computer, the release files and the WOA files (it downloads
+   these once, into `~/.cache/openduo/woa`);
+2. finds the Surface Duo 2 and checks that its bootloader is unlocked; it
+   addresses only that phone, so other phones on the same computer are left
+   alone;
+3. starts the WOA recovery from RAM;
+4. **backs up**, read only, every partition table and every partition except
+   `userdata` and `super` (about 4 GB, a few minutes), each copy checked
+   against the phone's own sha256: `persist`, `modemst1`, `modemst2`, `fsg`,
+   `fsc`, `sfpd`, `boot_a`, `boot_b` and the rest;
+5. shows its plan and asks you to **type `yes`**. Then it replaces
+   `userdata` on the first storage unit by `esp` (1 GiB, FAT32) and `linux`
+   (the rest), writes the two images there and the UEFI into `boot_a` and
+   `boot_b`, and reads each one back;
+6. restarts the phone.
 
-## 5. Partition: replace `userdata` with `esp` and `linux`
+It numbers these steps as it goes (`[4/6]`), says how long each one usually
+takes and how long it took, and shows how far the big copies are (percent,
+speed, time left). Measured on the maintainer's computer and phone:
+**about 4 minutes in all**, most of it the backup (about 2.3 GB) and writing
+the 5 GiB root image; the first run takes a little longer (the downloads,
+unpacking the images). Ctrl-C stops it at any point; before the typed `yes`
+nothing has been written.
 
-This deletes Android's user data partition (already empty after the unlock)
-and puts two partitions in its place on the first storage unit (`sda`):
+**Copy the backup directory to a second place** (not the phone, not only this
+computer). It holds your phone's identifiers: never share or upload it.
 
-| Name | File system | Size | Holds |
-|---|---|---|---|
-| `esp` | FAT32 (with 4096-byte sectors), ESP flag | 1 GiB | systemd-boot, kernels, device trees, initramfs |
-| `linux` | ext4 | the rest | OpenDuo's root file system |
+If the script stops, it says why, and nothing after that point has
+happened. Running it again resumes: saved partitions are checked and kept,
+and an earlier backup is never replaced. On a phone that has OpenDuo already,
+`--reinstall` writes the images into the existing `esp` and `linux` (which
+erases OpenDuo and everything stored in it).
 
-The names matter (OpenDuo mounts `PARTLABEL=esp` and `PARTLABEL=linux`) and
-must not contain spaces: the bootloader fails on partition names with
-spaces. Android's other partitions (`super`, `vendor_boot`, `boot_a/b`,
-`modem`, `dsp`...) are not touched.
+Other options: `--serial SERIAL` when the script cannot tell which phone,
+`--woa DIR` for the WOA files (without a network, put them there yourself:
+the script names each file and its sha256), `ADB=` and `FASTBOOT=` for other
+tools. `--help` lists everything.
 
-**TODO: the exact commands below are reconstructed from the maintainer's
-notes and must be confirmed in the end-to-end test.** Check every number
-against your own `parted-sda.txt` before you type it.
+## 4. The first start
 
-```sh
-adb shell /tmp/parted -s /dev/block/sda unit MiB print
-```
+Measured on the maintainer's phone:
 
-Find the `userdata` partition (number 8 on the maintainer's phone) and note
-its number, Start and End. With `N`, `START` and `END` from that line (in
-MiB):
+1. The panels keep the UEFI's picture for a while, then the OpenDuo splash
+   shows: **about 25 s** after the restart.
+2. The first start grows the root file system to its partition, and
+   `duo2-stock-import` copies the firmware, the touch runtime, the sensor
+   configuration and calibration, the camera tables and the power profile
+   from the phone's own stock partitions (it only reads them). The splash
+   says "Setting up with your own firmware", then "Done, restarting":
+   **about 20 s**.
+3. **The phone restarts by itself once**, and the home screen comes up
+   **about 20 s** later, with touch, WiFi, Bluetooth, the modem and the
+   sensors working.
 
-```sh
-adb shell /tmp/parted -s /dev/block/sda rm N
-adb shell /tmp/parted -s /dev/block/sda mkpart esp fat32 STARTMiB $((START + 1024))MiB
-adb shell /tmp/parted -s /dev/block/sda mkpart linux ext4 $((START + 1024))MiB ENDMiB
-adb shell /tmp/parted -s /dev/block/sda set N esp on
-adb shell /tmp/parted -s /dev/block/sda unit MiB print
-```
+**Touch does not work before that restart.** Whatever shows before it, wait
+for the home screen. Do not force a restart while the splash shows "Setting
+up": an interrupted import starts again at the next start.
 
-The new list must show `esp` (1024 MiB) and `linux` where `userdata` was,
-and nothing else changed. Check that the recovery sees them:
-`adb shell ls -l /dev/block/by-name/esp /dev/block/by-name/linux`.
+**The clock.** Linux cannot read a date from this phone's clock chip until
+it has once been set from the network, so the first start begins at the date
+the image was built. The phone sets its clock from the network (NTP) a few
+seconds after WiFi connects, and keeps it from then on. An update check in
+those first seconds can fail (the repository's files look "not valid yet");
+it is simply tried again (Settings > Updates, or the next daily check).
 
-## 6. Build OpenDuo (host)
+Then, in Settings:
 
-There is no prebuilt image: an image holds your phone's firmware (step 2)
-and your SSH key, so it is personal and must never be shared.
+- **WiFi** (Settings > WiFi).
+- **A lock screen PIN** (Settings > Lock screen). Until you set one, the
+  lock screen is a swipe. The user is `duo`: no password, no administrator
+  rights; nothing logs in over the network, and SSH is off (developer mode,
+  below).
+- **The time zone** (Settings > Language and region).
 
-**One-time preparation**
-
-```sh
-docker build -t duo2-build build/          # the kernel and tools container
-
-# The kernel: Linux v7.3.4 with OpenDuo's patches, in src/ (ignored by git)
-git clone --depth 1 --branch v7.3.4 \
-    https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git src/linux
-git -C src/linux switch -c duo2
-git -C src/linux am "$PWD"/kernel/patches/*.patch
-
-# Your key for SSH (step 8 onwards): ~/.ssh/id_ed25519.pub is used by default
-[ -f ~/.ssh/id_ed25519.pub ] || ssh-keygen -t ed25519
-
-cp local.env.example local.env             # never committed
-```
-
-In `local.env`, set:
-
-```sh
-DUO2_HOST=duo2admin@10.15.19.1             # the phone on the USB cable
-DUO2_DEVELOPER_MODE=on                     # SSH and the USB network on from the first boot
-```
-
-Developer mode is needed for the first install: until the touch runtime is
-installed (step 10), the touch screen does not work, so the phone can only
-be reached over SSH. You can switch it off in Settings afterwards.
-
-**Build**
-
-```sh
-scripts/build-kernel.sh                    # out/linux: Image, device trees, modules
-scripts/build-images.sh                    # out/images/esp.img, linux.img (+ sparse .simg)
-```
-
-`build-images.sh` also builds the compositor, the sensor services, the eSIM
-tool and the camera packages the first time (some of it arm64 under QEMU:
-expect an hour or more). `AUTHORIZED_KEYS=/path/key.pub` picks another
-public key; `DUO2_USER=name` another name for the phone's user (default
-`duo`).
-
-**TODO:** the image recipe was last compared file by file with a running
-phone on 2026-11-07; the phone has been updated component by component
-since. A fresh image has to be built, flashed and checked against this guide
-in the end-to-end test.
-
-## 7. Write the images
-
-Still in the WOA recovery (if it is gone: fastboot with the buttons, then
-`fastboot boot firmware/woa-tools/surfaceduo2-headless.img` again):
-
-```sh
-for p in esp linux; do
-    adb exec-in "dd of=/dev/block/by-name/$p bs=4194304" < out/images/$p.img
-    size=$(stat -c %s out/images/$p.img)
-    phone=$(adb shell "head -c $size /dev/block/by-name/$p | sha256sum" | cut -c1-64)
-    host=$(sha256sum out/images/$p.img | cut -c1-64)
-    [ "$phone" = "$host" ] && echo "ok   $p" || echo "DIFFERENT $p"
-done
-```
-
-Both must say `ok`. (The root image is 3 GiB; it grows to fill the `linux`
-partition by itself on the first boot.)
-
-The alternative is `fastboot flash esp out/images/esp.simg` and `fastboot
-flash linux out/images/linux.simg`, with a forced return to fastboot after
-each flash (see "Two things to know first").
-
-## 8. First boot, from RAM
-
-Go back to fastboot (`adb reboot bootloader` from the recovery, or the
-buttons), unpack `uefi_nosb.img` from the UEFI zip, and start it **from RAM**:
-
-```sh
-fastboot boot uefi_nosb.img
-```
-
-The UEFI starts systemd-boot from the `esp` partition, which starts OpenDuo
-(its menu shows for one second; the first entry is the system, the second a
-rescue shell over USB, used when the system does not come up). The first boot takes longer: the root file system
-grows to the whole partition, and SSH host keys are made. The panels keep
-the UEFI's picture until the OpenDuo splash and then the home screen appear.
-**Touch does not work yet** (step 10).
-
-Connect over USB: the phone is `10.15.19.1` and gives the computer an
-address on the cable.
-
-```sh
-ssh duo2admin@10.15.19.1
-```
-
-`duo2admin` is the administrator (SSH keys only, sudo); the phone's user
-(`duo`) has no password and no sudo. Nothing has been written to the boot
-partitions yet: if this boot fails, hold Power to switch the phone off, go to
-fastboot with the buttons and try again. (A normal start now tries to boot
-Android, which cannot work any more without its data partition: that is
-expected, and step 9 replaces it.)
-
-## 9. Make OpenDuo start by itself
-
-So far the UEFI only runs when the computer sends it. To make every start
-boot OpenDuo, write the UEFI into **both** boot slots. This replaces
-Android's boot images (your copies are in `firmware/partitions/boot_a.img`
-and `boot_b.img`).
-
-**TODO: confirm these commands in the end-to-end test** (the maintainer
-wrote the slots from OpenDuo with `dd` and read them back):
-
-```sh
-scp uefi_nosb.img duo2admin@10.15.19.1:/tmp/
-ssh duo2admin@10.15.19.1 'set -e
-    for s in a b; do
-        sudo dd if=/tmp/uefi_nosb.img of=/dev/disk/by-partlabel/boot_$s bs=4M conv=fsync
-        size=$(stat -c %s /tmp/uefi_nosb.img)
-        sudo head -c $size /dev/disk/by-partlabel/boot_$s | sha256sum
-    done
-    sha256sum /tmp/uefi_nosb.img'
-```
-
-All three sums must be the same. From now on, every start of the phone
-boots OpenDuo; fastboot with the buttons stays available for emergencies.
-
-Only a cold restart works on this UEFI (a "warm" reboot halts), and OpenDuo
-is set up for that. A kernel that fails is caught by the boot entry's
-counting (`scripts/duo2-try` in [CONTRIBUTING.md](../CONTRIBUTING.md)) and by
-the rescue entry.
-
-## 10. Install the parts that come from your phone
-
-These are built on the host from your stock images and sent to the phone
-over SSH. They are never in an image or in git. The scripts find the phone
-through `local.env` (step 6).
-
-```sh
-# WiFi (the passphrase is read from stdin; give both names of a dual-band router)
-echo 'your-passphrase' | ssh duo2admin@10.15.19.1 sudo duo2-wifi-join MyNetwork5G MyNetwork
-
-# Touch and pen: Microsoft's heat-map library with its Android runtime, and the daemon
-NDK=/path/to/android-ndk-r27c scripts/build-touch-runtime.sh
-scripts/install-touch-runtime.sh
-
-# Sensors and postures: the sensor DSP's configuration and your phone's calibration
-# (read from firmware/partitions/persist.img, saved in step 4)
-scripts/build-sensors-runtime.sh
-scripts/install-sensors.sh
-
-# Cameras: the sensors' register tables
-scripts/build-camera-tables.sh --install
-
-# Optional: Microsoft's power figures for the battery usage page
-scripts/build-power-profile.sh && scripts/install-power-profile.sh
-
-# Your time zone
-ssh duo2admin@10.15.19.1 sudo timedatectl set-timezone Region/City
-```
-
-The factory WiFi and Bluetooth addresses are read from the phone's `sfpd`
-partition by themselves on the first boot (Bluetooth at once, WiFi from the
-second boot); `scripts/install-factory-addr.sh` does it by hand.
-
-After the touch runtime is installed, touch and the pen work at once.
-
-**Android apps** (optional): once, as the administrator, with WiFi up:
-`sudo waydroid init -s GAPPS` (with Google Play) or `-s VANILLA` (without),
-about 1.4 GB. Then open "Waydroid" or any Android app from the app grid
+Updates come from Settings > Updates (OpenDuo's signed repository and
+Debian's): [UPDATES.md](UPDATES.md). Android apps (optional, about 1.4 GB
+over WiFi) need the administrator once: with developer mode on and SSH set
+up (below), `sudo waydroid init -s GAPPS` (with Google Play) or
+`-s VANILLA` (without); then open any Android app from the app grid
 ([android/](../android/)).
 
-**TODO:** the scripts in this step were run on the maintainer's phone one
-by one as they were written, not as one sequence on a fresh install; the
-end-to-end test confirms the order and the flags.
-
-## 11. Developer mode
+## 5. Developer mode
 
 Settings > Developer is for people who help develop OpenDuo
-([devmode/README.md](../devmode/README.md)): SSH (keys only, as `duo2admin`,
-on WiFi and USB only; the firewall keeps every other network out), the USB
-network, the list of keys that may log in, the developer tools, and the bug
-report.
-
-- The image of step 6 had developer mode on. When you do not need SSH any
-  more, switch **Developer mode** off: SSH and the USB network go off with
-  it.
-- To use it later: Settings > Developer > Developer mode on, then SSH on
-  (the shell asks you to confirm), add your computer's public key (paste it
-  or pick the `.pub` file), and connect with `ssh duo2admin@ADDRESS`, the
-  address shown on the page, or `10.15.19.1` on a cable with USB networking
-  on.
-- **Collect a bug report** writes a report with identifiers masked into
-  Downloads, for an issue.
+([devmode/README.md](../devmode/README.md)): SSH (keys only, as the
+administrator `duo2admin`, on WiFi and USB only; the firewall keeps every
+other network out), the USB network, the keys that may log in, the developer
+tools, and the bug report. All of it is off on a new install.
 
 ## If something goes wrong
 
-- **A boot from RAM** (`fastboot boot`) writes nothing: a long press on
-  Power ends it.
-- **OpenDuo does not come up** after step 9: the systemd-boot menu's second
-  entry is a rescue shell over USB (a serial console and the USB network).
-  **TODO:** describe how to pick it with the buttons (the menu shows for one
-  second, and Volume Down at the wrong moment goes to fastboot instead).
-  Or go to fastboot with the buttons, start the WOA recovery from RAM, and
-  repair the root file system from there (the recovery's own `e2fsck` is too
-  old for OpenDuo's ext4 features: use a current static `e2fsck`).
+- **The script stopped.** Its last line names the step and what to do.
+  Before the typed `yes` nothing was written to the phone, and a boot from
+  RAM ends with a long press on Power.
+- **"no permissions"** (Linux): the udev rules are missing, or the adb
+  server has not seen them yet: "USB permissions on Linux" above. Run the
+  script again afterwards: it goes on where it stopped (a phone left in the
+  WOA recovery stays there across the replug).
+- **No home screen after the first start, or touch does not work.** The
+  import probably failed (its log: `/var/log/duo2-stock-import.log`). The
+  usual cause is an Android update that was never finished: put Android back
+  ([RESTORE.md](RESTORE.md)), start it once, and install again. Open an issue
+  with what you saw.
+- **OpenDuo does not start at all.** The systemd-boot menu (one second at
+  every start) has a second entry, a rescue shell over USB (a serial console
+  and the USB network). A kernel from an update that fails is replaced by the
+  previous one by itself ([UPDATES.md](UPDATES.md)).
 - **Back to Android:** [RESTORE.md](RESTORE.md).
-- Open an issue with what you did, what you saw, and (if you can reach the
-  phone) the bug report.
+- Open an issue with what you did, what you saw, the script's output (it
+  shows serial numbers masked) and, if you can reach the phone, the bug
+  report (Settings > Developer > Collect a bug report).
 
-## What is not scripted yet (TODO summary)
+## By hand (what the script does)
 
-1. Extracting `firmware/stock/` from the OTA images (step 2): commands, no script.
-2. Backing up the partitions (step 4): a loop, no script.
-3. The partitioning commands (step 5): to be confirmed.
-4. The image recipe: last compared with a running phone on 2026-11-07 (step 6).
-5. Writing the UEFI into the boot slots (step 9): to be confirmed.
-6. The post-install sequence (step 10): to be run once on a fresh install.
-7. The download locations of the WOA files.
-8. Picking the rescue entry with the buttons.
+For a computer the script does not run on, or to see each step: the
+commands are the script's own, `-s SERIAL` left out. Check every number
+against your phone's output before you type it.
+
+```sh
+W=~/.cache/openduo/woa B=~/duo2-backup
+fastboot boot $W/surfaceduo2-headless.img                  # in fastboot; then:
+adb push $W/parted /tmp/parted && adb shell chmod 755 /tmp/parted
+
+# the backup: the partition tables, then every partition but userdata and super
+# (the recovery lists the whole disks, sda..., by name too: not those)
+for d in sda sdb sdc sdd sde sdf sdg; do
+    adb shell "/tmp/parted -s /dev/block/$d unit B print" > $B/parted-$d.txt
+    adb shell "/tmp/parted -m -s /dev/block/$d unit s print" > $B/parted-$d.m.txt
+done
+adb exec-out "dd if=/dev/block/sda bs=4096 count=6 2>/dev/null" > $B/gpt-sda-head.bin
+for p in $(adb shell ls /dev/block/by-name/ | tr -d '\r'); do
+    case $p in userdata|super|esp|linux|sd[a-z]|mmcblk*) continue ;; esac
+    adb exec-out "dd if=/dev/block/by-name/$p bs=4194304 2>/dev/null" > $B/$p.img
+    [ "$(adb shell "sha256sum /dev/block/by-name/$p" | cut -c1-64)" = "$(sha256sum $B/$p.img | cut -c1-64)" ] &&
+        echo "ok $p" || echo "DIFFERENT $p"
+done
+
+# the partitions: N, START and END from userdata's line in
+#   adb shell /tmp/parted -m -s /dev/block/sda unit s print
+# (4096-byte sectors: 1 GiB is 262144 of them)
+P="/tmp/parted -s -a none /dev/block/sda"
+adb shell "$P rm N"
+adb shell "$P mkpart esp fat32 STARTs $((START + 262143))s"
+adb shell "$P mkpart linux ext4 $((START + 262144))s ENDs"
+adb shell "/tmp/parted -m -s /dev/block/sda unit s print"   # esp's number E, linux's L
+adb shell "/tmp/parted -s /dev/block/sda set E esp on"
+
+# the images (xz -dk unpacks them), each read back afterwards: compare
+# every sha256 with sha256sum of the file on the computer
+adb exec-in "dd of=/dev/block/sdaE bs=4194304" < openduo-VERSION-surface-duo2-esp.img
+adb exec-in "dd of=/dev/block/sdaL bs=4194304" < openduo-VERSION-surface-duo2-rootfs.img
+adb shell "head -c $(stat -c %s openduo-VERSION-surface-duo2-esp.img) /dev/block/sdaE | sha256sum"
+adb shell "head -c $(stat -c %s openduo-VERSION-surface-duo2-rootfs.img) /dev/block/sdaL | sha256sum"
+# the UEFI (15 MB, not a whole number of 4 MiB blocks: exec-in can lose the
+# last, short block) through a copy on the phone
+adb push $W/uefi_nosb.img /tmp/uefi.img
+for s in a b; do
+    adb shell "dd if=/tmp/uefi.img of=/dev/block/by-name/boot_$s bs=4194304 && sync"
+    adb shell "head -c $(stat -c %s $W/uefi_nosb.img) /dev/block/by-name/boot_$s | sha256sum"
+done
+adb reboot
+```
+
+`uefi_nosb.img` is in the UEFI zip. On a Mac or under Windows the same
+commands work with the platform-tools there (`shasum -a 256` instead of
+`sha256sum` on a Mac); not tested.
+
+## If the firmware import fails for good
+
+`duo2-stock-import` needs the stock partitions as Android left them. When
+they are damaged or incomplete, put Android back with Microsoft's recovery
+image ([RESTORE.md](RESTORE.md), step 5: the sideload rewrites every stock
+partition), start Android once, and install again.
+
+For developers, the older way still works: an image that carries the
+firmware, built on the computer from Microsoft's recovery image
+(`scripts/payload-extract.py`, `scripts/collect-firmware.sh`,
+`scripts/build-images.sh`; such an image is personal and must never be
+shared). The same import also runs on the computer, from the unpacked
+recovery image and the saved `persist`:
+
+```sh
+python3 -I stock/duo2-stock-import --images firmware/ota-2023.501.541/img \
+    --persist ~/duo2-backup/persist.img --root /tmp/stock-out --touchd out/touchd
+```

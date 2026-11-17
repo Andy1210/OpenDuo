@@ -1,9 +1,12 @@
 [Unit]
-Description=Grow the root file system to its partition (first boot only)
-# The image's /etc/machine-id is empty, so only its very first boot counts.
+Description=Grow the root file system to its partition (once)
+# Once, by a marker file, not ConditionFirstBoot: the release image's
+# /etc/machine-id is empty (no first-boot presets, which would enable every
+# unit without a preset line), and an empty machine-id does not count as a
+# first boot, so a ConditionFirstBoot unit never ran there.
 # Not x-systemd.growfs in fstab: that resizes on every boot, and after a hard
 # reset the online resize hung the whole boot.
-ConditionFirstBoot=yes
+ConditionPathExists=!/var/lib/duo2/growfs-done
 DefaultDependencies=no
 After=systemd-remount-fs.service
 Before=local-fs.target
@@ -11,6 +14,8 @@ Before=local-fs.target
 [Service]
 Type=oneshot
 ExecStart=/usr/lib/systemd/systemd-growfs /
+ExecStartPost=/usr/bin/mkdir -p /var/lib/duo2
+ExecStartPost=/usr/bin/touch /var/lib/duo2/growfs-done
 
 [Install]
 WantedBy=local-fs.target

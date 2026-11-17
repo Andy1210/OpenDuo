@@ -15,8 +15,10 @@
 #   touch-mode and pen.conf only if the phone has none (they may hold this
 #   unit's own refined numbers and choices).
 #   duo2-touchd (built from touch/ with the NDK, touch/build-touchd.sh), when
-#   staged: kept as /usr/local/lib/duo2-touch/duo2-touchd and put into the
-#   runtime, /opt/duo2-touch, when the phone has one.
+#   staged: kept as /usr/local/lib/duo2-touch/duo2-touchd (with the liblog
+#   shim, liblog-stderr.so, from the same build) and put into the runtime,
+#   /opt/duo2-touch, when the phone has one; duo2-stock-import (stock/)
+#   builds the runtime from these two and the phone's own stock images.
 #
 # The runtime itself (Microsoft's heat processor and the stock libraries it
 # needs) is never installed here: it may not be redistributed, every owner
@@ -26,7 +28,9 @@ set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 cd "$here/files"
 install -d /usr/local/lib/duo2-touch-tools
-install -m 0755 ../tools/*.py ../tools/pen-drop-capture.sh /usr/local/lib/duo2-touch-tools/
+for f in ../tools/*.py ../tools/*.sh; do
+    [ ! -e "$f" ] || install -m 0755 "$f" /usr/local/lib/duo2-touch-tools/
+done
 install -m 0644 etc/systemd/system/duo2-touchd.service /etc/systemd/system/
 install -D -m 0644 usr/lib/udev/rules.d/90-duo2-touch.rules /usr/lib/udev/rules.d/90-duo2-touch.rules
 # the hook does nothing until the daemon writes its state file
@@ -43,6 +47,8 @@ install -m 0755 usr/local/sbin/duo2-pend /usr/local/sbin/
 install -m 0644 etc/systemd/system/duo2-pend.service /etc/systemd/system/
 if [ -f ../duo2-touchd ]; then
     install -D -m 0755 ../duo2-touchd /usr/local/lib/duo2-touch/duo2-touchd
+    # the liblog shim beside it: duo2-stock-import builds the runtime from both
+    [ ! -f ../liblog-stderr.so ] || install -m 0644 ../liblog-stderr.so /usr/local/lib/duo2-touch/liblog-stderr.so
     if [ -d /opt/duo2-touch ] && ! cmp -s ../duo2-touchd /opt/duo2-touch/duo2-touchd; then
         install -m 0755 -o root -g root ../duo2-touchd /opt/duo2-touch/duo2-touchd.new
         mv -f /opt/duo2-touch/duo2-touchd.new /opt/duo2-touch/duo2-touchd

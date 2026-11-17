@@ -12,6 +12,7 @@
 set -u
 
 R=$(cd "$(dirname "$0")/.." && pwd)
+# shellcheck source=/dev/null # local.env is the machine's own, never committed
 [ -f "$R/local.env" ] && . "$R/local.env"
 
 ADB=${ADB:-$(command -v adb || echo "$HOME/android-sdk/platform-tools/adb")}

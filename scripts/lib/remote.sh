@@ -27,6 +27,7 @@
 # as well: starting an app on the panels).
 
 R=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+# shellcheck source=/dev/null # local.env is the machine's own, never committed
 [ -f "$R/local.env" ] && . "$R/local.env"
 : "${DUO2_HOST:?set DUO2_HOST in $R/local.env (admin-user@address of the phone)}"
 DUO2_SSH_OPTS=${DUO2_SSH_OPTS:-}

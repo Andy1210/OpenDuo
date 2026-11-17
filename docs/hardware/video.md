@@ -52,21 +52,15 @@ Gen1 driver.
   `video/install.sh --launcher` installs it, no argument removes it. Measured
   on 1080p60 on battery: with the launcher H.264 on the video core and
   138-142 % of one core in total, against 334-347 % for AV1 in software.
-- `video/fetch-rpi-builds.sh` downloads the Raspberry Pi archive's Chromium
-  and FFmpeg builds for the development machine, verifying the signed
-  `InRelease`, the `Packages` hash and every `.deb`'s hash. Installing them
-  is the owner's decision (`scripts/duo2-video-test install-rpi`,
-  `/opt` only, Debian packages untouched). They do not get Debian's
-  security updates automatically.
+- The Raspberry Pi archive's Chromium and FFmpeg builds (V4L2 decoding) were
+  tried as an experiment; `duo2-youtube` uses them when they are in `/opt`.
+  OpenDuo does not install them, and they would not get Debian's security
+  updates.
 
 ## Test tools
 
-`scripts/duo2-video-test` (on the development machine: `webclips` makes the
-test clips, `push` copies pages, clips and tools to the phone; `browser NAME
-[PAGE] [SECONDS]` runs a measured browser session) and
-`video/browser-video-measure` (on the phone, as root: starts the browser as
-the GUI user and reports CPU per process type, battery power, the video
-core's runtime state and clock, and the page's rendered/decoded/dropped
-frames). The test pages are `video/web/mse.html` (YouTube-like MSE playback,
-including mid-stream 720p/1080p switches) and `video/web/codecs.html` (what
-the browser claims for H.264, VP9, AV1 and HEVC).
+`scripts/duo2-video-test` (on the development machine): `clips` makes the
+test clips and copies them to the phone, `check` compares hardware and
+software decoding frame by frame and plays the clips in mpv and GStreamer in
+real time, `celluloid CLIP` measures a clip in Celluloid. The browser
+measurements above were made with tools kept in the development repository.

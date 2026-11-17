@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""duo2-stock-import: the files OpenDuo may not ship, from this phone's own
+stock partitions (read only): firmware, the touch runtime, the sensor DSP's
+configuration and calibration, the camera tables, the power profile.
+
+    duo2-stock-import               import (the active slot, else the other one)
+    duo2-stock-import --check       read only: which slot, do its images match
+                                    the tested stock release (nothing written)
+    duo2-stock-import --slot a|b    this slot only
+    duo2-stock-import --first-boot  what duo2-stock-import.service runs: the
+                                    import, then a restart (the drivers and
+                                    services load the files at boot)
+    duo2-stock-import --images DIR --persist FILE --root DIR
+                                    from an unpacked OTA package (DIR holds
+                                    modem.img bluetooth.img dsp.img vendor.img
+                                    system.img system_ext.img) and a saved
+                                    persist partition, into another root: the
+                                    manual way (docs/INSTALL.md) and the tests
+
+Writes /usr/lib/firmware (merged), /opt/duo2-touch, /opt/duo2-power-profile,
+/usr/share/qcom/sm8350/Microsoft/surfaceduo2 and /var/lib/duo2-stock/imported.
+Needs root (the partitions), debugfs (e2fsprogs) and mcopy (mtools).
+"""
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+for _p in (HERE, "/usr/local/lib/duo2-stock"):
+    if os.path.exists(os.path.join(_p, "duo2stock.py")):
+        sys.path.insert(0, _p)
+        break
+
+import duo2stock as ds  # noqa: E402
+
+LOG = "/var/log/duo2-stock-import.log"
+
+
+def splash(text):
+    """A line on the boot splash, when Plymouth runs."""
+    if shutil.which("plymouth") and subprocess.run(["plymouth", "--ping"]).returncode == 0:
+        subprocess.run(["plymouth", "display-message", "--text=" + text])
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="duo2-stock-import", description=__doc__.split("\n\n")[0])
+    ap.add_argument("--check", action="store_true")
+    ap.add_argument("--slot", choices=["a", "b"])
+    ap.add_argument("--first-boot", action="store_true")
+    ap.add_argument("--images")
+    ap.add_argument("--persist")
+    ap.add_argument("--root", default="/")
+    ap.add_argument(
+        "--helpers",
+        default=HERE
+        if os.path.isdir(os.path.join(HERE, "scripts"))
+        else "/usr/local/lib/duo2-stock",
+    )
+    ap.add_argument(
+        "--touchd", default=None, help="the directory with duo2-touchd and liblog-stderr.so"
+    )
+    ap.add_argument("--keep-work", action="store_true")
+    a = ap.parse_args(argv)
+    root = os.path.abspath(a.root)
+    touchd = a.touchd or os.path.join(root, "usr/local/lib/duo2-touch")
+    if a.check:
+        print(json.dumps(ds.device_check(), indent=1, sort_keys=True))
+        return 0
+    for tool in ("debugfs", "mcopy"):
+        if not shutil.which(tool):
+            print("duo2-stock-import: no %s (e2fsprogs, mtools)" % tool, file=sys.stderr)
+            return 2
+
+    try:
+        if a.images:
+            if not a.persist:
+                ap.error("--images needs --persist (the saved persist partition)")
+            img = ds.Images.from_dir(a.images, a.persist)
+            ds.log(
+                "== images in %s: %s"
+                % (a.images, img.release() or "not the tested release %s" % ds.KNOWN_RELEASE)
+            )
+            st = os.path.join(root, ds.STATE)
+            os.makedirs(st, exist_ok=True)
+            state = ds.import_from(img, root, a.helpers, touchd, st, a.keep_work)
+        else:
+            if os.geteuid() != 0:
+                print("duo2-stock-import: run as root (it reads the partitions)", file=sys.stderr)
+                return 2
+            if a.first_boot:
+                splash("Setting up OpenDuo with this phone's own firmware...")
+            state = ds.device_import(root, a.helpers, touchd, a.slot, a.keep_work)
+    except ds.StockError as e:
+        ds.log("duo2-stock-import: FAILED: %s" % e)
+        if a.first_boot:
+            splash("OpenDuo could not read the stock firmware: see docs/INSTALL.md")
+        return 1
+    ds.log("== done: %s" % json.dumps(state, sort_keys=True))
+    for w in state["warnings"]:
+        ds.log("WARNING: %s" % w)
+    if a.first_boot:
+        splash("Done. Restarting...")
+        subprocess.run(["sync"])
+        subprocess.run(["systemctl", "reboot"])
+    elif root == "/":
+        ds.log("Restart the phone to load the new files.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

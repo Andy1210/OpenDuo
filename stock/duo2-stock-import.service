@@ -1,0 +1,26 @@
+[Unit]
+Description=Import this phone's own firmware from its stock partitions (first boot)
+Documentation=file:///usr/local/lib/duo2-stock/README.md
+# Once: the files are on the root afterwards (sudo duo2-stock-import runs it
+# again by hand). Without the marker (a failed import) it tries again at the
+# next start, and never restarts the phone in a loop: it restarts only after
+# a successful import, which writes the marker.
+ConditionPathExists=!/var/lib/duo2-stock/imported
+# The super partitions are copied to the root first: it must have grown to
+# its partition (duo2-growfs-once.service, before local-fs.target).
+After=local-fs.target systemd-udev-trigger.service systemd-machine-id-commit.service
+# Before what loads the files: the session waits behind the splash, and the
+# restart at the end cancels it.
+Before=duo-wc.service duo2-touchd.service hexagonrpcd.service duo-posed.service duo-brightness.service
+
+[Service]
+Type=oneshot
+# The partition links (/dev/disk/by-partlabel) come from udev's coldplug.
+ExecStartPre=/usr/bin/udevadm settle --timeout=60
+ExecStart=/usr/local/sbin/duo2-stock-import --first-boot
+StandardOutput=append:/var/log/duo2-stock-import.log
+StandardError=append:/var/log/duo2-stock-import.log
+TimeoutStartSec=5min
+
+[Install]
+WantedBy=multi-user.target

@@ -45,6 +45,10 @@
 #                                    report's masking, /etc/duo-devmode.conf (all off, or
 #                                    DEVELOPER_MODE=on), its sudoers rule, the developer
 #                                    tools' payload (installed only with Developer mode on)
+#   stock/install-files.sh           duo2-stock-import (the phone's own firmware, touch
+#                                    runtime, sensor configuration, camera tables and power
+#                                    profile, read from its stock partitions), its unit
+#                                    NOT enabled here (this image has firmware/linux)
 #   sensors/install-files.sh         the FREE half only (scripts/install-sensors.sh
 #                                    brings the stock half): hexagonrpcd (patched), libssc,
 #                                    iio-sensor-proxy 3.9 (out/duo2-sensors-bin), duo-posed,
@@ -113,6 +117,12 @@ sh homecrypt/install-files.sh
 
 echo "== sensors (the free half), duo-posed, duo-brightness"
 sh sensors/install-files.sh
+
+# The tool only: an image built here carries the firmware tree already
+# (firmware/linux), so its first-boot unit is not enabled. A published image
+# is built from the packages, where the stock package enables it.
+echo "== duo2-stock-import (the phone's own firmware from its stock partitions)"
+sh stock/install-files.sh
 
 # Last: it takes the developer tools the components above installed into its
 # payload, and leaves them installed only with Developer mode on.

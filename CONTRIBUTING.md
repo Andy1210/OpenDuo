@@ -82,7 +82,9 @@ Run the commands from the repository root unless the column says otherwise.
 | video, rootfs | none | none | `scripts/lint-services video rootfs` | `video/install.sh`; rootfs: the image |
 | scripts | none | `cd scripts && python3 -m unittest discover -s tests` | `scripts/lint-services scripts` | |
 | [kernel](kernel/patches/SERIES.md) | `scripts/build-kernel.sh` | none | `checkpatch.pl --strict` (below) | `scripts/duo2-try`, then `scripts/duo2-promote` |
-| the image | `scripts/build-images.sh` | `ROOTFS_ONLY=1 scripts/build-images.sh` + `scripts/rootfs-compare.sh` (compare with a phone) | | [docs/INSTALL.md](docs/INSTALL.md) |
+| stock | none (Python) | `cd stock && python3 -m unittest discover -s tests` | `scripts/lint-services stock` | the package `openduo-stock-surface-duo2` (runs once at the first start) |
+| the image | `scripts/build-images.sh` (a developer's image, with `firmware/linux`) | `ROOTFS_ONLY=1 scripts/build-images.sh` + `scripts/rootfs-compare.sh` (compare with a phone) | | [docs/INSTALL.md](docs/INSTALL.md), by hand |
+| the release image | `scripts/build-release.sh` (from the packages, no vendor files; checked by `scripts/lib/release-audit.py`) | `cd scripts && python3 -m unittest tests.test_install_openduo` (the installer against a pretend phone) | | `scripts/install-openduo.sh` ([docs/INSTALL.md](docs/INSTALL.md)) |
 
 `scripts/lint-services [--fix] COMPONENT...` runs ruff (format and check,
 with the component's `ruff.toml`), shellcheck and clang-format over every

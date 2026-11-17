@@ -214,7 +214,10 @@ HINTS = [
         "the shell and Settings start (bars, dock, quick menu)",
     ),
     (["chromium*", "firefox-esr*"], "the browsers start"),
-    (["libcamera*", "gstreamer1.0-libcamera"], "the cameras (scripts/duo2-camera-probe)"),
+    (
+        ["libcamera*", "gstreamer1.0-libcamera"],
+        "the cameras (cam -l lists them, Snapshot takes a photo)",
+    ),
 ]
 
 

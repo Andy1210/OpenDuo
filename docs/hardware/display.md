@@ -5,10 +5,10 @@
 Both panels work (DSI-1 and DSI-2, DSC command mode) at 90 Hz, which is the
 default. The panel driver's probe does not pull the
 reset line (see [boot.md](boot.md)). The GPU is the Adreno 660 (`freedreno`).
-`scripts/duo2-gpu-wake-test` stresses the GPU across display wake-ups: after a
-GMU out-of-band timeout (six `Timeout waiting for GMU OOB set GPU_SET`, a CP
-fault at iova 0) the GPU used to deadlock in recovery, and this test shows
-whether it recovers.
+After a GMU out-of-band timeout (six `Timeout waiting for GMU OOB set
+GPU_SET`, a CP fault at iova 0) the GPU used to deadlock in recovery; a
+stress test across display wake-ups (kept in the development repository)
+shows whether it recovers.
 
 ## External display over USB-C (DisplayPort alt mode)
 
@@ -35,8 +35,7 @@ output), but treat it as not fully tested on a real monitor.
   the lowest free pair, so with a panel off the DP took that panel's pair and
   the panel could not come back. The patch makes a topology that needs
   neither DSPP nor DSC pick from the DSPP-less mixers first. A second fix
-  handles the two panels handing a DPU CTL to each other (see
-  `compositor/duo-wc/tools/ctl-swap-repro.sh`).
+  handles the two panels handing a DPU CTL to each other.
 - **Module loading.** With DP enabled, msm binds (both panels!) only when
   `phy_qcom_qmp_combo`, `aux_bridge`, `pmic_glink(_altmode)` and
   `aux_hpd_bridge` are present. If a DP probe fails without deferring, msm

@@ -577,8 +577,13 @@ relative/path
                 "/usr/local/bin/duo2-pose-check",
             ],
         )
-        with open(os.path.join(TOP, "devtools.list")) as f:
-            shipped = f.read()
+        # what install-files.sh installs: devtools.list and the lists beside it
+        shipped = ""
+        for name in ["devtools.list"] + sorted(
+            n for n in os.listdir(TOP) if n.startswith("devtools-") and n.endswith(".list")
+        ):
+            with open(os.path.join(TOP, name)) as f:
+                shipped += f.read()
         paths = devtools.parse_list(shipped)
         listed = [
             line.split("#", 1)[0].strip()
@@ -586,7 +591,7 @@ relative/path
             if line.split("#", 1)[0].strip()
         ]
         self.assertEqual(paths, listed)  # every line of the shipped list is valid
-        self.assertIn("/usr/local/sbin/duo2-sleeptest", paths)
+        self.assertIn("/usr/local/sbin/duo2-tone", paths)
 
     def test_adopt_remove_install(self):
         self.put("/usr/local/sbin/duo2-tone", b"tone 1\n", 0o755)

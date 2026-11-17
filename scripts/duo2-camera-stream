@@ -1,6 +1,6 @@
 #!/bin/bash
 # Frames through CAMSS (docs/hardware/camera.md), run ON THE PHONE
-# as root on a try kernel with the camera modules loaded (duo2-camera-probe):
+# as root on a try kernel with the camera modules loaded:
 #
 #   sudo duo2-camera-stream tpg [TPG [PATTERN]]   TPG n -> csid0 -> vfe0_rdi0
 #                                                  PATTERN 1 default, 2 colour bars

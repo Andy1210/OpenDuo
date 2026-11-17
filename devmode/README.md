@@ -53,13 +53,13 @@ say: look through the report before you post it publicly. Over ssh:
 ## Developer tools
 
 Bring-up and debugging programs are not installed on a phone with developer
-mode off. `devtools.list` names them by where they are installed:
+mode off. `devtools.list` names them by where they are installed (lists
+beside it, `devtools-*.list`, are appended to it):
 
 | Tool | What it is for |
 |---|---|
-| `duo2-sleeptest` | one timed suspend with the SoC's sleep counters |
 | `duo2-tone` | a test tone on the speakers |
-| `duo2-wifi-mac-trial`, `duo2-wifi-join` | the factory WiFi address with a way back; joining a network by hand |
+| `duo2-wifi-join` | joining a network by hand |
 | `duo2-imsd-logger` | the VoLTE IMS data service's logger (`telephony/debug/imsd-logger`) |
 | `/usr/local/lib/duo-wc/tools/{touch,key,toplevels}.py` | synthetic touches and keys, the window list (they need the compositor's admin socket) |
 | `duo2-pose-check` | the pose detection checked in six positions |
