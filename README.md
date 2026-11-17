@@ -141,8 +141,7 @@ but has not been tried with real hardware. **No**: not available.
 
 Known limits: apps that need Google's Play Integrity (banking and the like)
 do not run in Waydroid, and there is no hardware video decoding inside
-Android. In Angelfish, a video that starts by itself (YouTube) starts muted,
-as browsers do without a tap: unmute it from the player.
+Android.
 
 ## Documentation
 
