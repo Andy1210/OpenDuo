@@ -1,0 +1,9 @@
+[Unit]
+Description=Fetch the Bing image of the day for the wallpaper (only while it is switched on in Duo Settings)
+Documentation=file:///usr/local/lib/duo-shell/duoshell/bing.py
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/duo-shell/duo-wallpaper-bing
+TimeoutStartSec=90
+Nice=10

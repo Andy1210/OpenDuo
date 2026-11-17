@@ -1,0 +1,10 @@
+[Unit]
+Description=duo2-os: save the RTC offset whenever timesyncd synchronized the clock
+
+[Path]
+# timesyncd touches it at every synchronization (it lives in /run: this boot only)
+PathChanged=/run/systemd/timesync/synchronized
+Unit=duo2-rtc-time-save.service
+
+[Install]
+WantedBy=paths.target

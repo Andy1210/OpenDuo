@@ -1,0 +1,248 @@
+From 7b0f6ab076f036497adabd801e23c13dc0bdc768 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 11:15:28 +0100
+Subject: [PATCH 123/137] net: qrtr: Wake the system on selected messages of a
+ wakeup-source remote
+
+A modem's GLINK interrupt is delivered in suspend-to-idle, but nothing
+in the path makes it a wakeup: the message is queued for its socket and
+the system sleeps on, so an incoming call or SMS reaches user space only
+at the next wakeup. Waking on every message is no answer either: a modem
+in LTE reports the signal about once a second.
+
+When the remote processor's GLINK edge has the wakeup-source property,
+the SMD transport registers its endpoint as a wakeup device (enabled by
+default, power/wakeup in sysfs), and the IPC router reports a hard
+wakeup event for:
+- indications from the remote's servers of the services listed in the
+  wake_services parameter (default 5 and 9: WMS and Voice, an incoming
+  SMS or call), and
+- requests from the remote's clients to local servers (remote file
+  system, TFTP), which the remote waits on (wake_requests, default on).
+Which service a remote port belongs to is taken from the remote's
+NEW_SERVER and DEL_SERVER announcements as they pass. Everything else
+(signal strength, serving cell, responses) is delivered as before
+without waking the system.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ net/qrtr/af_qrtr.c | 87 ++++++++++++++++++++++++++++++++++++++++++++++
+ net/qrtr/qrtr.h    |  4 +++
+ net/qrtr/smd.c     | 17 ++++++++-
+ 3 files changed, 107 insertions(+), 1 deletion(-)
+
+diff --git a/net/qrtr/af_qrtr.c b/net/qrtr/af_qrtr.c
+index e7b3647424b8..1f6f2089e9c6 100644
+--- a/net/qrtr/af_qrtr.c
++++ b/net/qrtr/af_qrtr.c
+@@ -4,8 +4,10 @@
+  * Copyright (c) 2013, The Linux Foundation. All rights reserved.
+  */
+ #include <linux/module.h>
++#include <linux/device.h>
+ #include <linux/netlink.h>
+ #include <linux/qrtr.h>
++#include <linux/soc/qcom/qmi.h>
+ #include <linux/termios.h>	/* For TIOCINQ/OUTQ */
+ #include <linux/spinlock.h>
+ #include <linux/wait.h>
+@@ -125,6 +127,8 @@ static DEFINE_XARRAY_ALLOC(qrtr_ports);
+  * @rx_queue: receive queue
+  * @item: list item for broadcast list
+  * @say_hello: delayed work for sending hello packet
++ * @servers: the remote's servers, service keyed by node << 32 | port (for
++ *	the wakeup decision of a wakeup-source endpoint)
+  */
+ struct qrtr_node {
+ 	struct mutex ep_lock;
+@@ -140,6 +144,8 @@ struct qrtr_node {
+ 	struct sk_buff_head rx_queue;
+ 	struct list_head item;
+ 	struct delayed_work say_hello;
++
++	struct xarray servers;
+ };
+ 
+ /**
+@@ -201,6 +207,7 @@ static void __qrtr_node_release(struct kref *kref)
+ 	xa_for_each(&node->qrtr_tx_flow, index, flow)
+ 		kfree(flow);
+ 	xa_destroy(&node->qrtr_tx_flow);
++	xa_destroy(&node->servers);
+ 	kfree(node);
+ }
+ 
+@@ -449,6 +456,82 @@ static void qrtr_node_assign(struct qrtr_node *node, unsigned int nid)
+  *
+  * Return: 0 on success; negative error code on failure
+  */
++static unsigned int qrtr_wake_services[16] = { 5, 9 };	/* WMS, Voice */
++static int qrtr_wake_services_n = 2;
++module_param_array_named(wake_services, qrtr_wake_services, uint,
++			 &qrtr_wake_services_n, 0644);
++MODULE_PARM_DESC(wake_services,
++		 "QMI services whose indications wake the system from a wakeup-source endpoint (default 5,9: WMS, Voice)");
++
++static bool qrtr_wake_requests = true;
++module_param_named(wake_requests, qrtr_wake_requests, bool, 0644);
++MODULE_PARM_DESC(wake_requests,
++		 "QMI requests from a wakeup-source endpoint to local servers wake the system");
++
++/*
++ * A wakeup-source endpoint (a modem's) delivers its messages in system
++ * suspend too, and most of them are not worth a wakeup: a modem in LTE
++ * reports the signal about once a second. Some are: an incoming call or
++ * SMS (Voice, WMS indications), and a request the remote waits for an
++ * answer to (remote file system, TFTP). Which service a remote port is
++ * comes from the remote's NEW_SERVER and DEL_SERVER announcements.
++ */
++static void qrtr_wakeup(struct qrtr_node *node, struct device *dev,
++			const struct qrtr_cb *cb, const void *data, size_t size)
++{
++	const struct qrtr_ctrl_pkt *pkt = data;
++	unsigned long flags, key;
++	unsigned int service;
++	void *entry;
++	int i;
++
++	switch (cb->type) {
++	case QRTR_TYPE_NEW_SERVER:
++	case QRTR_TYPE_DEL_SERVER:
++		if (size < sizeof(*pkt))
++			return;
++		key = (unsigned long)le32_to_cpu(pkt->server.node) << 32 |
++		      le32_to_cpu(pkt->server.port);
++		xa_lock_irqsave(&node->servers, flags);
++		if (cb->type == QRTR_TYPE_NEW_SERVER)
++			__xa_store(&node->servers, key,
++				   xa_mk_value(le32_to_cpu(pkt->server.service)),
++				   GFP_ATOMIC);
++		else
++			__xa_erase(&node->servers, key);
++		xa_unlock_irqrestore(&node->servers, flags);
++		return;
++	case QRTR_TYPE_DATA:
++		break;
++	default:
++		return;
++	}
++
++	if (!size || !device_may_wakeup(dev))
++		return;
++
++	/* a QMI message: its first byte is the message type */
++	entry = xa_load(&node->servers, (unsigned long)cb->src_node << 32 | cb->src_port);
++	switch (*(const u8 *)data) {
++	case QMI_REQUEST:
++		/* from one of the remote's clients to a local server */
++		if (qrtr_wake_requests && !entry)
++			pm_wakeup_dev_event(dev, 0, true);
++		return;
++	case QMI_INDICATION:
++		if (!entry)
++			return;
++		service = xa_to_value(entry);
++		for (i = 0; i < qrtr_wake_services_n; i++) {
++			if (qrtr_wake_services[i] == service) {
++				pm_wakeup_dev_event(dev, 0, true);
++				return;
++			}
++		}
++		return;
++	}
++}
++
+ int qrtr_endpoint_post(struct qrtr_endpoint *ep, const void *data, size_t len)
+ {
+ 	struct qrtr_node *node = ep->node;
+@@ -533,6 +616,9 @@ int qrtr_endpoint_post(struct qrtr_endpoint *ep, const void *data, size_t len)
+ 
+ 	qrtr_node_assign(node, cb->src_node);
+ 
++	if (ep->wakeup_dev)
++		qrtr_wakeup(node, ep->wakeup_dev, cb, skb->data, size);
++
+ 	if (cb->type == QRTR_TYPE_NEW_SERVER) {
+ 		/* Remote node endpoint can bridge other distant nodes */
+ 		const struct qrtr_ctrl_pkt *pkt;
+@@ -666,6 +752,7 @@ int qrtr_endpoint_register(struct qrtr_endpoint *ep, unsigned int nid)
+ 
+ 	xa_init(&node->qrtr_tx_flow);
+ 	mutex_init(&node->qrtr_tx_lock);
++	xa_init_flags(&node->servers, XA_FLAGS_LOCK_IRQ);
+ 
+ 	qrtr_node_assign(node, nid);
+ 
+diff --git a/net/qrtr/qrtr.h b/net/qrtr/qrtr.h
+index de2de69a6199..f72dd99c3f4a 100644
+--- a/net/qrtr/qrtr.h
++++ b/net/qrtr/qrtr.h
+@@ -4,6 +4,7 @@
+ 
+ #include <linux/types.h>
+ 
++struct device;
+ struct sk_buff;
+ 
+ /* endpoint node id auto assignment */
+@@ -12,6 +13,8 @@ struct sk_buff;
+ /**
+  * struct qrtr_endpoint - endpoint handle
+  * @xmit: Callback for outgoing packets
++ * @wakeup_dev: if set, selected messages from the remote (an incoming call)
++ *	are a wakeup event of this device; its power/wakeup setting decides
+  *
+  * The socket buffer passed to the xmit function becomes owned by the endpoint
+  * driver.  As such, when the driver is done with the buffer, it should
+@@ -19,6 +22,7 @@ struct sk_buff;
+  */
+ struct qrtr_endpoint {
+ 	int (*xmit)(struct qrtr_endpoint *ep, struct sk_buff *skb);
++	struct device *wakeup_dev;
+ 	/* private: not for endpoint use */
+ 	struct qrtr_node *node;
+ };
+diff --git a/net/qrtr/smd.c b/net/qrtr/smd.c
+index c91bf030fbc7..9b39912e2340 100644
+--- a/net/qrtr/smd.c
++++ b/net/qrtr/smd.c
+@@ -5,6 +5,8 @@
+  */
+ 
+ #include <linux/module.h>
++#include <linux/of.h>
++#include <linux/device.h>
+ #include <linux/skbuff.h>
+ #include <linux/rpmsg.h>
+ 
+@@ -69,9 +71,21 @@ static int qcom_smd_qrtr_probe(struct rpmsg_device *rpdev)
+ 	qdev->dev = &rpdev->dev;
+ 	qdev->ep.xmit = qcom_smd_qrtr_send;
+ 
++	/*
++	 * A remote processor whose messages may wake the system (a modem: an
++	 * incoming call): the IPC router picks the messages that do.
++	 */
++	if (rpdev->dev.parent &&
++	    of_property_read_bool(rpdev->dev.parent->of_node, "wakeup-source")) {
++		device_init_wakeup(&rpdev->dev, true);
++		qdev->ep.wakeup_dev = &rpdev->dev;
++	}
++
+ 	rc = qrtr_endpoint_register(&qdev->ep, QRTR_EP_NID_AUTO);
+-	if (rc)
++	if (rc) {
++		device_init_wakeup(&rpdev->dev, false);
+ 		return rc;
++	}
+ 
+ 	dev_set_drvdata(&rpdev->dev, qdev);
+ 
+@@ -85,6 +99,7 @@ static void qcom_smd_qrtr_remove(struct rpmsg_device *rpdev)
+ 	struct qrtr_smd_dev *qdev = dev_get_drvdata(&rpdev->dev);
+ 
+ 	qrtr_endpoint_unregister(&qdev->ep);
++	device_init_wakeup(&rpdev->dev, false);
+ 
+ 	dev_set_drvdata(&rpdev->dev, NULL);
+ }

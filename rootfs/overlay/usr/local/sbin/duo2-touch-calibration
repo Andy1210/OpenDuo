@@ -1,0 +1,12 @@
+#!/bin/sh
+# Copy this phone's two-panel alignment from the factory-data partition
+# (sfpd, FAT, read-only here) into duo2-touchd's state directory, where the
+# touch library looks for it (as Android's init.surface.touch.preloads.sh does).
+set -eu
+STATE=/var/lib/duo2-touchd
+install -d -m 700 "$STATE"
+[ -s "$STATE/TwoPanelAlignment.bin" ] && exit 0
+M=$(mktemp -d)
+trap 'umount "$M" 2>/dev/null; rmdir "$M"' EXIT
+mount -o ro /dev/disk/by-partlabel/sfpd "$M"
+install -m 600 "$M/display/PixelAlignmentData.bin" "$STATE/TwoPanelAlignment.bin"

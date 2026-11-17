@@ -1,0 +1,74 @@
+#!/bin/sh
+# Start the on-screen keyboard (the session runs this through `duoctl
+# exec-trusted --wayland`, so the keyboard gets the input method, the virtual
+# keyboard and the layer shell; it keeps it running).
+#
+#   osk            exec the keyboard
+#   osk --print    print the command, start nothing (tests, debugging)
+#
+# Which one:
+# - phosh-osk-stub (Debian's; Phosh's "Stevia"): word completion in a bar
+#   over the keys, long-press popups with the accented letters, the GNOME
+#   layouts (Hungarian QWERTZ with á é í ó ö ő ú ü ű under a, e, i, o, u),
+#   emoji, a terminal layout. It waits for three globals besides the input
+#   method (phoc's device state, wlr foreign toplevels, wlr data control:
+#   duo-wc's devicestate.rs / wlrtoplevel.rs), so it is started only when the
+#   compositor that started the session says it has them (DUO_WC_FEATURES
+#   has "phosh-osk"): an older duo-wc (duo-wc.last-good put back after a
+#   failed update) would leave it waiting, with no keyboard at all.
+# - squeekboard otherwise: the keyboard before it (no completion; the
+#   Hungarian accents on a page of their own).
+# ~/.config/duo2/osk picks one by hand: a first line "squeekboard" or
+# "phosh-osk-stub" (anything else, or no file: the automatic choice). Only
+# one runs: both own sm.puri.OSK0 on the session bus, which the bar's
+# keyboard button and the quick menu's tile talk to.
+#
+# phosh-osk-stub's settings are the image's schema override
+# (shell/duo-shell/90_duo2-os.gschema.override): the layouts are
+# org.gnome.desktop.input-sources (Hungarian with Hunspell suggestions,
+# English with Presage predictions); completion-mode 'manual' with
+# POS_DEBUG=force-completion is completion on from the start (the keyboard's
+# own menu switches it off, until its next start). force-completion only sets
+# that first state; nothing else of a debug build.
+set -eu
+
+print=
+[ "${1:-}" = --print ] && print=1
+
+choice=
+conf="${XDG_CONFIG_HOME:-${HOME:-/nonexistent}/.config}/duo2/osk"
+if [ -r "$conf" ]; then
+    choice=$(sed -n '1{s/[[:space:]]//g;p;q;}' "$conf")
+fi
+
+offered=
+case " ${DUO_WC_FEATURES:-} " in
+*" phosh-osk "*) offered=1 ;;
+esac
+
+pick=squeekboard
+if [ "$choice" != squeekboard ]; then
+    if [ -n "$offered" ] && command -v phosh-osk-stub >/dev/null 2>&1; then
+        pick=phosh-osk-stub
+    elif [ "$choice" = phosh-osk-stub ]; then
+        if [ -n "$offered" ]; then
+            why="it is not installed"
+        else
+            why="this duo-wc does not offer what it needs"
+        fi
+        echo "osk: phosh-osk-stub asked for, but $why: squeekboard instead" >&2
+    fi
+fi
+
+if [ "$pick" = phosh-osk-stub ]; then
+    set -- env POS_DEBUG=force-completion phosh-osk-stub
+else
+    # Dark keys (squeekboard's Adwaita:dark style): the panels are AMOLED.
+    set -- env GTK_THEME=Adwaita:dark squeekboard
+fi
+
+if [ -n "$print" ]; then
+    echo "$*"
+    exit 0
+fi
+exec "$@"

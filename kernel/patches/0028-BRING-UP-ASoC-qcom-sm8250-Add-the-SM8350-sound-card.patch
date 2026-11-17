@@ -1,0 +1,71 @@
+From 0fdb3823d804ee4d94385aa628548ec18a2a4963 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 03:00:00 +0100
+Subject: [PATCH 028/137] BRING-UP: ASoC: qcom: sm8250: Add the SM8350 sound
+ card
+
+SM8350's ADSP speaks APR like SM8250's; the card only needs its own
+driver name (for UCM). Its boards drive WSA883x speakers without the
+stock firmware's active speaker protection, so cap the speaker gains as
+sc8280xp.c does (-3 dB digital, 0 dB on the amplifier).
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ sound/soc/qcom/sm8250.c | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/sound/soc/qcom/sm8250.c b/sound/soc/qcom/sm8250.c
+index 76dc3a3f4a31..5051e520c742 100644
+--- a/sound/soc/qcom/sm8250.c
++++ b/sound/soc/qcom/sm8250.c
+@@ -26,13 +26,33 @@ struct sm8250_snd_data {
+ 	bool usb_offload_jack_setup;
+ 	struct snd_soc_jack dp_jack;
+ 	bool jack_setup;
++	bool limit_speaker_volume;
+ };
+ 
++/*
++ * Boards whose WSA883x speakers run without active speaker protection: the
++ * stock firmware protects them in the ADSP with calibration data mainline
++ * cannot use. Cap the digital gain at -3 dB and the amplifier gain at 0 dB,
++ * as sc8280xp.c does for the same amplifiers. Controls of amplifiers that
++ * are not on the card are skipped (snd_soc_limit_volume() fails quietly).
++ */
++static void sm8250_limit_speaker_volume(struct snd_soc_card *card)
++{
++	snd_soc_limit_volume(card, "WSA_RX0 Digital Volume", 81);
++	snd_soc_limit_volume(card, "WSA_RX1 Digital Volume", 81);
++	snd_soc_limit_volume(card, "SpkrLeft PA Volume", 17);
++	snd_soc_limit_volume(card, "SpkrRight PA Volume", 17);
++	snd_soc_limit_volume(card, "Receiver PA Volume", 17);
++}
++
+ static int sm8250_snd_init(struct snd_soc_pcm_runtime *rtd)
+ {
+ 	struct sm8250_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
+ 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+ 
++	if (cpu_dai->id == WSA_CODEC_DMA_RX_0 && data->limit_speaker_volume)
++		sm8250_limit_speaker_volume(rtd->card);
++
+ 	switch (cpu_dai->id) {
+ 	case DISPLAY_PORT_RX:
+ 		return qcom_snd_dp_jack_setup(rtd, &data->dp_jack, 0);
+@@ -200,6 +220,8 @@ static int sm8250_platform_probe(struct platform_device *pdev)
+ 		return ret;
+ 
+ 	card->driver_name = of_device_get_match_data(dev);
++	data->limit_speaker_volume = of_device_is_compatible(dev->of_node,
++							     "qcom,sm8350-sndcard");
+ 	sm8250_add_be_ops(card);
+ 	return devm_snd_soc_register_card(dev, card);
+ }
+@@ -212,6 +234,7 @@ static const struct of_device_id snd_sm8250_dt_match[] = {
+ 	{ .compatible = "qcom,qrb5165-rb5-sndcard", .data = "sm8250" },
+ 	{ .compatible = "qcom,sdm660-sndcard", .data = "sdm660" },
+ 	{ .compatible = "qcom,sm8250-sndcard", .data = "sm8250" },
++	{ .compatible = "qcom,sm8350-sndcard", .data = "sm8350" },
+ 	{}
+ };
+ 

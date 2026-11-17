@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Play feedbackd's events one by one, as the apps trigger them (as the GUI
+# user, through feedbackd and its theme for this phone,
+# /usr/share/feedbackd/themes/microsoft,surface-duo2.json), with a pause and a
+# label between them: for a hand on the phone to feel and judge. While each
+# plays, the haptics block's registers are sampled (as root, read only) and
+# what the hardware did is printed: how long it played and at what amplitude.
+#
+#   scripts/duo2-haptics-try [EVENT...]
+#
+# Default: the keyboard key, a notification, an instant message, an SMS, a
+# ringing call (2 s), the alarm (2 s). The Vibration switch (feedbackd's
+# max-haptic-strength, 0 = off) applies: off, nothing plays.
+set -euo pipefail
+. "$(dirname "$0")/lib/remote.sh"
+events=("$@")
+[ ${#events[@]} -gt 0 ] || events=(button-pressed notification-new-generic message-new-instant
+                                    message-new-sms phone-incoming-call alarm-clock-elapsed)
+for ev in "${events[@]}"; do
+    case $ev in *[!a-z-]*) echo "bad event name: $ev" >&2; exit 2 ;; esac
+    case $ev in phone-incoming-call|alarm-clock-elapsed) t=2 ;; *) t=-1 ;; esac
+    echo "== $ev"
+    duo2_ssh "sudo python3 -I - 2.5" <<'PY' &
+import sys, time
+REGS = "/sys/kernel/debug/regmap/0-03/registers"
+SPMI_PLAY, DIRECT_PLAY = 0xf04c, 0xf126
+def read(f, reg):
+    f.seek(reg * 9)
+    line = f.read(9).decode().strip()
+    return int(line.split(": ")[1], 16) if ": " in line else -1
+end = time.monotonic() + float(sys.argv[1])
+runs, cur, amp = [], None, 0
+with open(REGS, "rb", buffering=0) as f:
+    while time.monotonic() < end:
+        now = time.monotonic()
+        play = read(f, SPMI_PLAY)
+        on = play > 0 and play & 0x80
+        if on and cur is None:
+            cur, amp = now, read(f, DIRECT_PLAY)
+        elif not on and cur is not None:
+            runs.append((cur, now, amp)); cur = None
+        time.sleep(0.002)
+if cur is not None:
+    runs.append((cur, time.monotonic(), amp))
+if not runs:
+    print("   hardware: nothing played")
+t0 = runs[0][0] if runs else 0
+for a, b, amp in runs:
+    print("   hardware: +%4.0f ms  played %4.0f ms  amplitude %3d/255" % ((a - t0) * 1000, (b - a) * 1000, amp))
+PY
+    sleep 0.3
+    duo2_user "fbcli -E $ev -t $t >/dev/null 2>&1 || true"
+    wait
+    sleep 1
+done

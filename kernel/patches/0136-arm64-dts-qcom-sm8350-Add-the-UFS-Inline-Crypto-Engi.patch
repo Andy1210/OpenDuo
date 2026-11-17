@@ -1,0 +1,52 @@
+From 559a687ee7ad0585534aff404b9da00d9beef1c2 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Mon, 16 Nov 2026 20:11:01 +0100
+Subject: [PATCH 136/137] arm64: dts: qcom: sm8350: Add the UFS Inline Crypto
+ Engine
+
+SM8350's UFS host has an Inline Crypto Engine (ICE v3.2 with a hardware
+key manager) at 0x1d88000, the key manager's registers right after it at
+0x1d90000, as on the later SoCs. Describe it, and point the UFS host at it
+with qcom,ice, so that blk-crypto can offer AES-256-XTS to fscrypt when the
+filesystem is mounted with -o inlinecrypt.
+
+Without the secure world's ICE key calls (or with the ICE fuses blown) the
+qcom-ice driver gives up and UFS goes on without inline encryption, as
+before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm64/boot/dts/qcom/sm8350.dtsi | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350.dtsi b/arch/arm64/boot/dts/qcom/sm8350.dtsi
+index 2908fab59685..811cbb9dad3d 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8350.dtsi
+@@ -1784,6 +1784,8 @@ ufs_mem_hc: ufshc@1d84000 {
+ 			iommus = <&apps_smmu 0xe0 0x0>;
+ 			dma-coherent;
+ 
++			qcom,ice = <&ice>;
++
+ 			clock-names =
+ 				"core_clk",
+ 				"bus_aggr_clk",
+@@ -1841,6 +1843,17 @@ ufs_mem_phy: phy@1d87000 {
+ 			status = "disabled";
+ 		};
+ 
++		ice: crypto@1d88000 {
++			compatible = "qcom,sm8350-inline-crypto-engine",
++				     "qcom,inline-crypto-engine";
++			reg = <0 0x01d88000 0 0x11000>;
++			clocks = <&gcc GCC_UFS_PHY_ICE_CORE_CLK>,
++				 <&gcc GCC_UFS_PHY_AHB_CLK>;
++			clock-names = "core",
++				      "iface";
++			power-domains = <&gcc UFS_PHY_GDSC>;
++		};
++
+ 		cryptobam: dma-controller@1dc4000 {
+ 			compatible = "qcom,bam-v1.7.4", "qcom,bam-v1.7.0";
+ 			reg = <0 0x01dc4000 0 0x24000>;

@@ -1,0 +1,201 @@
+From 05dc9687e86c4dcc36ce524c991dfda8ffcdbad2 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 00:50:40 +0100
+Subject: [PATCH 070/137] BRING-UP: media: qcom: camss: Add receiver and PHY
+ diagnostics
+
+While a CSID gen2 streams, count its RDI start / end of frame interrupts
+and collect the receiver error and RDI status bits (the masks of the
+vendor CSID 480 layout), and print them with the RDI format measurement
+and byte counters at stream off; print a CSIPHY's link frequency, settle
+count and lanes at stream on and its status registers at stream off.
+Two module parameters set the receiver's lane count and PHY type for a
+TPG link (tpg_lanes, tpg_phy_type), to find what a TPG sends.
+
+Not for upstream.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../platform/qcom/camss/camss-csid-gen2.c     | 73 +++++++++++++++++++
+ .../media/platform/qcom/camss/camss-csid.h    |  6 ++
+ .../qcom/camss/camss-csiphy-3ph-1-0.c         | 16 ++++
+ 3 files changed, 95 insertions(+)
+
+diff --git a/drivers/media/platform/qcom/camss/camss-csid-gen2.c b/drivers/media/platform/qcom/camss/camss-csid-gen2.c
+index eadcb2f7e3aa..ad41c7d14eca 100644
+--- a/drivers/media/platform/qcom/camss/camss-csid-gen2.c
++++ b/drivers/media/platform/qcom/camss/camss-csid-gen2.c
+@@ -10,6 +10,7 @@
+ #include <linux/interrupt.h>
+ #include <linux/io.h>
+ #include <linux/kernel.h>
++#include <linux/moduleparam.h>
+ #include <linux/of.h>
+ 
+ #include "camss-csid.h"
+@@ -171,6 +172,23 @@
+ #define		TPG_COLOR_BOX_CFG_MODE		0
+ #define		TPG_COLOR_BOX_PATTERN_SEL	2
+ 
++/* BRING-UP: the receiver settings for a TPG link, to find what the TPG sends */
++static unsigned int tpg_lanes;
++module_param(tpg_lanes, uint, 0644);
++MODULE_PARM_DESC(tpg_lanes, "BRING-UP: CSID lanes for a TPG link (0: the TPG's own)");
++static unsigned int tpg_phy_type;
++module_param(tpg_phy_type, uint, 0644);
++MODULE_PARM_DESC(tpg_phy_type, "BRING-UP: CSID PHY type for a TPG link (0 D-PHY, 1 C-PHY)");
++
++/* the vendor CSID 480 register layout: RDI n format measurement and byte counters */
++#define CSID_RDI_FORMAT_MEASURE0(rdi)	((csid_is_lite(csid) ? 0x278 : 0x378) + 0x100 * (rdi))
++#define CSID_RDI_FORMAT_MEASURE1(rdi)	((csid_is_lite(csid) ? 0x27c : 0x37c) + 0x100 * (rdi))
++#define CSID_RDI_BYTE_CNTR_PING(rdi)	((csid_is_lite(csid) ? 0x2e0 : 0x3e0) + 0x100 * (rdi))
++#define CSID_RDI_BYTE_CNTR_PONG(rdi)	((csid_is_lite(csid) ? 0x2e4 : 0x3e4) + 0x100 * (rdi))
++/* receiver errors, and the start / end of frame and overflow of an RDI */
++#define CSID_DBG_RX_IRQ_MASK		GENMASK(26, 11)
++#define CSID_DBG_RDI_IRQ_MASK		(BIT(2) | BIT(9) | BIT(12) | GENMASK(15, 13))
++
+ static void __csid_configure_rx(struct csid_device *csid,
+ 				struct csid_phy_config *phy, int vc)
+ {
+@@ -179,11 +197,17 @@ static void __csid_configure_rx(struct csid_device *csid,
+ 
+ 	if (!lane_cnt)
+ 		lane_cnt = 4;
++	if (csid->tpg_linked && tpg_lanes >= 1 && tpg_lanes <= 4)
++		lane_cnt = tpg_lanes;
+ 
+ 	val = (lane_cnt - 1) << CSI2_RX_CFG0_NUM_ACTIVE_LANES;
+ 	val |= phy->lane_assign << CSI2_RX_CFG0_DL0_INPUT_SEL;
+ 	val |= phy->csiphy_id << CSI2_RX_CFG0_PHY_NUM_SEL;
++	if (csid->tpg_linked && tpg_phy_type)
++		val |= 1 << CSI2_RX_CFG0_PHY_TYPE_SEL;
+ 	writel_relaxed(val, csid->base + CSID_CSI2_RX_CFG0);
++	dev_info(csid->camss->dev, "csid%u: rx cfg0 0x%08x (%s)\n", csid->id, val,
++		 csid->tpg_linked ? "tpg" : "csiphy");
+ 
+ 	val = 1 << CSI2_RX_CFG1_PACKET_ECC_CORRECTION_EN;
+ 	if (vc > 3)
+@@ -322,11 +346,53 @@ static void __csid_configure_rdi_stream(struct csid_device *csid, u8 enable, u8
+ 	writel_relaxed(val, csid->base + CSID_RDI_CFG0(port));
+ }
+ 
++static void csid_dbg_start(struct csid_device *csid)
++{
++	int i;
++
++	csid->dbg_rx = 0;
++	csid->dbg_irqs = 0;
++	csid->dbg_sof = 0;
++	csid->dbg_eof = 0;
++	writel_relaxed(CSID_DBG_RX_IRQ_MASK, csid->base + CSID_CSI2_RX_IRQ_MASK);
++	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++) {
++		csid->dbg_rdi[i] = 0;
++		if (csid->phy.en_vc & BIT(i))
++			writel_relaxed(CSID_DBG_RDI_IRQ_MASK,
++				       csid->base + CSID_CSI2_RDIN_IRQ_MASK(i));
++	}
++}
++
++static void csid_dbg_stop(struct csid_device *csid)
++{
++	int i;
++
++	writel_relaxed(0, csid->base + CSID_CSI2_RX_IRQ_MASK);
++	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++) {
++		if (!(csid->phy.en_vc & BIT(i)))
++			continue;
++		writel_relaxed(0, csid->base + CSID_CSI2_RDIN_IRQ_MASK(i));
++		dev_info(csid->camss->dev,
++			 "csid%u rdi%d: irqs %u sof %u eof %u, rx status 0x%08x, rdi status 0x%08x, measure 0x%08x 0x%08x, bytes 0x%08x 0x%08x\n",
++			 csid->id, i, csid->dbg_irqs, csid->dbg_sof, csid->dbg_eof,
++			 csid->dbg_rx, csid->dbg_rdi[i],
++			 readl_relaxed(csid->base + CSID_RDI_FORMAT_MEASURE0(i)),
++			 readl_relaxed(csid->base + CSID_RDI_FORMAT_MEASURE1(i)),
++			 readl_relaxed(csid->base + CSID_RDI_BYTE_CNTR_PING(i)),
++			 readl_relaxed(csid->base + CSID_RDI_BYTE_CNTR_PONG(i)));
++	}
++}
++
+ static void csid_configure_stream(struct csid_device *csid, u8 enable)
+ {
+ 	struct csid_testgen_config *tg = &csid->testgen;
+ 	u8 i;
+ 
++	if (enable)
++		csid_dbg_start(csid);
++	else
++		csid_dbg_stop(csid);
++
+ 	/* Loop through all enabled ports and configure a stream for each */
+ 	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++)
+ 		if (csid->phy.en_vc & BIT(i)) {
+@@ -367,12 +433,19 @@ static irqreturn_t csid_isr(int irq, void *dev)
+ 
+ 	val = readl_relaxed(csid->base + CSID_CSI2_RX_IRQ_STATUS);
+ 	writel_relaxed(val, csid->base + CSID_CSI2_RX_IRQ_CLEAR);
++	csid->dbg_rx |= val;
++	csid->dbg_irqs++;
+ 
+ 	/* Read and clear IRQ status for each enabled RDI channel */
+ 	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++)
+ 		if (csid->phy.en_vc & BIT(i)) {
+ 			val = readl_relaxed(csid->base + CSID_CSI2_RDIN_IRQ_STATUS(i));
+ 			writel_relaxed(val, csid->base + CSID_CSI2_RDIN_IRQ_CLEAR(i));
++			csid->dbg_rdi[i] |= val;
++			if (val & BIT(12))
++				csid->dbg_sof++;
++			if (val & BIT(9))
++				csid->dbg_eof++;
+ 		}
+ 
+ 	val = 1 << IRQ_CMD_CLEAR;
+diff --git a/drivers/media/platform/qcom/camss/camss-csid.h b/drivers/media/platform/qcom/camss/camss-csid.h
+index 5296b10f6bac..d02a3e3bc6d5 100644
+--- a/drivers/media/platform/qcom/camss/camss-csid.h
++++ b/drivers/media/platform/qcom/camss/camss-csid.h
+@@ -167,6 +167,12 @@ struct csid_device {
+ 	struct v4l2_ctrl_handler ctrls;
+ 	struct v4l2_ctrl *testgen_mode;
+ 	const struct csid_subdev_resources *res;
++	/* BRING-UP: what the receiver and the RDIs reported while streaming */
++	u32 dbg_rx;
++	u32 dbg_rdi[MSM_CSID_MAX_SRC_STREAMS];
++	unsigned int dbg_irqs;
++	unsigned int dbg_sof;
++	unsigned int dbg_eof;
+ };
+ 
+ struct camss_subdev_resources;
+diff --git a/drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c b/drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c
+index a9cf9e696860..9610788a1c2f 100644
+--- a/drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c
++++ b/drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c
+@@ -1275,12 +1275,28 @@ static void csiphy_lanes_enable(struct csiphy_device *csiphy,
+ 		writel_relaxed(0, csiphy->base +
+ 			       CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(regs->offset, i));
+ 	}
++
++	/* BRING-UP */
++	dev_info(csiphy->camss->dev, "csiphy%u: link %lld Hz, settle %u, lanes 0x%02x\n",
++		 csiphy->id, link_freq, settle_cnt,
++		 readl_relaxed(csiphy->base + CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(regs->offset, 5)));
+ }
+ 
+ static void csiphy_lanes_disable(struct csiphy_device *csiphy,
+ 				 struct csiphy_config *cfg)
+ {
+ 	struct csiphy_device_regs *regs = csiphy->regs;
++	u8 st[11];
++	int i;
++
++	/* BRING-UP: the PHY's status after streaming */
++	for (i = 0; i < 11; i++)
++		st[i] = readl_relaxed(csiphy->base +
++				      CSIPHY_3PH_CMN_CSI_COMMON_STATUSn(regs->offset,
++									regs->common_status_offset,
++									i));
++	dev_info(csiphy->camss->dev, "csiphy%u: status %*ph\n", csiphy->id,
++		 (int)sizeof(st), st);
+ 
+ 	writel_relaxed(0, csiphy->base +
+ 			  CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(regs->offset, 5));

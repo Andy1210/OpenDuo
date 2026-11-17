@@ -1,0 +1,28 @@
+# duo2-os defaults (installed by shell/duo-shell/install.sh into
+# /usr/share/glib-2.0/schemas/, then glib-compile-schemas).
+
+# The on-screen keyboard (phosh-osk-stub, or squeekboard) shows by itself
+# when a text field gets the focus: a phone has no keyboard.
+[org.gnome.desktop.a11y.applications]
+screen-keyboard-enabled=true
+
+# The keyboard layouts, which both on-screen keyboards read: Hungarian first (QWERTZ; a long press on a, e, i, o, u gives
+# á é í ó ö ő ú ü ű; phosh-osk-stub suggests words from Hunspell's Hungarian
+# dictionary, which also puts the accents back: "kerdes" -> "kérdés"), then
+# English (the US layout with Presage's word predictions: an "ibus" entry
+# names a completion engine and a language for phosh-osk-stub; squeekboard
+# reads only the xkb ones). The keyboard's layout key switches.
+[org.gnome.desktop.input-sources]
+sources=[('xkb', 'hu'), ('ibus', 'presage:en')]
+
+# phosh-osk-stub's word completion is on from the start: 'manual' leaves the
+# switch to the user (the keyboard's menu), and the session starts it with
+# POS_DEBUG=force-completion, that switch's first state (compositor/duo-wc/
+# dist/osk). The default, 'hint', completes only where an app asks for it
+# (text-input's completion hint; GTK's entries do not by default).
+[sm.puri.phosh.osk]
+completion-mode=['manual']
+
+# Dark, like the shell (AMOLED panels: black is unlit).
+[org.gnome.desktop.interface]
+color-scheme='prefer-dark'

@@ -1,0 +1,253 @@
+#!/usr/bin/python3 -I
+"""duo2-factory-addr: the Surface Duo 2's factory WLAN MAC and Bluetooth address.
+
+Both live in the phone's factory provisioning partition `sfpd` (FAT16, written
+at the factory, never by Android), the same place stock Android takes them from:
+
+  wlan/wlan_mac.bin  "Intf0MacAddress=<12 hex digits>" + "END": the qcacld-3.0
+                     MAC file (WCNSS_qcom_cfg.ini read_mac_addr_from_mac_file=1,
+                     "MSCHANGE"); Android reads its copy in persist
+                     (/mnt/vendor/persist/wlan_mac.bin, byte-identical).
+  bt/.bt_nv.bin      Qualcomm libbtnv NV file (the BT HAL's .bt_nv.bin):
+                     01 (one item) | 01 (NV_BD_ADDR_I) | 06 (length) | the
+                     address, least significant byte first (= WLAN MAC + 1).
+
+The modem's NV (QMI DMS Get MAC Address) is not provisioned on this phone, and
+the WOA UEFI does not fill the DT's local-bd-address the way an Android
+bootloader would, hence this recipe. The addresses are personal identifiers:
+they are printed only masked, and written only to root-only files.
+
+  duo2-factory-addr [show] [--sfpd PATH]   check and print them masked
+  duo2-factory-addr save [--sfpd PATH]     write /etc/duo2/factory-addresses
+  duo2-factory-addr install [--sfpd PATH]  save + the WLAN MAC as a .link drop-in
+  duo2-factory-addr remove                 delete what save / install wrote
+
+PATH defaults to the phone's partition (/dev/disk/by-partlabel/sfpd, opened
+read-only); a backup image of it works as well (e.g. on the build host).
+
+What applies them at boot:
+  WiFi: /etc/systemd/network/10-wifi.link.d/50-duo2-factory-mac.conf
+        (MACAddress=, udev sets it while wlan0 is still down)
+  BT:   duo2-bt-addr@hciN.service (90-duo2-bt-addr.rules) sets the public
+        address of the unconfigured WCN6855 over mgmt (btmgmt public-addr)
+"""
+
+import os
+import re
+import struct
+import sys
+import tempfile
+
+SFPD = "/dev/disk/by-partlabel/sfpd"
+ENV_FILE = "/etc/duo2/factory-addresses"
+LINK_DROPIN = "/etc/systemd/network/10-wifi.link.d/50-duo2-factory-mac.conf"
+
+
+class FatImage:
+    """Minimal read-only FAT12/16/32 reader (long file names included)."""
+
+    def __init__(self, path):
+        self.f = open(path, "rb")  # O_RDONLY: never written
+        bs = self.f.read(512)
+        if len(bs) < 512 or bs[510:512] != b"\x55\xaa":
+            raise ValueError(f"{path}: no FAT boot sector")
+        (self.bps,) = struct.unpack_from("<H", bs, 11)
+        self.spc = bs[13]
+        (rsvd,) = struct.unpack_from("<H", bs, 14)
+        nfats = bs[16]
+        (self.rootent,) = struct.unpack_from("<H", bs, 17)
+        tot16, fat16 = struct.unpack_from("<H", bs, 19)[0], struct.unpack_from("<H", bs, 22)[0]
+        total = tot16 or struct.unpack_from("<I", bs, 32)[0]
+        fatsz = fat16 or struct.unpack_from("<I", bs, 36)[0]
+        if self.bps not in (512, 1024, 2048, 4096) or self.spc == 0 or nfats == 0 or fatsz == 0:
+            raise ValueError(f"{path}: implausible FAT geometry")
+        rootsecs = (self.rootent * 32 + self.bps - 1) // self.bps
+        self.root_off = (rsvd + nfats * fatsz) * self.bps
+        self.data_sec = rsvd + nfats * fatsz + rootsecs
+        clusters = (total - self.data_sec) // self.spc
+        self.kind = 12 if clusters < 4085 else 16 if clusters < 65525 else 32
+        self.root_clus = struct.unpack_from("<I", bs, 44)[0] if self.kind == 32 else None
+        self.f.seek(rsvd * self.bps)
+        self.fat = self.f.read(fatsz * self.bps)
+        self.csize = self.spc * self.bps
+
+    def _next(self, c):
+        if self.kind == 16:
+            n = struct.unpack_from("<H", self.fat, c * 2)[0]
+            return None if n >= 0xFFF8 else n
+        if self.kind == 32:
+            n = struct.unpack_from("<I", self.fat, c * 4)[0] & 0x0FFFFFFF
+            return None if n >= 0x0FFFFFF8 else n
+        v = struct.unpack_from("<H", self.fat, c + c // 2)[0]
+        n = v >> 4 if c & 1 else v & 0xFFF
+        return None if n >= 0xFF8 else n
+
+    def _chain(self, c, limit=None):
+        out, seen = bytearray(), set()
+        while c is not None and c >= 2:
+            if c in seen:
+                raise ValueError("FAT cluster loop")
+            seen.add(c)
+            self.f.seek((self.data_sec + (c - 2) * self.spc) * self.bps)
+            out += self.f.read(self.csize)
+            if limit is not None and len(out) >= limit:
+                break
+            c = self._next(c)
+        return bytes(out if limit is None else out[:limit])
+
+    def _entries(self, data):
+        lfn = {}
+        for i in range(0, len(data) - 31, 32):
+            e = data[i : i + 32]
+            if e[0] == 0x00:
+                break
+            if e[0] == 0xE5:
+                lfn = {}
+                continue
+            attr = e[11]
+            if attr == 0x0F:
+                part = (e[1:11] + e[14:26] + e[28:32]).decode("utf-16-le", "replace")
+                lfn[e[0] & 0x1F] = part
+                continue
+            if attr & 0x08:  # volume label
+                lfn = {}
+                continue
+            if lfn:
+                name = "".join(lfn[k] for k in sorted(lfn)).split("\x00")[0].rstrip("￿")
+            else:
+                base, ext = e[0:8].decode("latin-1").rstrip(), e[8:11].decode("latin-1").rstrip()
+                name = base + ("." + ext if ext else "")
+            lfn = {}
+            clus = struct.unpack_from("<H", e, 26)[0] | (
+                struct.unpack_from("<H", e, 20)[0] << 16 if self.kind == 32 else 0
+            )
+            size = struct.unpack_from("<I", e, 28)[0]
+            yield name, attr, clus, size
+
+    def read(self, path):
+        if self.kind == 32:
+            data = self._chain(self.root_clus)
+        else:
+            self.f.seek(self.root_off)
+            data = self.f.read(self.rootent * 32)
+        parts = [p for p in path.split("/") if p]
+        for depth, want in enumerate(parts):
+            for name, attr, clus, size in self._entries(data):
+                if name.lower() == want.lower():
+                    last = depth == len(parts) - 1
+                    if last and not attr & 0x10:
+                        return self._chain(clus, size) if size else b""
+                    if not last and attr & 0x10:
+                        data = self._chain(clus)
+                        break
+            else:
+                raise FileNotFoundError(f"sfpd: {path} not found")
+        raise FileNotFoundError(f"sfpd: {path} is a directory")
+
+
+def fmt(addr):
+    return ":".join(f"{b:02x}" for b in addr)
+
+
+def masked(addr):
+    return fmt(addr[:3]) + ":xx:xx:xx"
+
+
+def check(name, addr):
+    if len(addr) != 6 or addr in (bytes(6), b"\xff" * 6):
+        raise ValueError(f"{name}: empty or erased address")
+    if addr[0] & 1:
+        raise ValueError(f"{name}: multicast address")
+
+
+def read_addresses(sfpd):
+    fat = FatImage(sfpd)
+    text = fat.read("wlan/wlan_mac.bin").decode("ascii", "replace")
+    m = re.search(r"Intf0MacAddress=([0-9A-Fa-f]{12})\s", text)
+    if not m:
+        raise ValueError("wlan/wlan_mac.bin: no Intf0MacAddress line")
+    wlan = bytes.fromhex(m.group(1))
+    nv = fat.read("bt/.bt_nv.bin")
+    if len(nv) < 9 or nv[1] != 0x01 or nv[2] != 6:
+        raise ValueError("bt/.bt_nv.bin: not an NV_BD_ADDR_I record")
+    bt = nv[3:9][::-1]
+    check("WLAN MAC", wlan)
+    check("BT address", bt)
+    return wlan, bt
+
+
+def write_atomic(path, text, mode):
+    d = os.path.dirname(path)
+    os.makedirs(d, mode=0o755, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".duo2-")
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.rename(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+
+def main(argv):
+    cmd = "show"
+    sfpd = SFPD
+    args = list(argv)
+    while args:
+        a = args.pop(0)
+        if a == "--sfpd" and args:
+            sfpd = args.pop(0)
+        elif a in ("show", "save", "install", "remove"):
+            cmd = a
+        else:
+            print(
+                "usage: duo2-factory-addr [show|save|install|remove] [--sfpd PATH]", file=sys.stderr
+            )
+            return 2
+
+    if cmd != "show" and os.geteuid() != 0:
+        print("run as root", file=sys.stderr)
+        return 1
+    if cmd == "remove":
+        for p in (LINK_DROPIN, ENV_FILE):
+            if os.path.exists(p):
+                os.unlink(p)
+                print(f"removed {p}")
+        return 0
+
+    wlan, bt = read_addresses(sfpd)
+    delta = int.from_bytes(bt, "big") - int.from_bytes(wlan, "big")
+    kind = "locally administered" if wlan[0] & 2 else "universal (OUI)"
+    print(f"WLAN MAC   {masked(wlan)}  {kind}  (sfpd wlan/wlan_mac.bin)")
+    print(f"BT address {masked(bt)}  BT = WLAN {delta:+d}  (sfpd bt/.bt_nv.bin)")
+    if cmd == "show":
+        return 0
+
+    write_atomic(
+        ENV_FILE,
+        "# The phone's factory addresses, from its sfpd partition (duo2-factory-addr).\n"
+        "# Personal identifiers: keep this file on the phone.\n"
+        f"WLAN_MAC={fmt(wlan)}\nBT_ADDR={fmt(bt)}\n",
+        0o600,
+    )
+    print(f"wrote {ENV_FILE}")
+    if cmd == "install":
+        write_atomic(
+            LINK_DROPIN,
+            "# The factory WLAN MAC (sfpd wlan/wlan_mac.bin), written by duo2-factory-addr.\n"
+            f"[Link]\nMACAddress={fmt(wlan)}\n",
+            0o600,
+        )
+        print(f"wrote {LINK_DROPIN} (applies when wlan0 is next created, e.g. at boot)")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except (OSError, ValueError) as e:
+        print(f"duo2-factory-addr: {e}", file=sys.stderr)
+        sys.exit(1)

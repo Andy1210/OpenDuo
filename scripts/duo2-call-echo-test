@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# The echo check of a speakerphone call (docs/hardware/audio.md,
+# open items: echo): during ONE active call, on the loudspeakers, the
+# uplink topology goes 30 s NONE (as it comes, today's default), 30 s ECNS
+# (VSS_IVOCPROC_TOPOLOGY_ID_TX_SM_ECNS: the DSP's single-mic echo canceller
+# and noise suppression, no calibration data), 30 s NONE again. The other
+# party says whether it hears itself back and how the voice sounds in each
+# phase. Each change restarts duo2-callaudio (the topology is set when the
+# path opens): a gap of about a second.
+#
+#   scripts/duo2-call-echo-test        (start it once the call is active)
+#
+# Afterwards /etc/duo2/callaudio.conf is as it was.
+set -euo pipefail
+. "$(dirname "$0")/lib/remote.sh"
+T0=$(date +%s)
+mark() { printf '== %s (+%3d s) %s\n' "$(date +%T)" $(( $(date +%s) - T0 )) "$*"; }
+topo() {
+    duo2_ssh "sudo sed -i 's/^TX_TOPOLOGY=.*/TX_TOPOLOGY=$1/' /etc/duo2/callaudio.conf"
+    duo2_user 'systemctl --user restart duo2-callaudio'
+}
+duo2_ssh "mmcli -m any --voice-list-calls | grep -q '(active)'" ||
+    { echo "no active call" >&2; exit 1; }
+old=$(duo2_ssh "sed -n 's/^TX_TOPOLOGY=//p' /etc/duo2/callaudio.conf")
+trap 'topo "${old:-none}"; mark "end: TX_TOPOLOGY=${old:-none} again"' EXIT
+
+mark "1: NONE, loudspeakers"
+topo none
+sleep 2
+duo2_user 'gdbus call --session -d org.mobian_project.CallAudio -o /org/mobian_project/CallAudio -m org.mobian_project.CallAudio.EnableSpeaker true >/dev/null'
+sleep 28
+mark "2: ECNS"; topo ecns; sleep 2
+duo2_user 'gdbus call --session -d org.mobian_project.CallAudio -o /org/mobian_project/CallAudio -m org.mobian_project.CallAudio.EnableSpeaker true >/dev/null'
+sleep 28
+mark "3: NONE"; topo none; sleep 2
+duo2_user 'gdbus call --session -d org.mobian_project.CallAudio -o /org/mobian_project/CallAudio -m org.mobian_project.CallAudio.EnableSpeaker true >/dev/null'
+sleep 28

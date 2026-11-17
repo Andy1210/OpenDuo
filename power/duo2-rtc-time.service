@@ -1,0 +1,24 @@
+[Unit]
+Description=duo2-os: the wall clock from the PMIC RTC and the saved offset (no network needed)
+Documentation=file:/usr/local/sbin/duo2-rtc-time
+# Early, but ordered before nothing: the PMIC RTC (rtc-pm8xxx, a module)
+# registers ~4.3 s into the boot, after timesyncd (3.4 s) and close to
+# sysinit.target; waiting for it would hold up the whole boot. The clock
+# steps forward when it is there; timesyncd takes it from there (NTP).
+DefaultDependencies=no
+After=local-fs.target
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# the driver now, not when udev's coldplug gets to it
+ExecStartPre=-/usr/sbin/modprobe -q rtc_pm8xxx
+ExecStart=/usr/local/sbin/duo2-rtc-time restore
+# at shutdown: the offset once more, if NTP synchronized the clock in this boot
+ExecStop=/usr/local/sbin/duo2-rtc-time save
+TimeoutStartSec=40
+
+[Install]
+WantedBy=sysinit.target

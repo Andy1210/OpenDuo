@@ -1,0 +1,9 @@
+# repo.waydro.id may only supply Waydroid and its binder libraries; anything
+# else it carries never replaces a Debian package.
+Package: *
+Pin: origin repo.waydro.id
+Pin-Priority: 1
+
+Package: waydroid python3-gbinder libgbinder libglibutil waydroid-sensors
+Pin: origin repo.waydro.id
+Pin-Priority: 500

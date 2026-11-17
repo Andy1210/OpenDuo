@@ -1,0 +1,45 @@
+From d0ff6e83797d5ecf14ca1fd3b0c26e1f1ea16688 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Mon, 9 Nov 2026 20:30:16 +0100
+Subject: [PATCH 10/16] media: iris: Don't offer HEVC Main 10 on the Gen1
+ decoder
+
+The Gen1 HFI path refuses every stream whose bit depth is not 8 as soon
+as the firmware reports the sequence (iris_hfi_gen1_read_changed_params():
+"unsupported content, bit depth"), and moves the instance to the error
+state. The HEVC profile menu still offered Main 10, so userspace that
+picks a decoder by the profiles the driver lists (GStreamer builds its
+sink caps from this menu, Chromium its supported configs) sent Main 10
+streams to the hardware, where they fail, instead of decoding them in
+software.
+
+Offer Main and Main Still Picture only, matching the 8-bit H.264
+profiles that are already the only ones listed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/media/platform/qcom/iris/iris_hfi_gen1.c | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen1.c b/drivers/media/platform/qcom/iris/iris_hfi_gen1.c
+index 0f7e7d6b25f4..6e34631b91cb 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen1.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen1.c
+@@ -60,10 +60,14 @@ static const struct platform_inst_fw_cap inst_fw_cap_sm8250_enc[] = {
+ 	{
+ 		.cap_id = PROFILE_HEVC,
+ 		.min = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN,
+-		.max = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10,
++		/*
++		 * No Main 10: the Gen1 path refuses 10-bit streams once the
++		 * firmware reports their bit depth (see
++		 * iris_hfi_gen1_read_changed_params()).
++		 */
++		.max = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_STILL_PICTURE,
+ 		.step_or_mask = BIT(V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN) |
+-				BIT(V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_STILL_PICTURE) |
+-				BIT(V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10),
++				BIT(V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_STILL_PICTURE),
+ 		.value = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN,
+ 		.hfi_id = HFI_PROPERTY_PARAM_PROFILE_LEVEL_CURRENT,
+ 		.flags = CAP_FLAG_OUTPUT_PORT | CAP_FLAG_MENU,

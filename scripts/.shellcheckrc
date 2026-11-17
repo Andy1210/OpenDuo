@@ -1,0 +1,5 @@
+# shellcheck's settings for the build machine's scripts (scripts/, lib/, pi/).
+# SC2016: commands for the phone are written in single quotes on purpose, so
+# that $HOME, $(id -u) and the like expand there, not here
+# (duo2_ssh 'printf %s "$HOME"').
+disable=SC2016

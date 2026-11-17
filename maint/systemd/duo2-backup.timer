@@ -1,0 +1,13 @@
+[Unit]
+Description=Nightly backup to the NAS / PC (the owner enables it: docs/UPDATES.md)
+
+[Timer]
+OnCalendar=*-*-* 03:30
+RandomizedDelaySec=30min
+Persistent=true
+# wakes the phone from sleep (the RTC); duo2-backup holds it awake while it
+# runs and goes only on WiFi + charging
+WakeSystem=true
+
+[Install]
+WantedBy=timers.target

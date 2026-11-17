@@ -1,0 +1,30 @@
+# duo2-backup's rsync filter (/etc/duo2/backup.filter; scripts/duo2-backup-pull
+# uses this copy). Paths are relative to the transfer: home/USER/... and
+# staged/... (docs/UPDATES.md "Backups"). What is left out can be made again,
+# or downloaded again, or is the phone's own cache.
+
+# caches and trash
+- /home/*/.cache/
+- /home/*/.local/share/Trash/
+- /home/*/.thumbnails/
+- /home/*/.var/app/*/cache/
+- /home/*/.local/share/flatpak/repo/tmp/
+# browsers: their caches outside ~/.cache (the profiles themselves go)
+- /home/*/.config/chromium/*/Cache/
+- /home/*/.config/chromium/*/Code Cache/
+- /home/*/.config/chromium/*/GPUCache/
+- /home/*/.config/chromium/*/Service Worker/CacheStorage/
+- /home/*/.config/chromium/Crash Reports/
+- /home/*/.mozilla/firefox/*/cache2/
+- /home/*/.local/share/angelfish/**/Cache/
+# Android (Waydroid): the apps' caches, Android's own (the images are not here:
+# /var/lib/waydroid, downloaded again by `waydroid init`)
+- /home/*/.local/share/waydroid/data/data/*/cache/
+- /home/*/.local/share/waydroid/data/data/*/code_cache/
+- /home/*/.local/share/waydroid/data/media/0/Android/data/*/cache/
+- /home/*/.local/share/waydroid/data/dalvik-cache/
+- /home/*/.local/share/waydroid/data/system/package_cache/
+- /home/*/.local/share/waydroid/data/resource-cache/
+# runtime leftovers
+- /home/*/.local/share/gvfs-metadata/
+- *.rsync-partial/

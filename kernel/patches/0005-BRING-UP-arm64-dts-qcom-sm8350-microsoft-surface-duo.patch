@@ -1,0 +1,63 @@
+From 8fd239f842fbbf959119975675ffbbac0e15a4e3 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Thu, 5 Nov 2026 23:56:22 +0100
+Subject: [PATCH 005/137] BRING-UP: arm64: dts: qcom:
+ sm8350-microsoft-surface-duo2: Add variant H without PCIe
+
+pcie-qcom probes right after the LED triggers, enables L5B and L6B
+(shared with the DSI PHYs the UEFI left running), fails link training
+while the WiFi chip is unpowered and switches the rails off again: both
+panels go black about 21 s into boot. Variant H is variant G with PCIe0
+disabled and the DSI PHY and panel rails always on.
+
+Not for upstream: a bring-up variant, built next to the main DTB.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../sm8350-microsoft-surface-duo2-keepfb3.dts | 37 +++++++++++++++++++
+ 1 file changed, 37 insertions(+)
+ create mode 100644 arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-keepfb3.dts
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-keepfb3.dts b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-keepfb3.dts
+new file mode 100644
+index 000000000000..2e3b464ff398
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-keepfb3.dts
+@@ -0,0 +1,37 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/*
++ * Bring-up variant H: variant G, and PCIe0 left off. pcie-qcom probes right
++ * after the LED triggers, enables L5B/L6B (shared with the DSI PHY the UEFI
++ * left running), fails link training without WiFi power and switches them off:
++ * both panels go black ~21 s into boot. Keep the two rails on. Not for upstream.
++ */
++#include "sm8350-microsoft-surface-duo2-keepfb2.dts"
++
++&pcie0 {
++	status = "disabled";
++};
++
++&pcie0_phy {
++	status = "disabled";
++};
++
++&vreg_l5b_0p88 {
++	regulator-always-on;
++};
++
++&vreg_l6b_1p2 {
++	regulator-always-on;
++};
++
++/* The stock DT's display rails (sde_dsi: vdda L2B, vddio L12C, vdd L13C). */
++&vreg_l2b_3p07 {
++	regulator-always-on;
++};
++
++&vreg_l12c_1p8 {
++	regulator-always-on;
++};
++
++&vreg_l13c_3p0 {
++	regulator-always-on;
++};

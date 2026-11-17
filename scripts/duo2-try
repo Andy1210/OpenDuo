@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# Boot a freshly built kernel (or new kernel options) ONCE on the phone,
+# falling back by itself.
+#
+#   scripts/duo2-try [--dtb NAME] [--append "kernel options"] [--no-reboot]
+#   scripts/duo2-try --same-kernel --append "kernel options"
+#   scripts/duo2-try --same-kernel --initrd out/initrd.img
+#   scripts/duo2-try --same-kernel --drop "cpuidle.off=1 clk_ignore_unused"
+#
+# Copies out/linux's Image and DTB to /boot/efi/duo2/test/, installs the
+# kernel's modules under their own /lib/modules/<release> (every build has its
+# own release string, see build-kernel.sh, so the known-good kernel's modules
+# are never touched), and writes the systemd-boot entry duo2-test+1.conf:
+# sort-key duo2, version 99, so it is booted first (before duo2.conf, version
+# 1, and before the packaged kernels' entries, version 10.N: maint/duo2-boot),
+# exactly once. systemd-boot
+# counts the try down before booting it; on the next boot it is "bad" and
+# sorted last, so duo2.conf (version 1, the known-good kernel) boots again,
+# whether the test kernel was rebooted on purpose, panicked (panic=30) or was
+# reset by the watchdog. Nothing is promoted: see duo2-promote.
+#
+# --same-kernel boots the known-good Image and DTB once with other options
+# (nothing is copied, no modules); with --dtb NAME as well, it boots that DTB
+# from out/linux instead of the known-good one (a DT-only change: the DTB is
+# copied to /boot/efi/duo2/test/). --initrd FILE boots that initramfs instead
+# of the known-good one (copied to /boot/efi/duo2/test/initrd.img).
+#
+# The options are duo2.conf's plus --append plus duo2.try=<id>; the try
+# succeeded when the kernel that answers afterwards carries that id.
+# DTB defaults to the bring-up DTB the known-good entry uses.
+#
+# DUO2_KSRC / DUO2_KOUT (relative to the repository, default src/linux and
+# out/linux) take the kernel from another tree and build directory, e.g. a
+# git worktree built with build-kernel.sh's SRC= and O= (a second line of
+# kernel work beside the main one).
+set -euo pipefail
+. "$(dirname "$0")/lib/remote.sh"
+KSRC=${DUO2_KSRC:-src/linux}
+KOUT=${DUO2_KOUT:-out/linux}
+
+DTB=$(basename "$(duo2_ssh "sudo sed -n 's/^devicetree //p' /boot/efi/loader/entries/duo2.conf")")
+APPEND=
+REBOOT=1
+SAME=
+NEWINITRD=
+DROP=
+NEWDTB=
+while [ $# -gt 0 ]; do
+    case $1 in
+        --dtb) DTB=$2; NEWDTB=1; shift 2 ;;
+        --append) APPEND=$2; shift 2 ;;
+        --no-reboot) REBOOT=; shift ;;
+        --same-kernel) SAME=1; shift ;;
+        --initrd) NEWINITRD=$2; shift 2 ;;
+        --drop) DROP="$DROP $2"; shift 2 ;;
+        *) echo "unknown option $1" >&2; exit 2 ;;
+    esac
+done
+
+RUNNING=$(duo2_ssh uname -r)
+OPTS=$(duo2_ssh "sudo sed -n 's/^options //p' /boot/efi/loader/entries/duo2.conf")
+INITRD=$(duo2_ssh "sudo sed -n 's/^initrd *//p' /boot/efi/loader/entries/duo2.conf")
+# What sudo copies to the ESP is staged in the administrator's home
+# (duo2_stage), never in /tmp, where an app could swap it.
+S=$(duo2_stage try)
+duo2_ssh "mkdir -p $S"
+
+if [ -n "$SAME" ]; then
+    TRYID=same-$(date +%Y%m%d%H%M%S)
+    LINUX=/duo2/Image
+    DT=$(duo2_ssh "sudo sed -n 's/^devicetree //p' /boot/efi/loader/entries/duo2.conf")
+    if [ -n "$NEWDTB" ]; then
+        DTBF=$R/$KOUT/arch/arm64/boot/dts/qcom/$DTB
+        [ -f "$DTBF" ] || { echo "missing $DTBF" >&2; exit 1; }
+        duo2_scp "$DTBF" "$DUO2_HOST:$S/"
+        duo2_esp_ssh "set -e; sudo mkdir -p /boot/efi/duo2/test; sudo cp $S/$DTB /boot/efi/duo2/test/$DTB; sudo cmp $S/$DTB /boot/efi/duo2/test/$DTB; rm -f $S/$DTB"
+        DT=/duo2/test/$DTB
+        TRYID=same-dtb-$(date +%Y%m%d%H%M%S)
+    fi
+    echo "== trying the known-good kernel with DTB $DT, options: ${APPEND:-(none)}"
+else
+    K=$R/$KOUT
+    REL=$(cat "$K/include/config/kernel.release")
+    TRYID=$REL
+    IMG=$K/arch/arm64/boot/Image
+    DTBF=$K/arch/arm64/boot/dts/qcom/$DTB
+    [ -f "$IMG" ] && [ -f "$DTBF" ] || { echo "missing $IMG or $DTBF" >&2; exit 1; }
+    # The known-good kernel's modules must never be replaced: its release is
+    # read from the Image duo2.conf boots (the banner string in the Image).
+    GOOD=$(duo2_ssh "sudo grep -a -m1 -o 'Linux version [^ ]*' /boot/efi/duo2/Image" | awk '{print $3}')
+    if [ "$REL" = "$GOOD" ]; then
+        echo "kernel release $REL is the known-good one: rebuild with a new LOCALVERSION (build-kernel.sh does)" >&2
+        exit 1
+    fi
+    echo "== trying $REL (running: $RUNNING, known-good: $GOOD), DTB $DTB"
+
+    echo "== modules"
+    MR=$R/out/modroot-try
+    rm -rf "$MR"
+    docker run --rm -u "$(id -u):$(id -g)" -v "$R":/work duo2-build bash -c \
+        "cd /work/$KSRC && make -s ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=/work/$KOUT \
+         LOCALVERSION=$(cat "$K/.duo2-ksuffix" 2>/dev/null) INSTALL_MOD_PATH=/work/out/modroot-try INSTALL_MOD_STRIP=1 modules_install"
+    rm -f "$MR/lib/modules/$REL/build" "$MR/lib/modules/$REL/source"
+    tar -C "$MR/lib/modules" -cf - "$REL" | duo2_ssh "sudo rm -rf /lib/modules/$REL && sudo tar -C /lib/modules -xf - && sudo depmod -a $REL && du -sh /lib/modules/$REL"
+
+    echo "== ESP"
+    duo2_scp "$IMG" "$DTBF" "$DUO2_HOST:$S/"
+    duo2_esp_ssh "set -e
+    sudo mkdir -p /boot/efi/duo2/test
+    sudo cp $S/Image /boot/efi/duo2/test/Image
+    sudo cp $S/$DTB /boot/efi/duo2/test/$DTB
+    sudo cmp $S/Image /boot/efi/duo2/test/Image
+    sudo cmp $S/$DTB /boot/efi/duo2/test/$DTB
+    rm -f $S/Image $S/$DTB"
+    LINUX=/duo2/test/Image
+    DT=/duo2/test/$DTB
+fi
+
+# A try that wedges in a driver must panic (panic=30 reboots, the try is used
+# up, the known-good entry boots); the rootfs adds a 6 min boot timeout.
+if [ -n "$NEWINITRD" ]; then
+    duo2_scp "$NEWINITRD" "$DUO2_HOST:$S/initrd-try.img"
+    duo2_esp_ssh "set -e; sudo mkdir -p /boot/efi/duo2/test; sudo cp $S/initrd-try.img /boot/efi/duo2/test/initrd.img; sudo cmp $S/initrd-try.img /boot/efi/duo2/test/initrd.img; rm -f $S/initrd-try.img"
+    INITRD=/duo2/test/initrd.img
+fi
+# --drop removes options of the known-good entry (exact words)
+for d in $DROP; do
+    OPTS=$(printf ' %s ' "$OPTS" | sed "s| $d | |g; s|^ *||; s| *$||")
+done
+OPTS="$OPTS hung_task_timeout_secs=60${APPEND:+ $APPEND} duo2.try=$TRYID"
+duo2_esp_ssh "set -e
+sudo sh -c 'rm -f /boot/efi/loader/entries/duo2-test*.conf
+printf \"title   duo2-os TRY %s\nsort-key duo2\nversion 99\nlinux   %s\ninitrd  %s\ndevicetree %s\noptions %s\n\" \
+    \"$TRYID\" \"$LINUX\" \"$INITRD\" \"$DT\" \"$OPTS\" > \"/boot/efi/loader/entries/duo2-test+1.conf\"'
+sync
+sudo bootctl list --no-pager 2>/dev/null | grep -A3 'TRY' | grep -E 'title|tries' || true"
+
+[ -n "$REBOOT" ] || { echo "entry written; reboot to try it"; exit 0; }
+OLD_BOOT_ID=$(duo2_ssh cat /proc/sys/kernel/random/boot_id)
+echo "== reboot"
+duo2_reboot
+duo2_wait_up 360
+if duo2_ssh "tr ' ' '\n' < /proc/cmdline | grep -qx 'duo2.try=$TRYID'"; then
+    echo "RESULT: try $TRYID is running ($(duo2_ssh uname -r))"
+else
+    echo "RESULT: back on $(duo2_ssh uname -r) without the try - $TRYID did not come up (journalctl -b -1, /sys/fs/pstore)"
+    exit 3
+fi

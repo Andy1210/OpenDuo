@@ -1,0 +1,95 @@
+From 63b1d57d1c8418855e07b36415e0738b920478d5 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 01:19:23 +0100
+Subject: [PATCH 073/137] media: qcom: camss: Set the SM8350 camera NoC clock
+ rates
+
+Put the camera NoC's levels (300 and 400 MHz, the vendor driver's low
+SVS and SVS ones) on the camnoc_axi branch, which the VFE sets from the
+pixel clock, as on SM8550. On the RCG nothing set them, and the clock
+stayed at the 19.2 MHz the camera clock controller starts with: the VFE
+then received frames (start and end of frame on its RDI) but never
+completed a reg update or a buffer, with a CCIF violation on the RDI's
+write master.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/media/platform/qcom/camss/camss.c | 30 +++++++++++------------
+ 1 file changed, 15 insertions(+), 15 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/camss/camss.c b/drivers/media/platform/qcom/camss/camss.c
+index 64b85ebe07c6..308ae652f2aa 100644
+--- a/drivers/media/platform/qcom/camss/camss.c
++++ b/drivers/media/platform/qcom/camss/camss.c
+@@ -2387,11 +2387,11 @@ static const struct camss_subdev_resources vfe_res_8350[] = {
+ 		.clock = { "camnoc_axi_src", "slow_ahb_src", "cpas_ahb",
+ 			   "camnoc_axi", "vfe0_ahb", "vfe0_areg", "vfe0",
+ 			   "vfe0_axi", "cam_hf_axi" },
+-		.clock_rate = { { 19200000, 300000000, 400000000 },
+-				{ 19200000, 80000000 },
+-				{ 19200000 },
++		.clock_rate = { { 0 },
+ 				{ 0 },
+ 				{ 0 },
++				{ 300000000, 400000000 },
++				{ 0 },
+ 				{ 100000000, 200000000, 300000000, 400000000 },
+ 				{ 338000000, 475000000, 600000000, 720000000 },
+ 				{ 0 },
+@@ -2413,10 +2413,10 @@ static const struct camss_subdev_resources vfe_res_8350[] = {
+ 		.clock = { "camnoc_axi_src", "slow_ahb_src", "cpas_ahb",
+ 			   "camnoc_axi", "vfe1_ahb", "vfe1_areg", "vfe1",
+ 			   "vfe1_axi", "cam_hf_axi" },
+-		.clock_rate = { { 19200000, 300000000, 400000000 },
+-				{ 19200000, 80000000 },
+-				{ 19200000 },
++		.clock_rate = { { 0 },
++				{ 0 },
+ 				{ 0 },
++				{ 300000000, 400000000 },
+ 				{ 0 },
+ 				{ 100000000, 200000000, 300000000, 400000000 },
+ 				{ 338000000, 475000000, 600000000, 720000000 },
+@@ -2439,11 +2439,11 @@ static const struct camss_subdev_resources vfe_res_8350[] = {
+ 		.clock = { "camnoc_axi_src", "slow_ahb_src", "cpas_ahb",
+ 			   "camnoc_axi", "vfe2_ahb", "vfe2_areg", "vfe2",
+ 			   "vfe2_axi", "cam_hf_axi" },
+-		.clock_rate = { { 19200000, 300000000, 400000000 },
+-				{ 19200000, 80000000 },
+-				{ 19200000 },
++		.clock_rate = { { 0 },
+ 				{ 0 },
+ 				{ 0 },
++				{ 300000000, 400000000 },
++				{ 0 },
+ 				{ 100000000, 200000000, 300000000, 400000000 },
+ 				{ 338000000, 475000000, 600000000, 720000000 },
+ 				{ 0 },
+@@ -2465,10 +2465,10 @@ static const struct camss_subdev_resources vfe_res_8350[] = {
+ 		.clock = { "camnoc_axi_src", "slow_ahb_src", "cpas_ahb",
+ 			   "camnoc_axi", "vfe_lite_ahb", "vfe_lite_axi",
+ 			   "vfe_lite", "cam_hf_axi" },
+-		.clock_rate = { { 19200000, 300000000, 400000000 },
+-				{ 19200000, 80000000 },
+-				{ 19200000 },
++		.clock_rate = { { 0 },
++				{ 0 },
+ 				{ 0 },
++				{ 300000000, 400000000 },
+ 				{ 0 },
+ 				{ 0 },
+ 				{ 400000000, 480000000 },
+@@ -2489,10 +2489,10 @@ static const struct camss_subdev_resources vfe_res_8350[] = {
+ 		.clock = { "camnoc_axi_src", "slow_ahb_src", "cpas_ahb",
+ 			   "camnoc_axi", "vfe_lite_ahb", "vfe_lite_axi",
+ 			   "vfe_lite", "cam_hf_axi" },
+-		.clock_rate = { { 19200000, 300000000, 400000000 },
+-				{ 19200000, 80000000 },
+-				{ 19200000 },
++		.clock_rate = { { 0 },
++				{ 0 },
+ 				{ 0 },
++				{ 300000000, 400000000 },
+ 				{ 0 },
+ 				{ 0 },
+ 				{ 400000000, 480000000 },

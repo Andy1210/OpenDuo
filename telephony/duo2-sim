@@ -1,0 +1,175 @@
+#!/bin/sh
+# duo2-sim: the Surface Duo 2's two SIM slots (telephony/README.md).
+#
+#   duo2-sim status        slots, cards, the primary subscription, ModemManager's view
+#                          (no ICCID, EID, IMSI, IMEI or phone number is printed)
+#   duo2-sim primary N     make the SIM in physical slot N (1 = nano-SIM tray,
+#                          2 = built-in eSIM) the primary subscription, the one
+#                          ModemManager, Calls and Chatty use; restarts ModemManager
+#   duo2-sim boot-wait     before ModemManager starts: ask for the primary
+#                          subscription and wait for it (bounded), see below
+#   duo2-sim auto          if ModemManager has no SIM (sim-missing): the first slot
+#                          (PROVISION_SLOT in /etc/duo2/wwan.conf, then the other)
+#                          whose card has a USIM application (duo2-wwan runs this)
+#
+# The modem runs both slots at once (dual SIM dual standby, as Android
+# configured it: persist.radio.multisim.config=dsds): physical slot 1 is
+# logical slot 1, physical slot 2 logical slot 2, and both are "active".
+# ModemManager talks to the primary GW provisioning session only, so which
+# card is "primary" is the switch, not the slot mapping (ModemManager's own
+# --set-primary-sim-slot assumes a single active slot and would remap logical
+# slot 2). Run as root.
+set -eu
+q() { timeout 20 qmicli -d qrtr://0 "$@" 2>&1; }
+conf=/etc/duo2/wwan.conf
+
+# The card-status block of logical slot $1 -> the AID of its first USIM app.
+usim_aid() {
+    q --uim-get-card-status | awk -v L="$1" '
+        /^Slot \[/ { s = $2; gsub(/[^0-9]/, "", s); next }
+        /Application type:/ { usim = (s == L && $0 ~ /usim/); next }
+        /Application ID:/ { want = usim; next }
+        want { gsub(/[[:space:]]/, ""); print; exit }'
+}
+# Physical slot $1 -> its logical slot (empty when the slot is not active).
+logical_of() {
+    q --uim-get-slot-status | awk -v P="$1" '
+        /Physical slot [0-9]+:/ { p = $3; gsub(/[^0-9]/, "", p); active = 0; next }
+        /Slot status: active/ { if (p == P) active = 1; next }
+        /Logical slot:/ { if (p == P && active) { print $3; exit } }'
+}
+# The logical slot of the primary GW session (empty: none).
+primary_slot() {
+    q --uim-get-card-status | sed -n "s/.*Primary GW: *slot '\([0-9]*\)'.*/\1/p"
+}
+
+case ${1:-status} in
+status)
+    echo "== slots (physical -> logical)"
+    q --uim-get-slot-status | grep -vEi 'iccid|eid|^\[' | sed 's/^/  /'
+    echo "== cards (logical slots)"
+    q --uim-get-card-status | grep -E "Primary GW|^Slot|Card state|UPIN state:|Application type|Application state|PIN1 state" | sed 's/^/  /'
+    echo "== ModemManager"
+    if command -v mmcli >/dev/null && mmcli -m any >/dev/null 2>&1; then
+        mmcli -K -m any | grep -E '^modem\.(generic\.(state|state-failed-reason|power-state|sim-slots[^ ]*|primary-sim-slot|access-technologies[^ ]*|signal-quality\.value)|3gpp\.(registration-state|operator-name|operator-code|packet-service-state)) ' | sed 's/^/  /'
+    else
+        echo "  no modem in ModemManager"
+    fi
+    ;;
+primary)
+    phys=${2:?usage: duo2-sim primary 1|2}
+    l=$(logical_of "$phys")
+    [ -n "$l" ] || { echo "physical slot $phys is not active" >&2; exit 1; }
+    aid=$(usim_aid "$l")
+    [ -n "$aid" ] || { echo "no USIM application on the card in slot $phys" >&2; exit 1; }
+    cur=$(primary_slot)
+    if [ "$cur" = "$l" ]; then
+        echo "slot $phys is the primary subscription already"
+        exit 0
+    fi
+    if [ -n "$cur" ]; then
+        q --uim-change-provisioning-session="session-type=primary-gw-provisioning,activate=no" >/dev/null ||
+            echo "could not end the primary session on logical slot $cur" >&2
+        sleep 1
+    fi
+    if q --uim-change-provisioning-session="session-type=primary-gw-provisioning,activate=yes,slot=$l,aid=$aid" |
+        grep -q successfully; then
+        echo "slot $phys is the primary subscription now"
+    else
+        echo "the modem refused slot $phys as the primary subscription" >&2
+        exit 1
+    fi
+    sleep 2
+    systemctl try-restart ModemManager.service
+    ;;
+auto)
+    first=1
+    [ -r "$conf" ] && first=$(sed -n 's/^PROVISION_SLOT=\([12]\).*/\1/p' "$conf" | tail -n 1)
+    [ -n "$first" ] || first=1
+    cand=
+    for phys in "$first" $((3 - first)); do
+        l=$(logical_of "$phys")
+        [ -n "$l" ] && [ -n "$(usim_aid "$l")" ] || continue
+        cand=$phys
+        break
+    done
+    [ -n "$cand" ] || exit 0
+    # A card put in while the phone runs, or at boot: ModemManager probes it
+    # at once and gives up ('sim-missing', "GW primary session index
+    # unknown"). A card put in opens its primary session by itself 30-60 s
+    # later; at boot it did not within 90 s, but right after a request for
+    # it (which the modem answers with a refusal, twice on 2026-11-07, and
+    # the session was there 0.2 s later). So: 30 s for the modem, then the
+    # request, then look again; with the session there ModemManager is
+    # restarted to see the SIM.
+    wait_primary() {
+        i=0
+        while [ -z "$(primary_slot)" ] && [ $i -lt "$1" ]; do
+            sleep 3
+            i=$((i + 1))
+        done
+    }
+    wait_primary 10
+    if [ -z "$(primary_slot)" ]; then
+        echo "no primary subscription after 30 s: taking the SIM in slot $cand"
+        "$0" primary "$cand" && exit 0
+        wait_primary 10
+    fi
+    if [ -n "$(primary_slot)" ]; then
+        if mmcli -K -m any 2>/dev/null | grep -Eq '^modem\.generic\.state-failed-reason +: sim-missing'; then
+            echo "the primary subscription is there, ModemManager looked too early: restarting it"
+            systemctl try-restart ModemManager.service
+        fi
+        exit 0
+    fi
+    echo "still no primary subscription" >&2
+    exit 1
+    ;;
+boot-wait)
+    # ModemManager's ExecStartPre (systemd/ModemManager-duo2.conf). At boot the
+    # modem opens the primary subscription only when asked (2026-11-07), and a
+    # ModemManager started before that gives up on the SIM ('sim-missing', "GW
+    # primary session index unknown"): `auto` then had to restart it, ~60 s
+    # later and with its two 10 s GNSS timeouts a second time (the data came
+    # ~2 min after boot). So: ask for the session of the first slot whose card
+    # has a USIM, and wait until it is there, before ModemManager starts.
+    # Bounded (25 s); no card with a USIM: no wait beyond a few seconds.
+    qb() { timeout 5 qmicli -d qrtr://0 "$@" 2>&1; }
+    first=1
+    [ -r "$conf" ] && first=$(sed -n 's/^PROVISION_SLOT=\([12]\).*/\1/p' "$conf" | tail -n 1)
+    [ -n "$first" ] || first=1
+    deadline=$(( $(date +%s) + 25 ))
+    asked='' empty=0
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        status=$(qb --uim-get-card-status)
+        if echo "$status" | grep -q "Primary GW: *slot '[0-9]"; then
+            echo "primary subscription ready${asked:+ (after asking for it)}"
+            exit 0
+        fi
+        cand='' aid=''
+        for phys in "$first" $((3 - first)); do
+            l=$(logical_of "$phys")
+            [ -n "$l" ] || continue
+            aid=$(usim_aid "$l")
+            [ -n "$aid" ] && { cand=$l; break; }
+        done
+        if [ -n "$cand" ]; then
+            if [ -z "$asked" ]; then
+                qb --uim-change-provisioning-session="session-type=primary-gw-provisioning,activate=yes,slot=$cand,aid=$aid" >/dev/null
+                asked=1
+            fi
+        elif echo "$status" | grep -q "Card state"; then
+            # the card status answers, but no card with a USIM (yet)
+            empty=$((empty + 1))
+            [ $empty -ge 5 ] && { echo "no card with a USIM: not waiting"; exit 0; }
+        fi
+        sleep 1
+    done
+    echo "no primary subscription after 25 s"
+    exit 0
+    ;;
+*)
+    sed -n '2,15s/^# \{0,1\}//p' "$0" >&2
+    exit 2
+    ;;
+esac

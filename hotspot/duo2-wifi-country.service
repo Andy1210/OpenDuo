@@ -1,0 +1,18 @@
+# duo2-os: the WiFi country from the mobile network (hotspot/README.md
+# "Regulatory domain"). Run by duo2-wifi-country.timer; a one-shot check that
+# sends `iw reg set XX` only when the country is due.
+[Unit]
+Description=duo2-os WiFi country from the mobile network
+After=ModemManager.service wpa_supplicant@wlan0.service
+ConditionPathExists=/sys/class/ieee80211/phy0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/duo2-wifi-country apply
+UMask=0022
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+CapabilityBoundingSet=CAP_NET_ADMIN
+RestrictAddressFamilies=AF_UNIX AF_NETLINK

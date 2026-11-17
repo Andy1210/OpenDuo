@@ -1,0 +1,76 @@
+From 010473adf7b3db7b654120526c34d0c556e2bb05 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 12:48:42 +0100
+Subject: [PATCH 125/137] drm/msm/dpu: Keep the command-mode ctl start count in
+ step
+
+pending_ctlstart_cnt counts the CTL starts of a command-mode encoder that
+have not been signalled yet: every flush adds one, the CTL start interrupt
+takes one away, and dpu_encoder_phys_cmd_wait_for_commit_done() waits for
+it to reach zero once the CTL has taken the start. Nothing else ever sets
+it, apart from the phys encoder's init.
+
+A start that is never signalled therefore stays counted for good. That
+happens when a frame gets stuck, for instance when the CTL reset
+requested by the ping-pong done timeout drops a pending start, whose
+interrupt then never comes. From then on the count is one ahead: each
+commit waits out the whole KICKOFF_TIMEOUT_MS for a start that has long
+been taken and fails with "ctl start interrupt wait failed", and the
+display runs at a few frames a second until a reboot. Switching the
+display off and on does not reset the count either.
+
+Keep the count in step: zero it when the encoder is enabled (nothing is in
+flight then) and when its CTL is reset, and count a ctl start wait that
+timed out as done, since it is only waited for once the CTL has taken the
+start.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c          |  3 +++
+ drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_cmd.c | 12 ++++++++++++
+ 2 files changed, 15 insertions(+)
+
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
+index 13ccea806689..ab5c3f96652a 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
+@@ -1802,6 +1802,9 @@ static void dpu_encoder_helper_hw_reset(struct dpu_encoder_phys *phys_enc)
+ 		msm_disp_snapshot_state(drm_enc->dev);
+ 	}
+ 
++	/* a start pending in the CTL is gone with the reset */
++	atomic_set(&phys_enc->pending_ctlstart_cnt, 0);
++
+ 	phys_enc->enable_state = DPU_ENC_ENABLED;
+ }
+ 
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_cmd.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_cmd.c
+index 45079ee59cf6..6afd918f879f 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_cmd.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_cmd.c
+@@ -484,6 +484,10 @@ static void dpu_encoder_phys_cmd_enable(struct dpu_encoder_phys *phys_enc)
+ 		return;
+ 	}
+ 
++	/* nothing is in flight on an encoder that was disabled */
++	atomic_set(&phys_enc->pending_kickoff_cnt, 0);
++	atomic_set(&phys_enc->pending_ctlstart_cnt, 0);
++
+ 	dpu_encoder_phys_cmd_enable_helper(phys_enc);
+ 	phys_enc->enable_state = DPU_ENC_ENABLED;
+ }
+@@ -657,6 +661,14 @@ static int _dpu_encoder_phys_cmd_wait_for_ctl_start(
+ 			dpu_encoder_phys_cmd_ctl_start_irq,
+ 			&wait_info);
+ 	if (ret == -ETIMEDOUT) {
++		/*
++		 * Only waited for once the CTL has taken the start (see
++		 * dpu_encoder_phys_cmd_wait_for_commit_done()): the count
++		 * holds a start that will never be signalled, e.g. one
++		 * dropped by a CTL reset after a stuck frame. Every later
++		 * wait would run into the timeout too; count it as done.
++		 */
++		atomic_set(&phys_enc->pending_ctlstart_cnt, 0);
+ 		DPU_ERROR_CMDENC(cmd_enc, "ctl start interrupt wait failed\n");
+ 		ret = -EINVAL;
+ 	} else if (!ret)

@@ -1,0 +1,18 @@
+[Unit]
+Description=OpenDuo: the kernel passed its checks, its boot entry becomes the known-good one
+Documentation=file:///usr/local/lib/duo2-maint/duo2-boot
+# systemd-bless-boot's job for our entries (it is not installed: Debian ships
+# it in the systemd-boot package, which is pinned away, and it would bless a
+# duo2-try entry too). boot-complete.target is reached only when every unit
+# RequiredBy= it (duo2-boot-health.service) succeeded.
+ConditionKernelCommandLine=openduo.entry
+Requires=boot-complete.target
+After=boot-complete.target multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/duo2-boot bless
+
+[Install]
+WantedBy=multi-user.target

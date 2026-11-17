@@ -1,0 +1,16 @@
+[Unit]
+Description=Grow the root file system to its partition (first boot only)
+# The image's /etc/machine-id is empty, so only its very first boot counts.
+# Not x-systemd.growfs in fstab: that resizes on every boot, and after a hard
+# reset the online resize hung the whole boot.
+ConditionFirstBoot=yes
+DefaultDependencies=no
+After=systemd-remount-fs.service
+Before=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/systemd/systemd-growfs /
+
+[Install]
+WantedBy=local-fs.target

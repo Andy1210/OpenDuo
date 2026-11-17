@@ -1,0 +1,4 @@
+# duo2-os: libcamera's software ISP (the cameras, docs/hardware/camera.md) allocates
+# from the dma-buf system heap, root's only by default: the video group's too,
+# like the camera nodes themselves.
+SUBSYSTEM=="dma_heap", KERNEL=="system", GROUP="video", MODE="0660"

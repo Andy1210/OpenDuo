@@ -1,0 +1,118 @@
+#!/bin/sh
+# duo2-usb-gadget: the phone's USB gadget. CDC-ACM (the serial console,
+# ttyGS0) always; CDC-NCM (usb0, the development network 10.15.19.1/24) while
+# USB networking is on (Settings > Developer: developer_mode and usb_network
+# in /etc/duo-devmode.conf, devmode/README.md). Without that file it is
+# on, as it was before there was a switch.
+#
+#   duo2-usb-gadget          make the gadget (duo2-usb-gadget.service, at
+#                            boot); one that is there already is brought in
+#                            line with the setting
+#   duo2-usb-gadget apply    the same, later (duo-devmode): usb0 added or
+#                            removed live; the host sees the phone unplugged
+#                            and plugged in again for about a second
+#
+# USB tethering (hotspot/) adds its own function after these; while it is on,
+# usb0 is left as it is (its interface numbers would move): exit 3.
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+G=${DUO2_GADGET:-/sys/kernel/config/usb_gadget/duo2}
+CONF=${DUO_DEVMODE_CONF:-/etc/duo-devmode.conf}
+
+# conf KEY: the value of KEY in the developer settings ("" when not set).
+conf() {
+    [ -r "$CONF" ] || return 0
+    sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\([a-z]*\)[[:space:]]*\$/\1/p" "$CONF" |
+        tail -n 1
+}
+
+# USB networking wanted: on unless the settings say otherwise (no file: on).
+want_network() {
+    [ -e "$CONF" ] || return 0
+    [ "$(conf developer_mode)" = on ] && [ "$(conf usb_network)" = on ]
+}
+
+# The configuration's usb0 link as the setting wants it; the gadget is
+# unbound around the change and bound again whatever happens.
+apply() {
+    cfg=$G/configs/c.1
+    [ -d "$cfg" ] || { echo "duo2-usb-gadget: no configuration c.1" >&2; exit 1; }
+    if want_network; then
+        [ ! -L "$cfg/ncm.usb0" ] || return 0
+    else
+        [ -L "$cfg/ncm.usb0" ] || return 0
+    fi
+    if [ -L "$cfg/ncm.tether" ]; then
+        echo "duo2-usb-gadget: USB tethering is on; usb0 changes when it is off" >&2
+        exit 3
+    fi
+    udc=$(cat "$G/UDC" 2>/dev/null || true)
+    [ -z "$udc" ] || echo >"$G/UDC"
+    rc=0
+    if want_network; then
+        mkdir -p "$G/functions/ncm.usb0" && ln -s "$G/functions/ncm.usb0" "$cfg/ncm.usb0" || rc=1
+    else
+        rm -f "$cfg/ncm.usb0" || rc=1
+    fi
+    [ -z "$udc" ] || echo "$udc" >"$G/UDC" || rc=1
+    return $rc
+}
+
+# The gadget's serial number: stable per phone, but not the machine id itself
+# (machine-id(5): never exposed directly; every USB host sees the serial).
+serial() {
+    { cat /etc/machine-id 2>/dev/null || true; printf 'duo2 usb serial'; } | sha256sum | cut -c1-16
+}
+
+first_udc() {
+    for u in /sys/class/udc/*; do
+        [ -e "$u" ] && { echo "${u##*/}"; return 0; }
+    done
+    return 1
+}
+
+case ${1:-} in
+apply)
+    [ -d "$G" ] || { echo "duo2-usb-gadget: no gadget" >&2; exit 1; }
+    apply
+    exit
+    ;;
+"") ;;
+*)
+    echo "usage: duo2-usb-gadget [apply]" >&2
+    exit 2
+    ;;
+esac
+
+modprobe libcomposite 2>/dev/null || true
+mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config
+if [ -d "$G" ]; then
+    apply
+    exit
+fi
+i=0
+while ! first_udc >/dev/null && [ $i -lt 30 ]; do
+    sleep 1
+    i=$((i + 1))
+done
+UDC=$(first_udc) || { echo "duo2-usb-gadget: no UDC" >&2; exit 1; }
+mkdir -p "$G"
+cd "$G"
+echo 0x1d6b >idVendor  # Linux Foundation
+echo 0x0104 >idProduct # Multifunction composite gadget
+echo 0x0100 >bcdDevice
+mkdir -p strings/0x409
+echo "duo2-os" >strings/0x409/manufacturer
+echo "Surface Duo 2 (duo2-os)" >strings/0x409/product
+serial >strings/0x409/serialnumber || true
+mkdir -p configs/c.1/strings/0x409
+echo "NCM + ACM" >configs/c.1/strings/0x409/configuration
+echo 500 >configs/c.1/MaxPower
+mkdir -p functions/acm.GS0
+if want_network; then
+    mkdir -p functions/ncm.usb0
+    ln -s functions/ncm.usb0 configs/c.1/
+fi
+ln -s functions/acm.GS0 configs/c.1/
+echo "$UDC" >UDC

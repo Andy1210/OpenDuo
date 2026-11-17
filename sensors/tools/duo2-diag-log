@@ -1,0 +1,207 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""duo2-diag-log: print the debug messages (DIAG "F3" / MSG) a DSP sends.
+
+  duo2-diag-log [-t SECS] [-m MASK] [-g REGEX] [--raw]
+
+Talks to a running diag-router (scripts/build-diag.sh; start it with
+DIAG_QRTR_ONLY=sensors so that only the SLPI is served) through its unix
+socket (abstract "\\0diag", one DIAG packet per datagram, no HDLC). It sets
+the message mask of every SSID to MASK (default 0x1f: low, medium, high,
+error, fatal), prints every message that comes back, and clears the mask
+again on exit. The router hands the masks to a DSP when it connects, so
+restarting the SLPI with the router running catches its boot messages.
+
+The SLPI's messages carry their format string and file name, so nothing from
+the firmware is needed to read them.
+"""
+
+import argparse
+import re
+import socket
+import struct
+import sys
+import time
+
+DIAG_CMD_EXT_MSG_CONFIG = 0x7D
+OP_GET_SSID_RANGE = 1
+OP_SET_MSG_MASK = 4
+DIAG_CMD_EXT_MSG = 0x79
+DIAG_CMD_MULTI_ID = 0x98  # an extended message tagged with a diag id
+DIAG_CMD_LOG = 0x10
+DIAG_CMD_LOG_CONFIG = 0x73
+DIAG_CMD_EVENT = 0x60
+
+LEVELS = {1: "LOW", 2: "MED", 4: "HIGH", 8: "ERROR", 16: "FATAL"}
+
+
+def ssid_ranges(sock):
+    """The SSID ranges the router keeps masks for (GET_SSID_RANGE)."""
+    sock.send(struct.pack("<BB", DIAG_CMD_EXT_MSG_CONFIG, OP_GET_SSID_RANGE))
+    while True:
+        pkt = sock.recv(65536)
+        if pkt[:2] == bytes([DIAG_CMD_EXT_MSG_CONFIG, OP_GET_SSID_RANGE]):
+            break
+    (count,) = struct.unpack_from("<I", pkt, 4)
+    return [struct.unpack_from("<HH", pkt, 8 + 4 * i) for i in range(count)]
+
+
+def set_logs(sock, on):
+    """Every log code of every equipment id on (or off): SET_LOG_MASK."""
+    sock.send(struct.pack("<B3xI", DIAG_CMD_LOG_CONFIG, 1))  # GET_LOG_RANGE
+    while True:
+        pkt = sock.recv(65536)
+        if pkt[0] == DIAG_CMD_LOG_CONFIG and struct.unpack_from("<I", pkt, 4)[0] == 1:
+            break
+    items = struct.unpack_from("<16I", pkt, 12)
+    for equip, n in enumerate(items):
+        if n:
+            nbytes = (n + 7) // 8
+            sock.send(
+                struct.pack("<B3xIII", DIAG_CMD_LOG_CONFIG, 3, equip, n)
+                + (b"\xff" if on else b"\0") * nbytes
+            )
+
+
+def set_all(sock, ranges, mask):
+    # One SET_MSG_MASK per range: the router's SET_ALL_MSG_MASK hands a NULL
+    # range to the per-peripheral code and crashes once a DSP is connected.
+    for first, last in ranges:
+        n = last - first + 1
+        sock.send(
+            struct.pack(
+                "<BBHHH%dI" % n,
+                DIAG_CMD_EXT_MSG_CONFIG,
+                OP_SET_MSG_MASK,
+                first,
+                last,
+                0,
+                *([mask] * n),
+            )
+        )
+
+
+def c_format(fmt, args):
+    """Apply a printf format to 32-bit integer arguments (as the DSP sent them)."""
+    out = []
+    it = iter(args)
+    pos = 0
+    for m in re.finditer(r"%([-+ #0]*)(\d*)(?:\.(\d+))?(hh|h|ll|l|z|j|t)?([diuxXcsp%])", fmt):
+        out.append(fmt[pos : m.start()])
+        pos = m.end()
+        flags, width, prec, length, conv = m.groups()
+        if conv == "%":
+            out.append("%")
+            continue
+        try:
+            v = next(it)
+        except StopIteration:
+            out.append(m.group(0))
+            continue
+        if length == "ll":
+            try:
+                v |= next(it) << 32
+            except StopIteration:
+                pass
+        spec = "%" + flags + width + ("." + prec if prec else "")
+        if conv in "di":
+            if length != "ll" and v & 0x80000000:
+                v -= 1 << 32
+            out.append((spec + "d") % v)
+        elif conv == "u":
+            out.append((spec + "d") % v)
+        elif conv in "xX":
+            out.append((spec + conv) % v)
+        elif conv == "p":
+            out.append("0x%x" % v)
+        elif conv == "c":
+            out.append(chr(v & 0xFF))
+        else:  # %s: a DSP pointer, not printable here
+            out.append("<s:%x>" % v)
+    out.append(fmt[pos:])
+    return "".join(out)
+
+
+def decode_ext_msg(pkt):
+    if len(pkt) < 20:
+        return None
+    _, ts_type, nargs, drop, ts, line, ssid, ssmask = struct.unpack_from("<BBBBQHHI", pkt, 0)
+    off = 20
+    args = list(struct.unpack_from("<%dI" % nargs, pkt, off)) if nargs else []
+    off += 4 * nargs
+    rest = pkt[off:]
+    parts = rest.split(b"\0")
+    fmt = parts[0].decode("latin-1", "replace")
+    fname = parts[1].decode("latin-1", "replace") if len(parts) > 1 else ""
+    # the timestamp is in 1.25 ms / 2^16 units ("CDMA" time): upper 48 bits
+    tsec = (ts >> 16) * 1.25 / 1000.0
+    lvl = "|".join(v for k, v in LEVELS.items() if ssmask & k) or "0x%x" % ssmask
+    return "%12.3f %5d %-5s %s:%d %s%s" % (
+        tsec,
+        ssid,
+        lvl,
+        fname,
+        line,
+        c_format(fmt, args),
+        " (dropped %d)" % drop if drop else "",
+    )
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument("-t", "--time", type=float, default=0, help="stop after SECS (0 = until ^C)")
+    ap.add_argument("-m", "--mask", type=lambda s: int(s, 0), default=0x1F)
+    ap.add_argument("-g", "--grep", help="print only lines matching REGEX")
+    ap.add_argument("--raw", action="store_true", help="also print packets that are not messages")
+    ap.add_argument("--logs", action="store_true", help="also turn on every log packet")
+    ap.add_argument("--keep-mask", action="store_true", help="leave the mask set on exit")
+    args = ap.parse_args()
+    pat = re.compile(args.grep) if args.grep else None
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    # the router binds the whole sun_path: "\0diag" padded with NULs to 108
+    sock.connect(b"\0diag".ljust(108, b"\0"))
+    sock.settimeout(5)
+    ranges = ssid_ranges(sock)
+    set_all(sock, ranges, args.mask)
+    if args.logs:
+        set_logs(sock, True)
+    sock.settimeout(0.5)
+    t0 = time.monotonic()
+    try:
+        while args.time <= 0 or time.monotonic() - t0 < args.time:
+            try:
+                pkt = sock.recv(65536)
+            except TimeoutError:
+                continue
+            if not pkt:
+                break
+            line = None
+            if pkt[0] == DIAG_CMD_MULTI_ID and len(pkt) > 4 and pkt[4] == DIAG_CMD_EXT_MSG:
+                line = decode_ext_msg(pkt[4:])
+            elif pkt[0] == DIAG_CMD_EXT_MSG:
+                line = decode_ext_msg(pkt)
+            elif pkt[0] == DIAG_CMD_LOG and len(pkt) >= 16:
+                _, _, _, ln, code, ts = struct.unpack_from("<BBHHHQ", pkt, 0)
+                line = "log 0x%04x len %d: %s" % (code, ln, pkt[16 : 16 + 64].hex())
+            elif args.raw:
+                line = "raw %02x len %d: %s" % (pkt[0], len(pkt), pkt[:48].hex())
+            if line and (not pat or pat.search(line)):
+                print(line, flush=True)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if not args.keep_mask:
+            try:
+                sock.settimeout(2)
+                set_all(sock, ranges, 0)
+                if args.logs:
+                    set_logs(sock, False)
+            except OSError:
+                pass
+
+
+if __name__ == "__main__":
+    sys.exit(main())

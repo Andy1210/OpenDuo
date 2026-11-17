@@ -1,0 +1,33 @@
+# duo2-os defaults for the preinstalled apps (installed by shell/duo-apps/install.sh
+# into /usr/share/glib-2.0/schemas/, then glib-compile-schemas). duo-shell's own
+# override (90_duo2-os) sets dark and the on-screen keyboard.
+
+# GNOME Software (the app installer). Updates are off: Debian's updates go
+# through PackageKit's offline update (a reboot into system-update.target),
+# which this phone's boot path has not been tried with; update with apt over
+# ssh, and Flatpaks with `flatpak update`. Flatpaks (Flathub, the user
+# remote) are preferred over Debian packages when an app comes in both
+# (owner, 2026-11-07): sandboxed, so an app installed from the store gets
+# less of the user's session (docs/hardware/security.md); Debian packages
+# stay offered and the curated "Works well on the Duo" list is unchanged.
+[org.gnome.software]
+allow-updates=false
+download-updates=false
+download-updates-notify=false
+first-run=false
+enable-repos-dialog=false
+packaging-format-preference=['flatpak', 'deb']
+
+# Weather and Clocks' weather: metric (the session's C locale would pick
+# nothing sensible).
+[org.gnome.GWeather4]
+temperature-unit='centigrade'
+speed-unit='kph'
+distance-unit='km'
+pressure-unit='hpa'
+
+# Celluloid (Video) loads the system mpv configuration, which decodes H.264
+# and HEVC on the video core (rootfs/overlay/etc/mpv/mpv.conf, docs/hardware/video.md). The file is a URI, as Celluloid's preferences store it.
+[io.github.celluloid-player.Celluloid]
+mpv-config-enable=true
+mpv-config-file='file:///etc/mpv/mpv.conf'

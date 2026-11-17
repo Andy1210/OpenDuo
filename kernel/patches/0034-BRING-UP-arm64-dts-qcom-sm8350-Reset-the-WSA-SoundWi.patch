@@ -1,0 +1,62 @@
+From f0753580cb9a436cb2112ab9e1899b0487a1576a Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 04:10:04 +0100
+Subject: [PATCH 034/137] BRING-UP: arm64: dts: qcom: sm8350: Reset the WSA
+ SoundWire clock gate
+
+The WSA SoundWire controller is v1.6.0 (SWRM_COMP_HW_VERSION 0x01060000
+on the Surface Duo 2), whose driver wants the "swr_audio_cgcr" reset to
+put the controller's AHB clock gating under software control, as the
+stock driver does by clearing bit 1 of 0x32a90b0 ("qcom,swrm-hctl-reg").
+Without it the bus only noticed the amplifiers attaching when it went to
+clock stop 3 s after probe, and the first transfers to them failed with
+"swrm_wait_for_rd_fifo_avail err read underflow".
+
+Describe the LPASS audio CSR (reset controller only) and hand the WSA
+bus its reset.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ arch/arm64/boot/dts/qcom/sm8350.dtsi | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350.dtsi b/arch/arm64/boot/dts/qcom/sm8350.dtsi
+index f1f0931b47bb..fed3b83468ef 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8350.dtsi
+@@ -10,6 +10,7 @@
+ #include <dt-bindings/clock/qcom,gcc-sm8350.h>
+ #include <dt-bindings/clock/qcom,gpucc-sm8350.h>
+ #include <dt-bindings/clock/qcom,rpmh.h>
++#include <dt-bindings/clock/qcom,sc8280xp-lpasscc.h>
+ #include <dt-bindings/clock/qcom,sm8350-videocc.h>
+ #include <dt-bindings/dma/qcom-gpi.h>
+ #include <dt-bindings/firmware/qcom,scm.h>
+@@ -2055,6 +2056,8 @@ swr0: soundwire@3250000 {
+ 			clocks = <&wsamacro>;
+ 			clock-names = "iface";
+ 			label = "WSA";
++			resets = <&lpass_audiocc LPASS_AUDIO_SWR_WSA_CGCR>;
++			reset-names = "swr_audio_cgcr";
+ 
+ 			pinctrl-0 = <&wsa_swr_active>;
+ 			pinctrl-names = "default";
+@@ -2079,6 +2082,18 @@ swr0: soundwire@3250000 {
+ 			status = "disabled";
+ 		};
+ 
++		/*
++		 * The LPASS audio CSR: only its SoundWire clock gating controls
++		 * are used (the stock "qcom,swrm-hctl-reg" = 0x32a90b0 for WSA,
++		 * the SoundWire v1.6.0 driver's "swr_audio_cgcr" reset).
++		 */
++		lpass_audiocc: clock-controller@32a9000 {
++			compatible = "qcom,sm8350-lpassaudiocc", "qcom,sc8280xp-lpassaudiocc";
++			reg = <0 0x032a9000 0 0x1000>;
++			#clock-cells = <1>;
++			#reset-cells = <1>;
++		};
++
+ 		vamacro: codec@3370000 {
+ 			compatible = "qcom,sm8350-lpass-va-macro", "qcom,sm8250-lpass-va-macro";
+ 			reg = <0 0x03370000 0 0x1000>;

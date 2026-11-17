@@ -1,0 +1,24 @@
+#!/bin/sh
+# duo2-waydroid-reaper.timer: stop waydroid-container.service (the root
+# container manager, ~35 MB of Python) when no Android container has run
+# for IDLE_MIN minutes (/etc/duo2/waydroid.conf). The container itself is
+# stopped by the session's idle check (duo2-waydroid-idle, the GUI user's);
+# the manager comes back by itself (D-Bus activation) with the next app.
+set -eu
+IDLE_MIN=5
+# shellcheck source=/dev/null
+[ -r /etc/duo2/waydroid.conf ] && . /etc/duo2/waydroid.conf
+STAMP=/run/duo2-waydroid/container-seen
+systemctl -q is-active waydroid-container.service || exit 0
+state=$(lxc-info -P /var/lib/waydroid/lxc -n waydroid -sH 2>/dev/null || echo STOPPED)
+install -d -m 0755 /run/duo2-waydroid
+if [ "$state" != STOPPED ] || [ ! -e "$STAMP" ]; then
+    touch "$STAMP"
+    exit 0
+fi
+age=$(( $(date +%s) - $(stat -c %Y "$STAMP") ))
+if [ "$age" -ge $((IDLE_MIN * 60)) ]; then
+    echo "duo2-waydroid-reaper: no container for ${age}s, stopping the container manager"
+    rm -f "$STAMP"
+    systemctl stop waydroid-container.service
+fi

@@ -1,0 +1,10 @@
+[Unit]
+Description=Update the Waydroid Android images (WiFi only, Android not running)
+ConditionPathExists=/var/lib/waydroid/waydroid.cfg
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/duo2-waydroid-upgrade
+Nice=10
+IOSchedulingClass=idle

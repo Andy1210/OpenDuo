@@ -1,0 +1,105 @@
+#!/usr/bin/python3 -I
+"""duo-settings-qmi: the modem's equipment identity over QMI (DMS Get IDs).
+
+Run only by duo-settings-helper, inside a transient system service that
+systemd (PID 1) starts (systemd-run --pipe --wait): the GUI session and
+everything it starts, sudo included, may not open QRTR sockets (a seccomp
+filter, docs/hardware/security.md), so the helper cannot ask the modem itself.
+Prints one JSON line, {"ids": [{"sub": 0, "imei": "...", "sv": "..."}],
+"bind": true|false}, or exits 1. It only reads. Per-subscription IDs need
+DMS "Bind Subscription"; a modem that refuses it (this one does: error 58)
+answers the one set of IDs it has, as subscription 0.
+
+The output is a personal identifier: nothing here logs it.
+"""
+
+import json
+import re
+import socket
+import struct
+import sys
+
+AF_QIPCRTR = 42
+QRTR_PORT_CTRL = 0xFFFFFFFE
+TYPE_NEW_SERVER, TYPE_NEW_LOOKUP = 4, 10
+DMS = 2
+MSG_GET_IDS, MSG_BIND_SUBSCRIPTION = 0x0025, 0x0045
+DIGITS = re.compile(r"[0-9]{14,16}")
+
+
+def lookup(sock, service):
+    sock.sendto(
+        struct.pack("<IIIII", TYPE_NEW_LOOKUP, service, 0, 0, 0),
+        (sock.getsockname()[0], QRTR_PORT_CTRL),
+    )
+    while True:
+        data, _ = sock.recvfrom(256)
+        cmd, svc, _inst, node, port = struct.unpack("<IIIII", data[:20])
+        if cmd == TYPE_NEW_SERVER:
+            if svc == service and (node or port):
+                return node, port
+            if svc == 0:
+                raise OSError("no DMS service")
+
+
+def parse_tlvs(body):
+    out, i = {}, 0
+    while i + 3 <= len(body):
+        t, n = struct.unpack("<BH", body[i : i + 3])
+        out[t] = body[i + 3 : i + 3 + n]
+        i += 3 + n
+    return out
+
+
+def call(sock, dst, txn, msg, body=b""):
+    """(result, error, tlvs) of one request."""
+    sock.sendto(struct.pack("<BHHH", 0, txn, msg, len(body)) + body, dst)
+    while True:
+        data, _ = sock.recvfrom(4096)
+        _flags, t, m, n = struct.unpack("<BHHH", data[:7])
+        if t == txn and m == msg:
+            tlvs = parse_tlvs(data[7 : 7 + n])
+            result, error = struct.unpack("<HH", tlvs[2])
+            return result, error, tlvs
+
+
+def get_ids(sock, dst, txn):
+    result, _err, tlvs = call(sock, dst, txn, MSG_GET_IDS)
+    if result != 0:
+        return None
+    imei = tlvs.get(0x11, b"").decode("ascii", "replace")
+    sv = tlvs.get(0x13, b"").decode("ascii", "replace")
+    return {"imei": imei if DIGITS.fullmatch(imei) else "", "sv": sv if sv.isdigit() else ""}
+
+
+def main():
+    sock = socket.socket(AF_QIPCRTR, socket.SOCK_DGRAM)
+    sock.settimeout(5)
+    dst = lookup(sock, DMS)
+    first = get_ids(sock, dst, 1)
+    if first is None:
+        return 1
+    ids, bound = [dict(first, sub=0)], False
+    for sub in (0, 1):
+        # A second client would be cleaner; the request binds this socket's client.
+        result, _err, _t = call(
+            sock, dst, 10 + sub, MSG_BIND_SUBSCRIPTION, struct.pack("<BHI", 1, 4, sub)
+        )
+        if result != 0:
+            break
+        bound = True
+        got = get_ids(sock, dst, 20 + sub)
+        if got:
+            if sub == 0:
+                ids = [dict(got, sub=0)]
+            else:
+                ids.append(dict(got, sub=1))
+    print(json.dumps({"ids": ids, "bind": bound}))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (OSError, struct.error, KeyError):
+        sys.exit(1)

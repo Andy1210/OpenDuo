@@ -1,0 +1,13 @@
+#!/bin/sh
+# @PKG@: the build stamp (/etc/duo2-release: Settings > About, bug reports)
+# and /etc/os-release from it (rootfs/install-os-release.sh, as the image).
+set -e
+D=/usr/lib/openduo/release
+case "$1" in
+configure)
+    install -m 0644 "$D/duo2-release" /etc/duo2-release.new
+    mv -f /etc/duo2-release.new /etc/duo2-release
+    sh "$D/install-os-release.sh" /etc/duo2-release
+    ;;
+esac
+exit 0

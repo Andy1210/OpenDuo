@@ -1,0 +1,191 @@
+#!/usr/bin/python3 -I
+"""duo2-wifi-country: the WiFi country from the mobile network
+(hotspot/README.md "Regulatory domain").
+
+    duo2-wifi-country status            JSON: the setting, the mobile network's
+                                        country, what the WiFi chip runs
+                                        (phy0) and cfg80211 (global), how many
+                                        5 GHz rules are no-IR (no access point)
+    duo2-wifi-country apply [--dry-run] set the country when it is due (root):
+                                        `iw reg set XX`, then read back
+
+The setting is COUNTRY= in /etc/duo2/wifi-country.conf: auto (the mobile
+network's, by its MCC; the SIM's home country never counts), a fixed XX, or
+off (never set one: 11d or the firmware's world domain alone). A country the
+WLAN firmware does not know (its regdb.bin) is not set. A hint is sent once
+per country and boot, never while an access point runs (deferred: a new
+country could take its channel away), never twice within a minute.
+
+ath11k takes the hint only with CONFIG_ATH_REG_DYNAMIC_USER_REG_HINTS; the
+5 GHz access point needs the ath11k patch that no longer intersects a country
+with the firmware's world roaming default. Without them the hint changes
+nothing on the chip (`result: ignored`). Nothing here names a network or a
+device: the state file holds countries, an MCC and times.
+"""
+
+import json
+import os
+import subprocess
+import sys
+import time
+
+_here = os.path.dirname(os.path.realpath(__file__))
+for _p in (_here, "/usr/local/lib/duo2-hotspot"):
+    if os.path.isdir(os.path.join(_p, "duo2hotspot")):
+        sys.path.insert(0, _p)
+        break
+
+from duo2hotspot import regdom  # noqa: E402
+
+CONF = os.environ.get("DUO2_WIFI_COUNTRY_CONF", "/etc/duo2/wifi-country.conf")
+STATE = os.environ.get("DUO2_WIFI_COUNTRY_STATE", "/run/duo2/wifi-country.json")
+REGDB = os.environ.get("DUO2_WIFI_REGDB", "/lib/firmware/ath11k/WCN6855/hw1.1/regdb.bin")
+PHY = "phy0"
+SETTLE_S = 3.0
+
+
+def run(argv, timeout=15):
+    """(returncode, stdout) of a command; (127, '') when it is missing."""
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, p.stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return 127, ""
+
+
+def read_text(path):
+    try:
+        with open(path) as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def read_state():
+    try:
+        with open(STATE) as f:
+            st = json.load(f)
+        return st if isinstance(st, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def write_state(st):
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+    tmp = STATE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(st, f, sort_keys=True)
+        f.write("\n")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, STATE)
+
+
+def modem_json():
+    rc, text = run(["mmcli", "-m", "any", "-J"], timeout=10)
+    if rc != 0:
+        return None
+    try:
+        return json.loads(text)
+    except ValueError:
+        return None
+
+
+def reg_get():
+    rc, text = run(["iw", "reg", "get"])
+    return regdom.parse_reg_get(text if rc == 0 else "")
+
+
+def ap_up():
+    rc, text = run(["iw", "dev"])
+    return rc == 0 and any(line.strip() == "type AP" for line in text.splitlines())
+
+
+def known_countries():
+    try:
+        with open(REGDB, "rb") as f:
+            return regdom.regdb_countries(f.read())
+    except OSError:
+        return None
+
+
+def snapshot():
+    mode = regdom.parse_conf(read_text(CONF))
+    mcc = regdom.network_mcc(modem_json())
+    reg = reg_get()
+    phy = reg["phys"].get(PHY, {})
+    return mode, mcc, reg, phy
+
+
+def report(mode, mcc, reg, phy, st, extra=None):
+    out = {
+        "setting": mode,
+        "network_mcc": mcc,
+        "network_country": regdom.country_of_mcc(mcc),
+        "phy": phy.get("country"),
+        "phy_self_managed": phy.get("self_managed"),
+        "global": reg.get("global"),
+        "no_ir_5ghz": regdom.no_ir_5ghz(phy),
+        "last": st.get("last"),
+        "result": st.get("result"),
+    }
+    out.update(extra or {})
+    print(json.dumps(out, sort_keys=True))
+
+
+def cmd_status():
+    mode, mcc, reg, phy = snapshot()
+    report(mode, mcc, reg, phy, read_state())
+    return 0
+
+
+def cmd_apply(dry_run):
+    if os.geteuid() != 0 and not dry_run:
+        print(json.dumps({"ok": False, "error": "run as root"}))
+        return 1
+    mode, mcc, reg, phy = snapshot()
+    st = read_state()
+    now = time.monotonic()
+    action, target, why = regdom.decide(
+        mode, mcc, phy.get("country"), known_countries(), st.get("last"), now, ap_up()
+    )
+    extra = {"action": action, "target": target, "why": why}
+    if action != "set" or dry_run:
+        if not dry_run:
+            st["checked"] = {"action": action, "target": target, "why": why}
+            write_state(st)
+        report(mode, mcc, reg, phy, st, extra)
+        return 0
+    rc, _ = run(["iw", "reg", "set", target])
+    st["last"] = {"set": target, "at": now, "why": why}
+    time.sleep(SETTLE_S)
+    reg = reg_get()
+    phy = reg["phys"].get(PHY, {})
+    if rc != 0:
+        result = "failed"
+    elif phy.get("country") == target:
+        result = "applied"
+    else:
+        result = "ignored"  # the driver did not take it (no dynamic user hints)
+    st["result"] = result
+    st["checked"] = {"action": action, "target": target, "why": why}
+    write_state(st)
+    print(
+        "wifi country %s (%s): %s, the chip runs %s, 5 GHz rules no-IR: %s"
+        % (target, why, result, phy.get("country"), regdom.no_ir_5ghz(phy) or "-"),
+        file=sys.stderr,
+    )
+    report(mode, mcc, reg, phy, st, extra)
+    return 0 if result != "failed" else 1
+
+
+def main(argv):
+    if argv[:1] == ["status"] and len(argv) == 1:
+        return cmd_status()
+    if argv[:1] == ["apply"] and argv[1:] in ([], ["--dry-run"]):
+        return cmd_apply(argv[1:] == ["--dry-run"])
+    print(__doc__.strip().split("\n\n")[1], file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

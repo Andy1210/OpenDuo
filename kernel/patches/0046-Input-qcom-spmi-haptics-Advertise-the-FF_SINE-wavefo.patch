@@ -1,0 +1,32 @@
+From 47526c2dc798695873da1f2ceabc76985d0f7e56 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 16:53:10 +0100
+Subject: [PATCH 046/137] Input: qcom-spmi-haptics: Advertise the FF_SINE
+ waveform
+
+upload_effect() plays an FF_PERIODIC effect with the FF_SINE waveform in
+DIRECT_PLAY mode, but probe() only sets FF_CUSTOM among the waveforms.
+input_ff_upload() refuses a periodic effect whose waveform bit is not
+set, so a sine uploaded by user space (feedbackd's periodic vibra
+feedback, fftest) never reached the driver: only FF_RUMBLE did, which
+ff-core turns into FF_SINE after that check.
+
+Set FF_SINE as well.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/input/misc/qcom-spmi-haptics.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/input/misc/qcom-spmi-haptics.c b/drivers/input/misc/qcom-spmi-haptics.c
+index f589ac137403..2e2dd9d84e0d 100644
+--- a/drivers/input/misc/qcom-spmi-haptics.c
++++ b/drivers/input/misc/qcom-spmi-haptics.c
+@@ -1159,6 +1159,7 @@ static int qcom_haptics_probe(struct platform_device *pdev)
+ 
+ 	input_set_capability(input, EV_FF, FF_CONSTANT);
+ 	input_set_capability(input, EV_FF, FF_PERIODIC);
++	input_set_capability(input, EV_FF, FF_SINE);
+ 	input_set_capability(input, EV_FF, FF_CUSTOM);
+ 	input_set_capability(input, EV_FF, FF_GAIN);
+ 

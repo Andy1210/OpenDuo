@@ -1,0 +1,223 @@
+#!/bin/sh
+# The duo-wc session: the shell (status bars, app grid), the on-screen
+# keyboard (phosh-osk-stub or squeekboard: the osk script); it opens no
+# window.
+#
+# Everything shares one D-Bus session bus (the bar talks to the on-screen
+# keyboard over it, sm.puri.OSK0; GTK apps want one): the user's own bus, /run/user/UID/bus, which the
+# user manager (systemd --user, dbus-user-session) runs from boot on because
+# the user lingers. It is the bus an ssh login gets too, and the one PipeWire,
+# WirePlumber and the portals live on. Only without it (no linger, no user
+# manager) the session makes a private one (dbus-run-session), as it did
+# before audio. The shell and the keyboard are kept running: when one exits
+# it is started again (backing off up to a minute if it keeps failing). This
+# script never ends while they run, so closing every window leaves the
+# shell, not a dead compositor.
+#
+# Audio: PipeWire runs as the user's systemd units, its sockets in
+# /run/user/UID (pipewire-0, pulse/native); duo-wc's XDG_RUNTIME_DIR is
+# /run/duo-wc, so the session's clients are pointed there with
+# PIPEWIRE_RUNTIME_DIR and PULSE_SERVER.
+#
+# For an ssh shell: . /run/duo-wc/session.env (WAYLAND_DISPLAY as an absolute
+# path, DISPLAY for X11 apps, XDG_RUNTIME_DIR = /run/user/UID, the bus,
+# duo-wc's socket, the audio sockets), then e.g. `gnome-text-editor &`.
+#
+# Trust (docs/hardware/security.md): duo-wc gives this script its trust
+# factory on fd 3 (DUO_WC_TRUST_FD=3). The shell and the on-screen keyboard
+# are started through `duoctl exec-trusted`, which gets them a Wayland
+# connection that sees the virtual keyboard, the input method, the lock, the
+# toplevel list and the layer shell (WAYLAND_SOCKET); the shell keeps the
+# factory for its own trusted control connections (and the lock's). Apps
+# connect to WAYLAND_DISPLAY / DUO_WC_SOCKET like any client and get none of
+# that. The hooks in /usr/local/lib/duo-wc/session.d/ (root's) run with the
+# factory too. Nothing written to session.env carries any trust.
+user_run=/run/user/$(id -u)
+lingering=
+[ -e "/var/lib/systemd/linger/$(id -un)" ] && lingering=1
+if [ -z "${DUO_SESSION_BUS:-}" ]; then
+    # duo-wc may start before logind has started the lingering user manager.
+    if [ -n "$lingering" ]; then
+        i=0
+        while [ ! -S "$user_run/bus" ] && [ "$i" -lt 80 ]; do
+            sleep 0.25
+            i=$((i + 1))
+        done
+    fi
+    if [ -S "$user_run/bus" ]; then
+        export DBUS_SESSION_BUS_ADDRESS="unix:path=$user_run/bus"
+        DUO_SESSION_BUS=user
+    elif command -v dbus-run-session >/dev/null; then
+        DUO_SESSION_BUS=private exec dbus-run-session -- "$0" "$@"
+    fi
+fi
+
+run=${XDG_RUNTIME_DIR:-/run/duo-wc}
+# The image's own app environment (Qt apps: native Wayland, the phone
+# layout, dark Breeze; shell/duo-apps): the user manager reads it for the
+# services it starts, the session exports it for the apps the shell starts.
+app_env=
+for f in /etc/environment.d/*duo2*.conf; do
+    [ -r "$f" ] || continue
+    set -a
+    # shellcheck disable=SC1090 # the env files are on the device only
+    . "$f"
+    set +a
+    app_env="$app_env $(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$f" | tr '\n' ' ')"
+done
+# User-installed Flatpaks (Flathub is a user remote, shell/duo-apps): their
+# .desktop files and icons are under ~/.local/share/flatpak/exports/share,
+# which the system manager's environment (flatpak's system-only generator)
+# does not list, so the app grid never showed them. flatpak's own profile
+# snippet adds every installation's exports (skipping ones already there).
+# shellcheck disable=SC1091
+[ -r /etc/profile.d/flatpak.sh ] && . /etc/profile.d/flatpak.sh
+if [ -n "$lingering" ] || [ -d "$user_run" ]; then
+    export PIPEWIRE_RUNTIME_DIR="$user_run"
+    export PULSE_SERVER="unix:$user_run/pulse/native"
+fi
+# dconf (GSettings): a process notices another one's change through the
+# shm flag $XDG_RUNTIME_DIR/dconf/user, which dconf-service (the user bus's,
+# its XDG_RUNTIME_DIR is /run/user/UID) sets there. The session's clients
+# (the shell, squeekboard, the apps) have /run/duo-wc instead, so their
+# GSettings never saw a change made elsewhere: the shell kept reading a
+# value from its start (the Vibration switch, do-not-disturb). One flag
+# for both: this directory is the user's.
+if [ -d "$user_run" ] && [ "$run" != "$user_run" ]; then
+    # shellcheck disable=SC2174 # -m applies to the new leaf only, which is what is wanted
+    mkdir -p -m 0700 "$user_run/dconf" 2>/dev/null &&
+        { [ -L "$run/dconf" ] || rm -rf "$run/dconf"; } &&
+        ln -sfn "$user_run/dconf" "$run/dconf" 2>/dev/null || true
+fi
+# The apps (and the shell and the keyboard, which start them or are started
+# like them) run with the user's own runtime directory, /run/user/UID, and
+# duo-wc's display by its absolute path (libwayland, GTK, Qt, Chromium,
+# Flatpak and Waydroid all take one). With /run/duo-wc there, flatpak kept
+# its instance files (.flatpak/ID/bwrapinfo.json) where xdg-desktop-portal,
+# a user service in /run/user/UID, never looks: every portal call of a
+# Flatpak was refused ("Portal operation not allowed"): no dark style, no
+# file chooser, no image loaders (2026-11-10). duo-wc's own files (the
+# sockets, session.env, the PID files below) stay in $run.
+case $WAYLAND_DISPLAY in
+/*) wayland_path=$WAYLAND_DISPLAY ;;
+*) wayland_path=$run/$WAYLAND_DISPLAY ;;
+esac
+app_run=$run
+# shellcheck disable=SC3067 # -O is a dash test; /bin/sh here is dash
+if [ -d "$user_run" ] && [ -O "$user_run" ]; then
+    app_run=$user_run
+    export XDG_RUNTIME_DIR="$user_run" WAYLAND_DISPLAY="$wayland_path"
+fi
+umask 077
+{
+    echo "export XDG_RUNTIME_DIR=$app_run"
+    echo "export WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
+    echo "export DUO_WC_SOCKET=$DUO_WC_SOCKET"
+    # X11 apps (Krita): duo-wc's own X display, Xwayland starts with the
+    # first X11 client (compositor/duo-wc README "X11 apps").
+    [ -n "${DISPLAY:-}" ] && echo "export DISPLAY=$DISPLAY"
+    # duo-wc sets it with DISPLAY: Qt 5 X11 apps take the pen's position
+    # from the server (src/xwayland.rs X11_APP_ENV; Krita's pen was 1.5
+    # tool buttons low without it).
+    [ -n "${QT_XCB_TABLET_LEGACY_COORDINATES:-}" ] &&
+        echo "export QT_XCB_TABLET_LEGACY_COORDINATES=$QT_XCB_TABLET_LEGACY_COORDINATES"
+    echo "export DBUS_SESSION_BUS_ADDRESS='$DBUS_SESSION_BUS_ADDRESS'"
+    [ -n "${PIPEWIRE_RUNTIME_DIR:-}" ] && echo "export PIPEWIRE_RUNTIME_DIR=$PIPEWIRE_RUNTIME_DIR"
+    [ -n "${PULSE_SERVER:-}" ] && echo "export PULSE_SERVER=$PULSE_SERVER"
+    [ -n "${XDG_DATA_DIRS:-}" ] && echo "export XDG_DATA_DIRS='$XDG_DATA_DIRS'"
+    # The language and formats (duo-wc.service reads /etc/locale.conf).
+    for v in LANG LC_NUMERIC LC_TIME LC_MONETARY LC_PAPER LC_MEASUREMENT LANGUAGE; do
+        eval "val=\${$v:-}"
+        [ -n "$val" ] && echo "export $v='$val'"
+    done
+} >"$run/session.env"
+umask 022
+
+# keep NAME COMMAND...: run COMMAND again whenever it exits; its PID is in
+# $run/NAME.pid (install scripts restart it by killing that PID).
+keep() {
+    name=$1
+    shift
+    (
+        delay=1
+        while :; do
+            started=$(date +%s)
+            "$@" &
+            echo $! >"$run/$name.pid"
+            wait $!
+            code=$?
+            ran=$(($(date +%s) - started))
+            [ "$ran" -ge 60 ] && delay=1
+            echo "duo-session: $name exited ($code) after ${ran} s; again in ${delay} s" >&2
+            sleep "$delay"
+            [ "$delay" -lt 60 ] && delay=$((delay * 2))
+        done
+    ) &
+}
+
+# Services the user bus starts on demand (the portals, dconf) run under the
+# user manager, not here: they learn where the display is from its
+# activation environment (an absolute WAYLAND_DISPLAY: their XDG_RUNTIME_DIR
+# is /run/user/UID).
+if [ "${DUO_SESSION_BUS:-}" = user ]; then
+    dbus-update-activation-environment --systemd \
+        WAYLAND_DISPLAY="$wayland_path" XDG_SESSION_TYPE=wayland \
+        DUO_WC_SOCKET="$DUO_WC_SOCKET" 2>/dev/null
+    # duo-wc's X display is for the apps started from the session (the
+    # shell's launcher, session.env), not for the services the user manager
+    # and D-Bus start: Chatty's background service opened it at every
+    # session start, and Xwayland (started by the first X11 client) then
+    # ran for nothing (compositor/duo-wc README "X11 apps").
+    dbus-update-activation-environment --systemd DISPLAY= 2>/dev/null
+    systemctl --user unset-environment DISPLAY 2>/dev/null
+    # Bus-activated services (evolution-data-server, ...) speak the session's
+    # language, and get the app environment above.
+    # shellcheck disable=SC2086
+    dbus-update-activation-environment --systemd \
+        LANG LANGUAGE LC_NUMERIC LC_TIME LC_MONETARY LC_PAPER LC_MEASUREMENT $app_env 2>/dev/null
+    # The screen-cast portal backend (shell/duo-screencast, docs/SCREENCAST.md):
+    # xdg-desktop-portal-wlr with a capture-only connection and factory, kept
+    # running here (D-Bus activation could give it no capture connection: its
+    # user unit is masked). Up and on the bus before the frontend is started
+    # again below: the frontend reads the backend's version when it starts.
+    if [ -x /usr/local/lib/duo-screencast/portal ] && [ -x /usr/libexec/xdg-desktop-portal-wlr ]; then
+        keep xdg-desktop-portal-wlr /usr/local/lib/duo-screencast/portal
+        gdbus wait --session --timeout 5 org.freedesktop.impl.portal.desktop.wlr 2>/dev/null || true
+    fi
+    # The portals outlive a compositor restart, but the GTK backend dies with
+    # the old display (or failed to start while duo-wc was down: "cannot open
+    # display"), and the frontend then keeps apps waiting for it: Text Editor
+    # never opened a window after a duo-wc restart (2026-11-07). Start them
+    # afresh on the new display (D-Bus activates them again on demand).
+    systemctl --user reset-failed xdg-desktop-portal-gtk.service 2>/dev/null
+    systemctl --user try-restart xdg-desktop-portal.service xdg-desktop-portal-gtk.service 2>/dev/null
+fi
+
+# The on-screen keyboard shows by itself when a text field gets the focus only
+# with this GNOME setting on (the image's schema override sets the default;
+# this keeps it on even after someone switched it off by hand).
+gsettings set org.gnome.desktop.a11y.applications screen-keyboard-enabled true 2>/dev/null
+
+command -v duo-shell >/dev/null &&
+    keep duo-shell duoctl exec-trusted --wayland --keep-trust -- duo-shell
+# The on-screen keyboard: phosh-osk-stub (word completion, long-press
+# accents) when this duo-wc offers what it needs, else squeekboard; the osk
+# script next to this one picks (~/.config/duo2/osk overrides it).
+# Its PID is in $run/osk.pid.
+osk=$(dirname "$0")/osk
+if [ -x "$osk" ]; then
+    keep osk duoctl exec-trusted --wayland -- "$osk"
+elif command -v squeekboard >/dev/null; then
+    # Dark keys (squeekboard's Adwaita:dark style): the panels are AMOLED.
+    keep osk duoctl exec-trusted --wayland -- env GTK_THEME=Adwaita:dark squeekboard
+fi
+
+# Session hooks (other components' session-start work that needs trust,
+# e.g. closing a window): each runs once, in the background.
+for hook in /usr/local/lib/duo-wc/session.d/*; do
+    [ -f "$hook" ] && [ -x "$hook" ] && "$hook" &
+done
+
+# No windows at start: the session boots to the home screen (a terminal is
+# in the app grid).
+wait

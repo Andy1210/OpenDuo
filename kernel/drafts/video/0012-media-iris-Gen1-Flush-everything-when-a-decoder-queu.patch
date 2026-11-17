@@ -1,0 +1,110 @@
+From 7af93c63d5cf3f27b7a51c2cef7dc172c6f901dd Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Mon, 9 Nov 2026 21:37:28 +0100
+Subject: [PATCH 12/16] media: iris: Gen1: Flush everything when a decoder
+ queue stops, as venus does
+
+When the capture queue of a streaming Gen1 decoder stopped, iris flushed
+only the output buffers, and when the other queue stopped afterwards it
+sent SESSION_STOP and RELEASE_RESOURCES without a flush. venus flushes
+everything in both cases (vdec_stop_capture(): HFI_FLUSH_ALL while
+decoding, HFI_FLUSH_OUTPUT only during a resolution change;
+vdec_stop_output(): HFI_FLUSH_ALL).
+
+On the Surface Duo 2's SM8350 firmware (vpu20_4v, video-firmware.1.0)
+a VP9 session stopped capture queue first in the middle of a stream, as
+Chromium's V4L2 stateful decoder does when it is destroyed or reset,
+brought the firmware down at the STOP, with input still queued:
+
+  sys error (type: 1, session id:ff, data1:1, data2:deadbead)
+  SFR: ... Err_Fatal - .../venus/decoders/common/src/video_decoder.c:1577
+
+after which the core restarts and every open session is lost. H.264 and
+HEVC sessions survived the same sequence.
+
+Flush everything when the capture queue stops, except during a
+resolution change (the input has to stay for the new sequence), and
+flush everything before the STOP when the other queue stopped first.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../qcom/iris/iris_hfi_gen1_command.c         | 57 ++++++++++++-------
+ 1 file changed, 38 insertions(+), 19 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c b/drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c
+index f6e9cbfccd09..937bb3e06183 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c
+@@ -185,34 +185,53 @@ static int iris_hfi_gen1_session_start(struct iris_inst *inst, u32 plane)
+ 	return iris_inst_change_sub_state(inst, 0, IRIS_INST_SUB_LOAD_RESOURCES);
+ }
+ 
+-static int iris_hfi_gen1_session_stop(struct iris_inst *inst, u32 plane)
++static int iris_hfi_gen1_session_flush(struct iris_inst *inst, u32 flush_type)
+ {
+ 	struct hfi_session_flush_pkt flush_pkt;
++	int ret;
++
++	reinit_completion(&inst->flush_completion);
++
++	flush_pkt.shdr.hdr.size = sizeof(struct hfi_session_flush_pkt);
++	flush_pkt.shdr.hdr.pkt_type = HFI_CMD_SESSION_FLUSH;
++	flush_pkt.shdr.session_id = inst->session_id;
++	flush_pkt.flush_type = flush_type;
++
++	ret = iris_hfi_queue_cmd_write(inst->core, &flush_pkt, flush_pkt.shdr.hdr.size);
++	if (!ret) {
++		inst->flush_responses_pending++;
++		ret = iris_wait_for_session_response(inst, true);
++	}
++
++	return ret;
++}
++
++static int iris_hfi_gen1_session_stop(struct iris_inst *inst, u32 plane)
++{
+ 	struct iris_core *core = inst->core;
+ 	struct hfi_session_pkt pkt;
+-	u32 flush_type = 0;
+ 	int ret = 0;
+ 
+ 	if (inst->domain == DECODER) {
+ 		if (inst->state == IRIS_INST_STREAMING) {
+-			if (V4L2_TYPE_IS_OUTPUT(plane))
+-				flush_type = HFI_FLUSH_ALL;
+-			else if (V4L2_TYPE_IS_CAPTURE(plane))
+-				flush_type = HFI_FLUSH_OUTPUT;
+-
+-			reinit_completion(&inst->flush_completion);
+-
+-			flush_pkt.shdr.hdr.size = sizeof(struct hfi_session_flush_pkt);
+-			flush_pkt.shdr.hdr.pkt_type = HFI_CMD_SESSION_FLUSH;
+-			flush_pkt.shdr.session_id = inst->session_id;
+-			flush_pkt.flush_type = flush_type;
+-
+-			ret = iris_hfi_queue_cmd_write(core, &flush_pkt, flush_pkt.shdr.hdr.size);
+-			if (!ret) {
+-				inst->flush_responses_pending++;
+-				ret = iris_wait_for_session_response(inst, true);
+-			}
++			/*
++			 * Like venus (vdec_stop_capture(), vdec_stop_output()):
++			 * everything is flushed when a queue stops, except the
++			 * capture queue during a resolution change, where the
++			 * input has to stay. With only the output flushed, a VP9
++			 * session that is stopped capture first in the middle of
++			 * the stream (Chromium's teardown) crashed the SM8350
++			 * firmware at the STOP that follows ("Err_Fatal ...
++			 * video_decoder.c:1577").
++			 */
++			if (V4L2_TYPE_IS_CAPTURE(plane) && (inst->sub_state & IRIS_INST_SUB_DRC))
++				ret = iris_hfi_gen1_session_flush(inst, HFI_FLUSH_OUTPUT);
++			else
++				ret = iris_hfi_gen1_session_flush(inst, HFI_FLUSH_ALL);
+ 		} else if (inst->sub_state & IRIS_INST_SUB_LOAD_RESOURCES) {
++			/* The other queue stopped first: flush before the STOP. */
++			ret = iris_hfi_gen1_session_flush(inst, HFI_FLUSH_ALL);
++
+ 			reinit_completion(&inst->completion);
+ 			iris_hfi_gen1_packet_session_cmd(inst, &pkt, HFI_CMD_SESSION_STOP);
+ 			ret = iris_hfi_queue_cmd_write(core, &pkt, pkt.shdr.hdr.size);

@@ -1,0 +1,51 @@
+From 6d3cf279235720545483626954d233e72341912e Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 01:59:54 +0100
+Subject: [PATCH 082/137] media: i2c: imx48x: Retry the identification, defer
+ on a busy CCI
+
+At boot the four sensors and the two EEPROMs probe at the same time on
+the two CCI controllers, and one identification read timed out in a busy
+CCI queue ("master 1 queue 0 timeout", -ETIMEDOUT): that sensor never
+bound, and the missing subdevice kept CAMSS's media graph from
+completing, so libcamera found no camera at all. Read again up to three
+times, then return -EPROBE_DEFER for a timeout or an I/O error.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/media/i2c/imx48x.c | 21 ++++++++++++++++++---
+ 1 file changed, 18 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/media/i2c/imx48x.c b/drivers/media/i2c/imx48x.c
+index 5f02b4379e53..1615a6cc84a0 100644
+--- a/drivers/media/i2c/imx48x.c
++++ b/drivers/media/i2c/imx48x.c
+@@ -987,10 +987,25 @@ static int imx48x_parse_endpoint(struct imx48x *sensor)
+ static int imx48x_identify(struct imx48x *sensor)
+ {
+ 	u64 model = 0, revision = 0;
+-	int ret;
++	int ret, try;
+ 
+-	ret = cci_read(sensor->regmap, IMX48X_REG_MODEL_ID, &model, NULL);
+-	cci_read(sensor->regmap, IMX48X_REG_REVISION, &revision, &ret);
++	/*
++	 * At boot the four sensors and the EEPROMs probe at the same time on
++	 * the two CCI controllers, and a transfer may time out in a busy CCI
++	 * queue ("master N queue 0 timeout"): read again a few times, then
++	 * ask for a later probe instead of failing, since one missing sensor
++	 * keeps CAMSS's whole media graph from completing.
++	 */
++	for (try = 0; try < 3; try++) {
++		ret = cci_read(sensor->regmap, IMX48X_REG_MODEL_ID, &model, NULL);
++		cci_read(sensor->regmap, IMX48X_REG_REVISION, &revision, &ret);
++		if (!ret)
++			break;
++		msleep(20);
++	}
++	if (ret == -ETIMEDOUT || ret == -EIO)
++		return dev_err_probe(sensor->dev, -EPROBE_DEFER,
++				     "no answer (%d), probing again later\n", ret);
+ 	if (ret)
+ 		return dev_err_probe(sensor->dev, ret, "no answer\n");
+ 

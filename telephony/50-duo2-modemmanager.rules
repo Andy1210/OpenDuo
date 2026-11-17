@@ -1,0 +1,21 @@
+// duo2-os: the desktop user's apps (GNOME Calls, Chatty, mmsd-tng) may use the
+// modem through ModemManager. Its actions are allowed for an ACTIVE local
+// session only, and duo-wc's session has no logind session (the user has a
+// "manager" session only), so every call was refused ("not authorized for
+// org.freedesktop.ModemManager1.Voice"). These are the actions ModemManager
+// itself allows an active session; not Control (manager-level: logging,
+// scans, inhibit), Firmware or Location (the cell's location).
+// @USER@ is replaced at install.
+polkit.addRule(function(action, subject) {
+    if (subject.user == "@USER@" &&
+        (action.id == "org.freedesktop.ModemManager1.Device.Control" ||
+         action.id == "org.freedesktop.ModemManager1.Voice" ||
+         action.id == "org.freedesktop.ModemManager1.Messaging" ||
+         action.id == "org.freedesktop.ModemManager1.Contacts" ||
+         action.id == "org.freedesktop.ModemManager1.USSD" ||
+         action.id == "org.freedesktop.ModemManager1.CellBroadcast" ||
+         action.id == "org.freedesktop.ModemManager1.Time")) {
+        return polkit.Result.YES;
+    }
+    return polkit.Result.NOT_HANDLED;
+});

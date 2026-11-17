@@ -1,0 +1,62 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""duo2-ssc-registry: print registry groups as the SSC (sensor DSP) holds them.
+
+  duo2-ssc-registry GROUP...      e.g. ak0991x_0_platform.config sns_alpha.config
+
+A read request (512, {1: name}) to the "registry" sensor answers with event
+514: {1: name, 2: data}; data's items are field 3: {1: name, 2: version,
+10: subgroup, 11: str, 12: float, 13: int}. An absent group answers with no
+items. Uses duo-posed's SSC client (/usr/local/lib/duo-posed).
+"""
+
+import os
+import sys
+import time
+
+sys.path.insert(0, "/usr/local/lib/duo-posed")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "duo-posed"))
+import duo2_ssc as ssc  # noqa: E402
+
+READ_REQ, READ_EVENT = 512, 514
+
+
+def dump(data, ind="  "):
+    for it in ssc.pb_msgs(data, 3):
+        name = ssc.pb_str(it, 1)
+        if 10 in it:
+            print(ind + name + ":")
+            dump(ssc.pb_msgs(it, 10)[0], ind + "  ")
+        elif 11 in it:
+            print(ind + "%s = %r" % (name, ssc.pb_str(it, 11)))
+        elif 12 in it:
+            print(ind + "%s = %g" % (name, ssc.pb_floats(it, 12)[0]))
+        elif 13 in it:
+            v = ssc.pb_int(it, 13)
+            print(ind + "%s = %d" % (name, v - (1 << 64) if v >= 1 << 63 else v))
+        else:
+            print(ind + name + " = ?")
+
+
+def main():
+    if len(sys.argv) < 2:
+        sys.exit(__doc__)
+    cli = ssc.SscClient(timeout=5)
+    reg = cli.sensors("registry")[0]
+    for group in sys.argv[1:]:
+        cli.request(reg.suid, READ_REQ, ssc.pb_bytes(1, group.encode()))
+        t0, got = time.monotonic(), False
+        while time.monotonic() - t0 < 4 and not got:
+            for suid, mid, _ts, payload in cli.events(0.5):
+                if suid == reg.suid and mid == READ_EVENT:
+                    print(group + ":")
+                    d = ssc.pb_decode(payload)
+                    if 2 in d:
+                        dump(ssc.pb_msgs(d, 2)[0])
+                    got = True
+        if not got:
+            print(group + ": no answer")
+
+
+if __name__ == "__main__":
+    main()

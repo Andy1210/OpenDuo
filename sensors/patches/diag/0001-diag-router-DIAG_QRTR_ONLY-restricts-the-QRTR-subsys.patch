@@ -1,0 +1,54 @@
+From b8ea6d919cfcddde2c812a715c0268164a73069d Mon Sep 17 00:00:00 2001
+From: duo2 <duo2@localhost>
+Date: Sat, 7 Nov 2026 00:04:31 +0100
+Subject: [PATCH 1/2] diag-router: DIAG_QRTR_ONLY restricts the QRTR subsystems
+ served
+
+---
+ router/peripheral-qrtr.c | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/router/peripheral-qrtr.c b/router/peripheral-qrtr.c
+index 9a3c59a..6b87a99 100644
+--- a/router/peripheral-qrtr.c
++++ b/router/peripheral-qrtr.c
+@@ -34,6 +34,7 @@
+ #include <errno.h>
+ #include <libqrtr.h>
+ #include <stdio.h>
++#include <stdbool.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <unistd.h>
+@@ -275,9 +276,31 @@ void qrtr_perif_close(struct peripheral *perif)
+ 
+ static int qrtr_perif_init_subsystem(const char *name, int instance_base)
+ {
++	const char *only = getenv("DIAG_QRTR_ONLY");
+ 	struct peripheral *perif;
+ 	struct watch_flow *flow;
+ 
++	/*
++	 * DIAG_QRTR_ONLY=name[,name...] serves only those subsystems: the
++	 * others never see a DIAG server, so a mask meant for one DSP does
++	 * not wake the modem's logging.
++	 */
++	if (only && *only) {
++		size_t n = strlen(name);
++		const char *p = only;
++		bool found = false;
++
++		while (p && *p) {
++			if (!strncmp(p, name, n) && (p[n] == ',' || p[n] == '\0'))
++				found = true;
++			p = strchr(p, ',');
++			if (p)
++				p++;
++		}
++		if (!found)
++			return 0;
++	}
++
+ 	perif = calloc(1, sizeof(*perif));
+ 
+ 	flow = watch_flow_new();

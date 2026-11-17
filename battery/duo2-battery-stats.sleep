@@ -1,0 +1,22 @@
+#!/bin/sh
+# systemd-sleep hook (/usr/lib/systemd/system-sleep/duo2-battery-stats): a
+# battery sample right before a suspend and right after it, so the
+# suspended time is an interval of its own (the collector never wakes the
+# phone itself). Before the suspend the collector also writes its store
+# (SIGRTMIN+1): a phone that does not come back (an empty battery, a hang)
+# keeps everything up to here. Waits at most 3 s (pre) / 1 s (post).
+case "$1" in
+pre) sig=RTMIN+1 n=60 ;;
+post) sig=HUP n=20 ;;
+*) exit 0 ;;
+esac
+f=/run/duo2-battery/sampled
+before=$(cat "$f" 2>/dev/null)
+systemctl kill --kill-whom=main --signal=$sig duo2-battery-stats.service 2>/dev/null || exit 0
+i=0
+while [ $i -lt $n ]; do
+    [ "$(cat "$f" 2>/dev/null)" != "$before" ] && break
+    sleep 0.05
+    i=$((i + 1))
+done
+exit 0

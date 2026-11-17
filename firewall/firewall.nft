@@ -1,0 +1,61 @@
+#!/usr/sbin/nft -f
+# OpenDuo's firewall (firewall/README.md): nothing reaches the phone unasked
+# but what is listed here. Loaded by duo-firewall.service before the network
+# comes up; replaces itself, no other table is touched.
+#
+# The other tables on the input hook run before this one and drop the rest
+# of their own interfaces' traffic: Waydroid's (inet duo2_waydroid,
+# android/firewall.nft: waydroid0) and the hotspot's (inet duo2_hotspot,
+# hotspot/: ap0, tether0). What they let through has to be accepted here
+# too: a packet passes only if every base chain on the hook lets it.
+# Forwarding is theirs (both drop what is not theirs); this table has no
+# forward chain. Nothing goes out unasked to stop: no output chain.
+#
+# Interfaces: wlan0 (the WiFi client), usb0 (the USB development network,
+# Settings > Developer), ap0 / tether0 (hotspot over WiFi / USB),
+# waydroid0 (Android), qmapmux*, rmnet* (mobile data, IMS: replies only).
+table inet duo_firewall
+delete table inet duo_firewall
+table inet duo_firewall {
+	chain input {
+		type filter hook input priority filter; policy drop;
+
+		ct state established,related accept
+		ct state invalid drop
+		iif "lo" accept
+
+		# ICMP: errors (most come as related), and a bounded ping.
+		icmp type { destination-unreachable, time-exceeded, parameter-problem } accept
+		icmp type echo-request limit rate 10/second burst 20 packets accept
+		icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem } accept
+		icmpv6 type echo-request limit rate 10/second burst 20 packets accept
+		# IPv6 neighbour discovery and router advertisements: on the link only
+		# (hop limit 255, RFC 4861); multicast listener queries from link-local.
+		icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert } ip6 hoplimit 255 accept
+		icmpv6 type mld-listener-query ip6 saddr fe80::/10 accept
+		# Router solicitations from the devices on the hotspot (networkd sends them RAs).
+		iifname { "ap0", "tether*" } icmpv6 type nd-router-solicit ip6 hoplimit 255 accept
+
+		# DHCP client (WiFi): the server's answers; DHCPv6 from link-local.
+		udp sport 67 udp dport 68 accept
+		ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept
+
+		# Developer mode (Settings > Developer, devmode/): ssh on the WiFi and
+		# the USB network only; sshd runs only while it is switched on.
+		iifname { "wlan0", "usb0" } tcp dport 22 accept
+		# The USB network's DHCP server (networkd, 10-usb0.network).
+		iifname "usb0" udp dport 67 accept
+
+		# The hotspot's devices: DHCP and DNS (hotspot/: its own table allows
+		# the same and drops the rest of theirs).
+		iifname { "ap0", "tether*" } udp dport { 53, 67 } accept
+		iifname { "ap0", "tether*" } tcp dport 53 accept
+
+		# Android (Waydroid): its DHCP and DNS from dnsmasq on waydroid0
+		# (android/firewall.nft allows the same and drops the rest).
+		iifname "waydroid0" udp dport { 53, 67 } accept
+		iifname "waydroid0" tcp dport 53 accept
+
+		counter comment "dropped"
+	}
+}

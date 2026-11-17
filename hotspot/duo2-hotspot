@@ -1,0 +1,375 @@
+#!/usr/bin/python3 -I
+"""duo2-hotspot: the mobile hotspot's one door (hotspot/README.md).
+
+    duo2-hotspot status [--bytes]      the state (JSON; no password): on / off,
+                                       band, channel, devices, mobile data
+    duo2-hotspot on [--wifi-off]       share mobile data over WiFi; --wifi-off:
+                                       the phone's own WiFi connection may be
+                                       switched off for it (only with the
+                                       setting wifi-client=ask, never in
+                                       development mode)
+    duo2-hotspot off
+    duo2-hotspot usb on [--force]      USB tethering (the USB connection is
+                                       re-plugged for a moment; --force: also
+                                       while an ssh session runs over it)
+    duo2-hotspot usb off
+    duo2-hotspot wifi-client on        the phone's own WiFi back while the
+                                       hotspot holds it
+    duo2-hotspot set ssid|band|security|wifi-client|idle-off|use-5g VALUE
+    duo2-hotspot password              prints the password (JSON)
+    duo2-hotspot password --new        a new generated password
+    duo2-hotspot password --set        a password of your own, on stdin
+
+Every answer is one JSON line. Run as root: the GUI user's rule in
+/etc/sudoers.d/duo2-hotspot is for exactly this file. Any app of the user
+can run it through sudo (sudo cannot tell the shell from an app), so what
+matters (on, usb on, a new password) needs the shell's one-time grant
+(its token on stdin, redeemed on duo-wc's admin socket) or the user's yes
+in the shell (duo-wc's confirm). Nothing from the caller reaches a shell;
+every argument is checked against a list or a pattern. The password is
+printed only by `password` and never logged.
+"""
+
+import json
+import os
+import secrets
+import subprocess
+import sys
+import time
+
+_here = os.path.dirname(os.path.realpath(__file__))
+for _p in (_here, "/usr/local/lib/duo2-hotspot"):
+    if os.path.isdir(os.path.join(_p, "duo2hotspot")):
+        sys.path.insert(0, _p)
+        break
+
+from duo2hotspot import conf, netplan, state  # noqa: E402
+
+UNIT = "duo2-hotspot.service"
+WC_ADMIN = "/run/duo-wc/admin.sock"
+WAIT_S = 25.0
+
+QUESTIONS = {
+    "hotspot on": "turn the mobile hotspot on (it shares mobile data)",
+    "hotspot on wifi-off": "switch WiFi off and turn the mobile hotspot on",
+    "hotspot usb on": "turn USB tethering on (it shares mobile data)",
+    "hotspot usb on force": "turn USB tethering on (it shares mobile data)",
+    "hotspot password new": "make a new hotspot password",
+    "hotspot password set": "change the hotspot password",
+    "hotspot wifi-client on": "switch WiFi back on",
+}
+
+
+def out(obj):
+    print(json.dumps(obj, sort_keys=True))
+    return 0 if obj.get("ok", True) else 1
+
+
+def fail(code, error):
+    return out({"ok": False, "code": code, "error": error})
+
+
+# -- the files ----------------------------------------------------------------------
+
+
+def read(path):
+    try:
+        with open(path) as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def write(path, text, mode):
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def ensure(paths=None):
+    """The settings and the password, made on first use (a name and a
+    password of their own); returns (user settings, admin conf, password)."""
+    p = paths or {"settings": conf.SETTINGS, "password": conf.PASSWORD, "admin": conf.ADMIN_CONF}
+    text = read(p["settings"]) or ""
+    user = conf.merged(conf.USER_DEFAULTS, conf.parse_kv(text))
+    if not conf.valid_ssid(user["SSID"]):
+        user["SSID"] = conf.default_ssid()
+        write(
+            p["settings"],
+            conf.set_kv(
+                text or "# duo2-hotspot: the user's settings (duo2-hotspot set)\n",
+                "SSID",
+                user["SSID"],
+            ),
+            0o600,
+        )
+    pw = (read(p["password"]) or "").strip()
+    if not conf.valid_password(pw):
+        pw = conf.gen_password()
+        write(p["password"], pw + "\n", 0o600)
+    admin = conf.merged(conf.ADMIN_DEFAULTS, conf.parse_kv(read(p["admin"])))
+    return user, admin, pw
+
+
+def settings_view(user, admin):
+    return {
+        "ssid": user["SSID"],
+        "band": user["BAND"],
+        "security": user["SECURITY"],
+        "wifi_client": user["WIFI_CLIENT"],
+        "idle_off_min": int(user["IDLE_OFF_MIN"] or 0),
+        "use_5g": conf.yes(user["USE_5G"]),
+        "never_cut_wifi": conf.yes(admin["NEVER_CUT_WIFI"]),
+    }
+
+
+# -- the shell's grant, the user's yes ----------------------------------------------
+
+
+def wc_request(obj, timeout):
+    import socket
+
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(timeout)
+        s.connect(WC_ADMIN)
+        s.sendall((json.dumps(obj) + "\n").encode())
+        buf = b""
+        while b"\n" not in buf:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+    return json.loads(buf.split(b"\n")[0] or b"{}")
+
+
+def read_token(timeout_s=2.0):
+    import select
+
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return ""
+        if not select.select([sys.stdin], [], [], timeout_s)[0]:
+            return ""
+        return sys.stdin.readline(128).strip()
+    except (OSError, ValueError):
+        return ""
+
+
+def allowed(action, token):
+    """The shell's grant for exactly this action, or the user's yes."""
+    if token:
+        try:
+            reply = wc_request({"id": 1, "request": "redeem", "action": action, "token": token}, 3)
+            if (reply.get("ok") or {}).get("redeemed") is True:
+                return True
+        except (OSError, ValueError):
+            pass
+    try:
+        reply = wc_request(
+            {
+                "id": 1,
+                "request": "confirm",
+                "action": "helper",
+                "detail": "An app asks to %s." % QUESTIONS.get(action, action),
+                "wait": True,
+            },
+            25,
+        )
+    except (OSError, ValueError):
+        return False
+    return (reply.get("ok") or {}).get("yes") is True
+
+
+# -- the service ----------------------------------------------------------------------
+
+
+def systemctl(*args):
+    return subprocess.run(["systemctl"] + list(args), capture_output=True, text=True).returncode
+
+
+def active():
+    return systemctl("is-active", "--quiet", UNIT) == 0
+
+
+def want_update(**changes):
+    want = state.read_json(state.WANT)
+    want.update(changes)
+    want["request"] = secrets.token_hex(6)
+    state.write_json(state.WANT, want, 0o600)
+    return want
+
+
+def kick(want):
+    """Start the service, or tell the running one; then wait for its answer
+    to this request (or its end)."""
+    if active():
+        systemctl("reload", UNIT)
+    elif want.get("wifi") or want.get("usb"):
+        if systemctl("start", UNIT) != 0:
+            return {"ok": False, "code": "service", "error": "duo2-hotspot.service did not start"}
+    else:
+        return {"ok": True}
+    deadline = time.monotonic() + WAIT_S
+    while time.monotonic() < deadline:
+        st = state.read_json(state.STATE)
+        if st.get("request") == want["request"]:
+            return st.get("result") or {"ok": True}
+        time.sleep(0.2)
+    return {"ok": False, "code": "timeout", "error": "no answer from duo2-hotspot.service"}
+
+
+def current_state(user, admin, with_bytes=False):
+    st = state.read_json(state.STATE)
+    if not active() or not st:
+        st = state.off_state()
+        st.pop("request", None)
+    st["settings"] = settings_view(user, admin)
+    st["ok"] = True
+    st.pop("result", None)
+    if with_bytes and st.get("state") == "on":
+        try:
+            p = subprocess.run(
+                ["nft", "-j", "list", "counters", "table", "inet", netplan.NFT_TABLE],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            st["shared_bytes"] = netplan.parse_counters(json.loads(p.stdout or "{}"))
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            pass
+    return st
+
+
+def write_off_state(user, admin):
+    """With the service stopped, the state file still says the settings (the
+    shell and Duo Settings read it without sudo)."""
+    if active():
+        return
+    st = state.off_state()
+    st["settings"] = settings_view(user, admin)
+    st["updated"] = int(time.time())
+    state.write_json(state.STATE, st)
+
+
+# -- the commands ---------------------------------------------------------------------
+
+
+def parse(argv):
+    """(command, args) when the words are a request this helper knows, else
+    None (pure)."""
+    a = list(argv)
+    if a in (["status"], ["status", "--bytes"]):
+        return "status", {"bytes": len(a) == 2}
+    if a in (["on"], ["on", "--wifi-off"]):
+        return "on", {"wifi_off": len(a) == 2}
+    if a == ["off"]:
+        return "off", {}
+    if a in (["usb", "on"], ["usb", "on", "--force"]):
+        return "usb-on", {"force": len(a) == 3}
+    if a == ["usb", "off"]:
+        return "usb-off", {}
+    if a == ["wifi-client", "on"]:
+        return "wifi-client-on", {}
+    if len(a) == 3 and a[0] == "set" and a[1] in conf.SET_KEYS:
+        return "set", {"key": conf.SET_KEYS[a[1]], "value": a[2]}
+    if a in (["password"], ["password", "--new"], ["password", "--set"]):
+        return "password", {"mode": a[1][2:] if len(a) == 2 else "show"}
+    return None
+
+
+def grant_action(cmd, args):
+    """The words a grant names for this request, or None (needs none)."""
+    if cmd == "on":
+        return "hotspot on wifi-off" if args["wifi_off"] else "hotspot on"
+    if cmd == "usb-on":
+        return "hotspot usb on force" if args["force"] else "hotspot usb on"
+    if cmd == "password" and args["mode"] in ("new", "set"):
+        return "hotspot password " + args["mode"]
+    if cmd == "wifi-client-on":
+        return "hotspot wifi-client on"
+    return None
+
+
+def main(argv):
+    req = parse(argv)
+    if req is None:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    if os.geteuid() != 0:
+        return fail("root", "run as root (sudo -n duo2-hotspot ...)")
+    os.umask(0o077)
+    cmd, args = req
+    action = grant_action(cmd, args)
+    # The password's own line comes after the grant's (one line each).
+    token = read_token() if action else ""
+    if action and not allowed(action, token):
+        return fail("not-confirmed", "neither the shell's grant nor the user's yes")
+    user, admin, pw = ensure()
+    if cmd == "status":
+        return out(current_state(user, admin, args["bytes"]))
+    if cmd == "on":
+        res = kick(want_update(wifi=True, wifi_off=args["wifi_off"]))
+        return out(dict(res, state=current_state(user, admin)))
+    if cmd == "off":
+        want = want_update(wifi=False, wifi_off=False)
+        if not want.get("usb"):
+            systemctl("stop", UNIT)
+            write_off_state(user, admin)
+            return out({"ok": True, "state": current_state(user, admin)})
+        return out(dict(kick(want), state=current_state(user, admin)))
+    if cmd == "usb-on":
+        res = kick(want_update(usb=True, usb_force=args["force"]))
+        return out(dict(res, state=current_state(user, admin)))
+    if cmd == "usb-off":
+        want = want_update(usb=False, usb_force=False)
+        if not want.get("wifi"):
+            systemctl("stop", UNIT)
+            write_off_state(user, admin)
+            return out({"ok": True, "state": current_state(user, admin)})
+        return out(dict(kick(want), state=current_state(user, admin)))
+    if cmd == "wifi-client-on":
+        want = state.read_json(state.WANT)
+        if not active() or not want.get("wifi"):
+            return out({"ok": True})
+        return out(
+            dict(
+                kick(want_update(client_on=secrets.token_hex(4))), state=current_state(user, admin)
+            )
+        )
+    if cmd == "set":
+        try:
+            value = conf.validate(args["key"], args["value"])
+        except ValueError as e:
+            return fail("invalid", str(e))
+        write(conf.SETTINGS, conf.set_kv(read(conf.SETTINGS) or "", args["key"], value), 0o600)
+        user = conf.merged(conf.USER_DEFAULTS, conf.parse_kv(read(conf.SETTINGS)))
+        if active():
+            kick(want_update())
+        else:
+            write_off_state(user, admin)
+        return out({"ok": True, "state": current_state(user, admin)})
+    if cmd == "password":
+        if args["mode"] == "show":
+            return out({"ok": True, "password": pw})
+        if args["mode"] == "new":
+            new = conf.gen_password()
+        else:
+            try:
+                new = sys.stdin.readline(128).rstrip("\n")
+            except (OSError, ValueError):
+                new = ""
+            if not conf.valid_password(new):
+                return fail("invalid", "8 to 63 printable ASCII characters")
+        write(conf.PASSWORD, new + "\n", 0o600)
+        if active():
+            kick(want_update())
+        return out({"ok": True, "password": new})
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

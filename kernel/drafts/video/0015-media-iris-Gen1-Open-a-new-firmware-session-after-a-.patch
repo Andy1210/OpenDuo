@@ -1,0 +1,116 @@
+From a4bb905f9943ef431dfcd88f749e416aee4fd458 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Mon, 9 Nov 2026 21:48:41 +0100
+Subject: [PATCH 15/16] media: iris: Gen1: Open a new firmware session after a
+ VP9 decoder stops
+
+iris keeps a decoder's firmware session from the first REQBUFS to the
+close of the file: when both queues stop it sends SESSION_STOP and
+RELEASE_RESOURCES, and when they start again LOAD_RESOURCES and
+SESSION_START on the same session. venus ends the session whenever both
+queues have stopped and opens a new one at the next start
+(venus_helper_vb2_stop_streaming(): hfi_session_deinit()).
+
+The Surface Duo 2's SM8350 firmware (vpu20_4v, video-firmware.1.0)
+brings itself down when a stopped VP9 session is started again with a
+new sequence, which is what Chromium's V4L2 stateful decoder does at a
+resolution change (YouTube's quality switches):
+
+  BRING-UP: seq change 1280x720, codec VP90, firmware count 32
+  sys error (type: 1, session id:ff, data1:1, data2:deadbead)
+  SFR: ... Err_Fatal - .../venus/decoders/vpx/src/vpx_decoder.c:1138
+
+H.264 and HEVC sessions restart without trouble.
+
+After the full stop of a VP9 decoder, end the firmware session, free its
+internal buffers (the firmware no longer holds them; the next start makes
+them anew, persist buffer included) and open the session again with the
+same id.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../qcom/iris/iris_hfi_gen1_command.c         | 45 +++++++++++++++++--
+ 1 file changed, 41 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c b/drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c
+index aa265f8781e2..8a88d68aed00 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c
+@@ -99,15 +99,12 @@ static int iris_hfi_gen1_sys_pc_prep(struct iris_core *core)
+ 	return iris_hfi_queue_cmd_write_locked(core, &pkt, pkt.hdr.size);
+ }
+ 
+-static int iris_hfi_gen1_session_open(struct iris_inst *inst)
++static int iris_hfi_gen1_session_init_cmd(struct iris_inst *inst)
+ {
+ 	struct hfi_session_open_pkt packet;
+ 	u32 codec = 0;
+ 	int ret;
+ 
+-	if (inst->state != IRIS_INST_DEINIT)
+-		return -EALREADY;
+-
+ 	switch (inst->codec) {
+ 	case V4L2_PIX_FMT_H264:
+ 		codec = HFI_VIDEO_CODEC_H264;
+@@ -140,6 +137,14 @@ static int iris_hfi_gen1_session_open(struct iris_inst *inst)
+ 	return iris_wait_for_session_response(inst, false);
+ }
+ 
++static int iris_hfi_gen1_session_open(struct iris_inst *inst)
++{
++	if (inst->state != IRIS_INST_DEINIT)
++		return -EALREADY;
++
++	return iris_hfi_gen1_session_init_cmd(inst);
++}
++
+ static void iris_hfi_gen1_packet_session_cmd(struct iris_inst *inst,
+ 					     struct hfi_session_pkt *packet,
+ 					     u32 ptype)
+@@ -216,6 +221,35 @@ static int iris_hfi_gen1_session_flush(struct iris_inst *inst, u32 flush_type)
+ 	return ret;
+ }
+ 
++/*
++ * End the firmware session and open it again, as venus does whenever a
++ * decoder has stopped both queues (venus_helper_vb2_stop_streaming():
++ * hfi_session_deinit(), and hfi_session_init() at the next start). The
++ * Surface Duo 2's SM8350 firmware brings itself down when a stopped VP9
++ * session is started again with a new sequence, as Chromium does when
++ * the resolution changes ("Err_Fatal ... vpx_decoder.c:1138"); H.264 and
++ * HEVC sessions restart fine. The firmware has let go of every buffer of
++ * the ended session, so the internal ones are made anew at the next start.
++ */
++static int iris_hfi_gen1_session_restart(struct iris_inst *inst)
++{
++	struct hfi_session_pkt pkt;
++	int ret;
++
++	reinit_completion(&inst->completion);
++	iris_hfi_gen1_packet_session_cmd(inst, &pkt, HFI_CMD_SYS_SESSION_END);
++	ret = iris_hfi_queue_cmd_write(inst->core, &pkt, pkt.shdr.hdr.size);
++	if (!ret)
++		ret = iris_wait_for_session_response(inst, false);
++	if (ret)
++		return ret;
++
++	iris_destroy_all_internal_buffers(inst, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
++	iris_destroy_all_internal_buffers(inst, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
++
++	return iris_hfi_gen1_session_init_cmd(inst);
++}
++
+ static int iris_hfi_gen1_session_stop(struct iris_inst *inst, u32 plane)
+ {
+ 	struct iris_core *core = inst->core;
+@@ -265,6 +299,9 @@ static int iris_hfi_gen1_session_stop(struct iris_inst *inst, u32 plane)
+ 						 VB2_BUF_STATE_ERROR);
+ 			iris_helper_buffers_done(inst, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+ 						 VB2_BUF_STATE_ERROR);
++
++			if (inst->codec == V4L2_PIX_FMT_VP9)
++				ret = iris_hfi_gen1_session_restart(inst);
+ 		}
+ 	} else {
+ 		if (inst->state == IRIS_INST_STREAMING ||

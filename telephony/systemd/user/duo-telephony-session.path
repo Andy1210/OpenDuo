@@ -1,0 +1,12 @@
+# duo2-os: start Calls and Chatty in the background whenever duo-wc's session
+# starts (the session writes /run/duo-wc/session.env at every start, also after
+# a restart of duo-wc). A user unit of the lingering user manager.
+[Unit]
+Description=duo-wc session start watch (Calls, Chatty)
+
+[Path]
+PathChanged=/run/duo-wc/session.env
+Unit=duo-telephony-session.service
+
+[Install]
+WantedBy=default.target

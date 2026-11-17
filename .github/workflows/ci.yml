@@ -1,0 +1,340 @@
+# OpenDuo CI: lint and host tests of the components a change touches.
+#
+# Nothing here can test on a phone; pull requests say how they were tested
+# on a Surface Duo 2 (.github/PULL_REQUEST_TEMPLATE.md).
+#
+# Every job runs only when its component changed (the "changes" job), or for
+# everything on a manual run, on a push without a usable base, and when this
+# file changes. Jobs marked "advisory" (netns, checkpatch) report findings
+# without failing the run; everything else is blocking.
+#
+# Tool versions are pinned to what the code was cleaned with.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUFF_VERSION: "0.17.5"
+  SHELLCHECK_PY_VERSION: "0.11.0.1"
+  CLANG_FORMAT_VERSION: "23.1.5"
+  RUST_TOOLCHAIN: "1.100.0"
+  KERNEL_TAG: "v7.3.4"
+
+jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      py: ${{ steps.c.outputs.py }}
+      lint: ${{ steps.c.outputs.lint }}
+      touch: ${{ steps.c.outputs.touch }}
+      netns: ${{ steps.c.outputs.netns }}
+      duowc: ${{ steps.c.outputs.duowc }}
+      nibfair: ${{ steps.c.outputs.nibfair }}
+      kernel: ${{ steps.c.outputs.kernel }}
+      patches: ${{ steps.c.outputs.patches }}
+      files: ${{ steps.c.outputs.files }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: c
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          python3 - <<'EOF'
+          import json
+          import os
+          import subprocess
+
+          def git(*args):
+              return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout
+
+          event, base, head = os.environ["EVENT"], os.environ.get("BASE", ""), os.environ.get("HEAD", "")
+          files = None  # None: everything
+          if event == "pull_request":
+              files = git("diff", "--name-only", f"{base}...{head}").split()
+          elif event == "push" and base and set(base) != {"0"}:
+              files = git("diff", "--name-only", base, head).split()
+          if files is not None and ".github/workflows/ci.yml" in files:
+              files = None
+
+          def hit(*prefixes):
+              return files is None or any(f.startswith(p) for f in files for p in prefixes)
+
+          # Python host tests: (name, directory, start dir, pattern, extra trigger paths)
+          py_all = [
+              ("android", "android", "tests", "test*.py", ()),
+              ("battery", "battery", "tests", "test*.py", ()),
+              ("devmode", "devmode", "tests", "test*.py", ("scripts/check-personal-data",)),
+              ("homecrypt", "homecrypt", "tests", "test*.py", ()),
+              ("hotspot", "hotspot", "tests", "test*.py", ()),
+              ("maint", "maint", "tests", "test*.py", ()),
+              ("power", "power", "tests", "test*.py", ()),
+              ("scripts", "scripts", "tests", "test*.py", ()),
+              ("telephony", "telephony", "tests", "test*.py", ()),
+              ("duo-settings", "shell/duo-settings", "tests", "test*.py", ()),
+              ("duo-shell", "shell/duo-shell", "tests", "test*.py", ("homecrypt/",)),
+              ("duo-screencast", "shell/duo-screencast", "tests", "test*.py", ()),
+              ("duo-posed", "sensors/duo-posed", ".", "test_*.py", ()),
+              ("duo-brightness", "sensors/duo-brightness", ".", "test_*.py", ()),
+          ]
+          py = [
+              {"name": n, "dir": d, "start": s, "pattern": p}
+              for n, d, s, p, extra in py_all
+              if hit(d + "/", *extra)
+          ]
+
+          # scripts/lint-services per component; advisory = report only (none at the moment)
+          lint_all = [
+              (c, False)
+              for c in ("power", "telephony", "hotspot", "sensors", "android", "maint", "battery",
+                        "camera", "video", "devmode", "firewall", "homecrypt", "rootfs", "scripts",
+                        "shell/duo-settings", "touch", "shell/duo-shell", "shell/duo-screencast",
+                        "shell/duo-apps", "compositor/duo-wc", "apps/nibfair")
+          ]
+          lint = [
+              {"component": c, "advisory": a}
+              for c, a in lint_all
+              if hit(c + "/", "scripts/lint-services")
+          ]
+
+          patches = (
+              [f for f in git("ls-files", "kernel/*.patch").split()]
+              if files is None
+              else [f for f in files if f.startswith("kernel/") and f.endswith(".patch") and os.path.exists(f)]
+          )
+          changed = (
+              []
+              if files is None
+              else [f for f in files if os.path.isfile(f)]
+          )
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              print("py=" + json.dumps(py), file=out)
+              print("lint=" + json.dumps(lint), file=out)
+              print("touch=" + json.dumps(hit("touch/")), file=out)
+              print("netns=" + json.dumps(hit("firewall/", "hotspot/", "android/firewall.nft")), file=out)
+              print("duowc=" + json.dumps(hit("compositor/duo-wc/")), file=out)
+              print("nibfair=" + json.dumps(hit("apps/nibfair/")), file=out)
+              print("kernel=" + json.dumps(hit("kernel/patches/")), file=out)
+              print("patches=" + json.dumps(patches), file=out)
+              print("files=" + json.dumps(changed if files is not None else ["--all"]), file=out)
+          print("everything" if files is None else "%d changed files" % len(files))
+          print("python tests:", [e["name"] for e in py])
+          print("lint:", [e["component"] for e in lint])
+          EOF
+
+  personal-data:
+    needs: changes
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reviewed screenshots only
+        run: |
+          cd docs/images
+          sha256sum -c SHA256SUMS
+          for f in *; do
+              [ "$f" = SHA256SUMS ] && continue
+              grep -q "  $f\$" SHA256SUMS || { echo "not reviewed (not in SHA256SUMS): docs/images/$f"; exit 1; }
+          done
+      - name: scripts/check-personal-data
+        env:
+          FILES: ${{ needs.changes.outputs.files }}
+        run: |
+          if [ "$FILES" = '["--all"]' ]; then
+              list=$(git ls-files | grep -v '^docs/images/')
+          else
+              list=$(echo "$FILES" | jq -r '.[]' | grep -v '^docs/images/' || true)
+          fi
+          [ -n "$list" ] || { echo "nothing to check"; exit 0; }
+          # shellcheck disable=SC2086
+          python3 -I scripts/check-personal-data $list
+
+  python-tests:
+    needs: changes
+    if: needs.changes.outputs.py != '[]'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.changes.outputs.py) }}
+    name: python-tests (${{ matrix.name }})
+    steps:
+      - uses: actions/checkout@v4
+      - name: PyGObject (some tests use GLib and GdkPixbuf when present)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends python3-gi gir1.2-glib-2.0 gir1.2-gdkpixbuf-2.0
+      - name: unittest
+        working-directory: ${{ matrix.dir }}
+        run: /usr/bin/python3 -B -m unittest discover -s "${{ matrix.start }}" -p "${{ matrix.pattern }}"
+
+  netns:
+    # The firewall and hotspot tables, end to end in network namespaces.
+    # Advisory until it has run green on GitHub's runners (user namespaces).
+    needs: changes
+    if: needs.changes.outputs.netns == 'true'
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends nftables iproute2
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - working-directory: firewall
+        run: unshare -rn /usr/bin/python3 -B tests/netns_check.py
+      - working-directory: hotspot
+        run: unshare -rn /usr/bin/python3 -B tests/netns_check.py
+
+  lint:
+    needs: changes
+    if: needs.changes.outputs.lint != '[]'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.changes.outputs.lint) }}
+    name: lint (${{ matrix.component }}${{ matrix.advisory && ', advisory' || '' }})
+    continue-on-error: ${{ matrix.advisory }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: |
+          python3 -m venv /tmp/lint
+          /tmp/lint/bin/pip install -q "ruff==$RUFF_VERSION" "shellcheck-py==$SHELLCHECK_PY_VERSION" "clang-format==$CLANG_FORMAT_VERSION"
+      - name: scripts/lint-services
+        env:
+          LINT_BIN: /tmp/lint/bin
+          # local.env is never in the repository: not following it is expected
+          SHELLCHECK_OPTS: -e SC1091
+        run: scripts/lint-services "${{ matrix.component }}"
+
+  touch-tests:
+    needs: changes
+    if: needs.changes.outputs.touch == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: touch/tests/run.sh
+
+  duo-wc:
+    needs: changes
+    if: needs.changes.outputs.duowc == 'true'
+    runs-on: ubuntu-24.04
+    # The phone's libraries: Debian trixie (the same -dev set as compositor/duo-wc/Dockerfile).
+    container: debian:trixie
+    defaults:
+      run:
+        working-directory: compositor/duo-wc
+    steps:
+      - name: Packages
+        working-directory: /
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends ca-certificates curl git pkg-config clang \
+              libclang-dev gcc libc6-dev libudev-dev libgbm-dev libxkbcommon-dev libegl-dev \
+              libgles-dev libwayland-dev libinput-dev libseat-dev libdisplay-info-dev
+      - uses: actions/checkout@v4
+      - name: Rust
+        working-directory: /
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y -q --profile minimal \
+              --default-toolchain "$RUST_TOOLCHAIN" --component clippy,rustfmt
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            compositor/duo-wc/target
+          key: duo-wc-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('compositor/duo-wc/Cargo.lock') }}
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+
+  nibfair:
+    needs: changes
+    if: needs.changes.outputs.nibfair == 'true'
+    runs-on: ubuntu-24.04
+    container: debian:trixie
+    defaults:
+      run:
+        working-directory: apps/nibfair
+    steps:
+      - name: Packages
+        working-directory: /
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends ca-certificates curl git pkg-config gcc \
+              libc6-dev libsdl3-dev libwayland-dev wayland-protocols libwayland-bin \
+              fonts-dejavu-core fontconfig
+      - uses: actions/checkout@v4
+      - name: Rust
+        working-directory: /
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y -q --profile minimal \
+              --default-toolchain "$RUST_TOOLCHAIN" --component clippy,rustfmt
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/nibfair/target
+          key: nibfair-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('apps/nibfair/Cargo.lock') }}
+      - run: cargo test --locked
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+
+  kernel-series:
+    # The series must apply to the kernel it is for.
+    needs: changes
+    if: needs.changes.outputs.kernel == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply kernel/patches to Linux ${{ env.KERNEL_TAG }}
+        run: |
+          git clone -q --depth 1 --branch "$KERNEL_TAG" \
+              https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git /tmp/linux
+          git -C /tmp/linux -c user.name=ci -c user.email=ci@example.invalid am -q \
+              "$GITHUB_WORKSPACE"/kernel/patches/*.patch
+          git -C /tmp/linux log --oneline "$KERNEL_TAG"..HEAD | wc -l
+
+  checkpatch:
+    # checkpatch.pl --strict on the patches a change adds or changes.
+    # Advisory: the existing series has documented findings
+    # (kernel/patches/SERIES.md, "checkpatch"), and a re-export changes every file.
+    needs: changes
+    if: needs.changes.outputs.patches != '[]'
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: checkpatch.pl from Linux ${{ env.KERNEL_TAG }}
+        run: |
+          mkdir -p /tmp/cp
+          for f in checkpatch.pl spelling.txt const_structs.checkpatch; do
+              curl -sSfL -o "/tmp/cp/$f" \
+                  "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/scripts/$f?h=$KERNEL_TAG"
+          done
+      - name: checkpatch --strict
+        env:
+          PATCHES: ${{ needs.changes.outputs.patches }}
+        run: |
+          echo "$PATCHES" | jq -r '.[]' > /tmp/patches.txt
+          xargs -a /tmp/patches.txt perl /tmp/cp/checkpatch.pl --strict --no-tree --terse --show-types

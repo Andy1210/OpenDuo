@@ -1,0 +1,83 @@
+From 9ba1ad02f5bd3b3422e4d5f8c5c1291868dd874b Mon Sep 17 00:00:00 2001
+From: duo2 <duo2@localhost>
+Date: Fri, 6 Nov 2026 21:52:37 +0100
+Subject: [PATCH 1/3] hexagonrpcd: serve sns_reg_version and sns_reg_config beside
+ the registry
+
+The sensors process of newer SSC releases (sns_reg_config version=2) reads
+/mnt/vendor/persist/sensors/registry/sns_reg_version, the version of the
+configuration the registry was generated from. When it is missing, the DSP
+regenerates the registry from the json configuration and tries to write it,
+which a read-only hexagonfs refuses. Map it (and the copy of sns_reg_config
+next to it) from the root directory.
+---
+ hexagonrpcd/rpcd_builder.c | 22 +++++++++++++++++++---
+ 1 file changed, 19 insertions(+), 3 deletions(-)
+
+diff --git a/hexagonrpcd/rpcd_builder.c b/hexagonrpcd/rpcd_builder.c
+index d374958..f1f29ba 100644
+--- a/hexagonrpcd/rpcd_builder.c
++++ b/hexagonrpcd/rpcd_builder.c
+@@ -31,6 +31,7 @@
+ #define SENSORS_CONFIG		"/sensors/config/"
+ #define SENSORS_REGISTRY	"/sensors/registry/"
+ #define SNS_REG_CONFIG		"/sensors/sns_reg.conf"
++#define SNS_REG_VERSION		"/sensors/sns_reg_version"
+ #define SYSFS_SOCINFO		"/socinfo/"
+ 
+ static struct hexagonfs_dirent *hfs_mkdir(const char *name, size_t n_ents, ...)
+@@ -111,7 +112,8 @@ static struct hexagonfs_dirent *hfs_map_or_empty(const char *name, const char *p
+  */
+ struct hexagonfs_dirent *construct_root_dir(const char *prefix, const char *dsp)
+ {
+-	char *acdbdata, *dsp_libs, *sns_cfg, *sns_reg, *sns_reg_config, *socinfo;
++	char *acdbdata, *dsp_libs, *sns_cfg, *sns_reg, *sns_reg_config,
++	     *sns_reg_version, *socinfo;
+ 	size_t n_prefix;
+ 	struct hexagonfs_dirent *persist_dir, *vendor_dir;
+ 
+@@ -121,6 +123,7 @@ struct hexagonfs_dirent *construct_root_dir(const char *prefix, const char *dsp)
+ 	sns_cfg = malloc(n_prefix + strlen(SENSORS_CONFIG) + 1);
+ 	sns_reg = malloc(n_prefix + strlen(SENSORS_REGISTRY) + 1);
+ 	sns_reg_config = malloc(n_prefix + strlen(SNS_REG_CONFIG) + 1);
++	sns_reg_version = malloc(n_prefix + strlen(SNS_REG_VERSION) + 1);
+ 	socinfo = malloc(n_prefix + strlen(SYSFS_SOCINFO) + 1);
+ 
+ 	dsp_libs = malloc(n_prefix + strlen(DSP_LIBS) + strlen(dsp) + 1);
+@@ -145,6 +148,11 @@ struct hexagonfs_dirent *construct_root_dir(const char *prefix, const char *dsp)
+ 		strcat(sns_reg_config, SNS_REG_CONFIG);
+ 	}
+ 
++	if (sns_reg_version != NULL) {
++		strcpy(sns_reg_version, prefix);
++		strcat(sns_reg_version, SNS_REG_VERSION);
++	}
++
+ 	if (socinfo != NULL) {
+ 		strcpy(socinfo, prefix);
+ 		strcat(socinfo, SYSFS_SOCINFO);
+@@ -159,11 +167,19 @@ struct hexagonfs_dirent *construct_root_dir(const char *prefix, const char *dsp)
+ 	/*
+ 	 * Some platforms need this in / and some need it in /mnt/vendor. Form
+ 	 * a hard link between both locations.
++	 *
++	 * Next to the registry directory, the sensors process (sns_reg_config
++	 * "version=2") reads sns_reg_version, the configuration version the
++	 * registry was generated from, and the copy of sns_reg_config. Without
++	 * them it regenerates the registry from the json configuration, which
++	 * needs a writable registry (and downstream socinfo files).
+ 	 */
+ 	persist_dir = hfs_mkdir("persist", 1,
+ 				hfs_mkdir("sensors", 1,
+-					hfs_mkdir("registry", 1,
+-						hfs_map("registry", sns_reg)
++					hfs_mkdir("registry", 3,
++						hfs_map("registry", sns_reg),
++						hfs_map_or_empty("sns_reg_version", sns_reg_version),
++						hfs_map("sns_reg_config", sns_reg_config)
+ 					)
+ 				)
+ 		      );
+-- 
+2.43.0
+

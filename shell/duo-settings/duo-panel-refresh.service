@@ -1,0 +1,15 @@
+# duo2-os (shell/duo-settings): the refresh rate chosen in Duo Settings
+# (/etc/duo-settings/display.conf) goes to the panel driver before duo-wc
+# starts (duo-wc takes the driver's preferred mode, which the module
+# parameter decides). Without the file the driver's default (90 Hz) stays.
+[Unit]
+Description=Panel refresh rate from Duo Settings
+Before=duo-wc.service
+ConditionPathExists=/etc/duo-settings/display.conf
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/duo-settings/duo-settings-helper refresh-boot
+
+[Install]
+WantedBy=duo-wc.service

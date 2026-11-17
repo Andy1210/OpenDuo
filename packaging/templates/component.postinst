@@ -1,0 +1,58 @@
+#!/bin/sh
+# @PKG@: the component's own installer, install-files.sh, from its staged copy
+# (packaging/, docs/UPDATES.md): the image and the network installers run the
+# same one, so the phone gets the same files whichever way it is updated.
+set -e
+PKG=@PKG@
+DIR=/usr/lib/openduo/components/@COMPONENT@
+
+# The GUI user (duo-wc and every app run as it): what the image recorded,
+# else duo-wc's unit, else DUO2_USER from the environment.
+gui_user() {
+    if [ -n "${DUO2_USER:-}" ]; then
+        printf '%s\n' "$DUO2_USER"
+        return 0
+    fi
+    if [ -s /etc/duo2/gui-user ]; then
+        head -n 1 /etc/duo2/gui-user
+        return 0
+    fi
+    u=$(sed -n 's/^User=//p' /etc/systemd/system/duo-wc.service 2>/dev/null | head -n 1)
+    if [ -n "$u" ] && getent passwd "$u" >/dev/null; then
+        install -d -m 0755 /etc/duo2
+        printf '%s\n' "$u" >/etc/duo2/gui-user
+        printf '%s\n' "$u"
+        return 0
+    fi
+    echo "$PKG: who is the GUI user? Put the name in /etc/duo2/gui-user (or DUO2_USER=...)" >&2
+    return 1
+}
+
+case "$1" in
+configure)
+    @USER_LINE@
+    (cd "$DIR" && @ENV@sh ./install-files.sh @ARGS@)
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload || true
+    fi
+    if [ -z "$2" ]; then
+        for u in @ENABLE@; do
+            systemctl enable "$u" >/dev/null 2>&1 || true
+        done
+    elif [ -d /run/systemd/system ]; then
+        for u in @RESTART@; do
+            systemctl try-restart "$u" || true
+        done
+        if [ "@REBOOT@" = yes ]; then
+            touch /run/reboot-required 2>/dev/null || true
+            echo "$PKG" >>/run/reboot-required.pkgs 2>/dev/null || true
+        fi
+    fi
+    # the developer tools follow developer mode (devmode/: whatever this
+    # installer put in place goes into the payload, off unless the mode is on)
+    if [ -x /usr/local/sbin/duo-devmode ]; then
+        /usr/local/sbin/duo-devmode devtools sync >/dev/null 2>&1 || true
+    fi
+    ;;
+esac
+exit 0

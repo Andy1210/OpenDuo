@@ -1,0 +1,14 @@
+[Unit]
+Description=duo2-os: reboot a duo2-try kernel that has no WiFi (back to the known-good one)
+# Only on a try boot (scripts/duo2-try adds duo2.try=<id>; any value matches).
+ConditionKernelCommandLine=duo2.try
+After=systemd-networkd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/duo2-try-netwatch
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

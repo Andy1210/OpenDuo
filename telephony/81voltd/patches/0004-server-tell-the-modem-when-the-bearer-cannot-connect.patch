@@ -1,0 +1,92 @@
+From a2f460627f683a26731ecc20cb030db7cc446a6a Mon Sep 17 00:00:00 2001
+From: duo2-os <duo2-os@localhost>
+Date: Thu, 12 Nov 2026 16:19:37 +0100
+Subject: [PATCH 4/5] server: tell the modem when the bearer cannot connect
+
+The start request is answered as soon as the bearer exists; when
+ModemManager then fails to connect it, the modem heard nothing and
+waited for its own timer. Send the connection-changed indication with
+error 13 (connection down) instead, the one sent when a connected bearer
+goes away. This was one of the README's known issues (ModemManager
+errors are not communicated to the modem).
+---
+ qvd-connection.c |  7 +++++++
+ qvd-connection.h |  1 +
+ qvd-server.c     | 23 +++++++++++++++++++++++
+ 3 files changed, 31 insertions(+)
+
+diff --git a/qvd-connection.c b/qvd-connection.c
+index 1147409..e196b3c 100644
+--- a/qvd-connection.c
++++ b/qvd-connection.c
+@@ -91,6 +91,13 @@ const gchar *qvd_connection_get_path(QVDConnection *conn)
+ 	return g_dbus_proxy_get_object_path(G_DBUS_PROXY(conn->bearer));
+ }
+ 
++MMBearerIpFamily qvd_connection_get_ip_type(const QVDConnection *conn)
++{
++	g_assert(conn != NULL);
++
++	return conn->ip_type;
++}
++
+ void qvd_connection_get_handles(const QVDConnection *conn,
+ 				guint32 *sub_id, guint32 *conn_id,
+ 				guint8 *local_id)
+diff --git a/qvd-connection.h b/qvd-connection.h
+index 2cf7f15..8eceb51 100644
+--- a/qvd-connection.h
++++ b/qvd-connection.h
+@@ -18,6 +18,7 @@ G_DECLARE_FINAL_TYPE(QVDConnection, qvd_connection, QVD, CONNECTION, GObject)
+ QVDConnection *qvd_connection_new(MMBearerIpFamily ip_type);
+ 
+ const gchar *qvd_connection_get_path(QVDConnection *conn);
++MMBearerIpFamily qvd_connection_get_ip_type(const QVDConnection *conn);
+ 
+ void qvd_connection_get_handles(const QVDConnection *conn,
+ 				guint32 *sub_id, guint32 *conn_id,
+diff --git a/qvd-server.c b/qvd-server.c
+index 5e22a75..381fa1d 100644
+--- a/qvd-server.c
++++ b/qvd-server.c
+@@ -81,6 +81,10 @@ static void connection_address_changed(QVDModem *modem,
+ 				       MMBearerIpFamily ip_type,
+ 				       const gchar *addr,
+ 				       gpointer data);
++static void connection_connect_error(QVDModem *modem,
++				     QVDConnection *conn,
++				     GError *error,
++				     gpointer data);
+ 
+ G_DEFINE_TYPE_WITH_CODE(QVDServer, qvd_server, G_TYPE_OBJECT,
+ 			G_IMPLEMENT_INTERFACE(G_TYPE_INITABLE,
+@@ -185,6 +189,8 @@ QVDServer *qvd_server_new(QVDModem *modem, GError **out_err)
+ 	server->modem = g_object_ref(modem);
+ 	server->modem_sig = g_signal_connect(server->modem, "qvd-connection-address-changed",
+ 					     G_CALLBACK(connection_address_changed), server);
++	g_signal_connect(server->modem, "qvd-connection-connect-error",
++			 G_CALLBACK(connection_connect_error), server);
+ 
+ 	return server;
+ }
+@@ -562,3 +568,20 @@ static void connection_address_changed(QVDModem *modem,
+ 
+ 	g_hash_table_foreach(server->clients, send_staged_message, server);
+ }
++
++/*
++ * The bearer was created and the start request answered, but ModemManager
++ * could not connect it: say so with the "connection down" indication (error
++ * 13), as when a connected bearer goes away, so the modem acts on it now
++ * instead of waiting for its own timer. A later start request for the same
++ * APN and family connects the same bearer again.
++ */
++static void connection_connect_error(QVDModem *modem,
++				     QVDConnection *conn,
++				     GError *error,
++				     gpointer data)
++{
++	g_warning("Bearer connection failed (%s): telling the modem the connection is down\n",
++		  error != NULL ? error->message : "unknown error");
++	connection_address_changed(modem, conn, qvd_connection_get_ip_type(conn), NULL, data);
++}

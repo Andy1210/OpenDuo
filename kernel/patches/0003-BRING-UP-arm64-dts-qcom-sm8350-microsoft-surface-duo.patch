@@ -1,0 +1,66 @@
+From ca2686bb1199e66beeca47de0a55004392f82652 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Thu, 5 Nov 2026 23:36:20 +0100
+Subject: [PATCH 003/137] BRING-UP: arm64: dts: qcom:
+ sm8350-microsoft-surface-duo2: Add variants without the USB-C graph, with
+ MDSS held
+
+Two DTB variants for the first boots. nousbc drops the pmic_glink /
+USB-C graph, to tell whether the USB gadget waits on it. keepfb (variant
+D) also marks MDSS okay without its driver loaded, so the interconnect,
+clock and power-domain providers never reach sync_state and the display
+path the UEFI set up keeps its votes: the EFI framebuffer stays visible
+for earlycon=efifb.
+
+Not for upstream: a bring-up variant, built next to the main DTB.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../sm8350-microsoft-surface-duo2-keepfb.dts   | 12 ++++++++++++
+ .../sm8350-microsoft-surface-duo2-nousbc.dts   | 18 ++++++++++++++++++
+ 2 files changed, 30 insertions(+)
+ create mode 100644 arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-keepfb.dts
+ create mode 100644 arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-nousbc.dts
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-keepfb.dts b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-keepfb.dts
+new file mode 100644
+index 000000000000..0b402453d72d
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-keepfb.dts
+@@ -0,0 +1,12 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/*
++ * Bring-up variant D: no pmic_glink graph, and MDSS marked okay without its
++ * driver loaded, so the interconnect / clock / power-domain providers never
++ * reach sync_state and the UEFI's display path keeps its votes (the EFI
++ * framebuffer stays visible for earlycon=efifb). Not for upstream.
++ */
++#include "sm8350-microsoft-surface-duo2-nousbc.dts"
++
++&mdss {
++	status = "okay";
++};
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-nousbc.dts b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-nousbc.dts
+new file mode 100644
+index 000000000000..b79f5ba0389d
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-nousbc.dts
+@@ -0,0 +1,18 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/*
++ * Bring-up variant: the Duo 2 without the pmic_glink / USB-C graph, to tell
++ * whether USB waits on it. Not for upstream.
++ */
++#include "sm8350-microsoft-surface-duo2.dts"
++
++/ {
++	/delete-node/ pmic-glink;
++};
++
++&usb_1_dwc3_hs {
++	/delete-property/ remote-endpoint;
++};
++
++&usb_1_qmpphy_out {
++	/delete-property/ remote-endpoint;
++};

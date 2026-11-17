@@ -1,0 +1,11 @@
+[Unit]
+Description=OpenDuo: the nightly automatic install (does nothing while it is switched off)
+
+[Timer]
+OnCalendar=*-*-* 02:30
+RandomizedDelaySec=90min
+# wakes the phone (the RTC); the install holds it awake while it runs
+WakeSystem=true
+
+[Install]
+WantedBy=timers.target

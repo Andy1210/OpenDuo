@@ -1,0 +1,97 @@
+From 5a867ed6f794e0b94c7b8ae66c5feb45c6adf136 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 19:16:49 +0100
+Subject: [PATCH 053/137] arm64: dts: qcom: sm8350: Add the CPU capacities and
+ dynamic power coefficients
+
+The CPU nodes have no capacity-dmips-mhz, so every core reports a
+capacity of 1024: the scheduler treats the Cortex-A55s like the
+Cortex-X1, and without dynamic-power-coefficient no energy model is
+registered, so energy-aware scheduling stays off.
+
+Take the values the downstream lahaina device tree uses (the same
+scheme as sm8250.dtsi): Cortex-A55 1024 / 100, Cortex-A78 1946 / 499,
+Cortex-X1 2048 / 760. With the cluster maximum frequencies this gives
+the capacities 325, 828 and 1024.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ arch/arm64/boot/dts/qcom/sm8350.dtsi | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350.dtsi b/arch/arm64/boot/dts/qcom/sm8350.dtsi
+index 9144bc2243e0..1b3ef745d36d 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8350.dtsi
+@@ -62,6 +62,8 @@ cpu0: cpu@0 {
+ 			reg = <0x0 0x0>;
+ 			clocks = <&cpufreq_hw 0>;
+ 			enable-method = "psci";
++			capacity-dmips-mhz = <1024>;
++			dynamic-power-coefficient = <100>;
+ 			next-level-cache = <&l2_0>;
+ 			qcom,freq-domain = <&cpufreq_hw 0>;
+ 			power-domains = <&cpu_pd0>;
+@@ -86,6 +88,8 @@ cpu1: cpu@100 {
+ 			reg = <0x0 0x100>;
+ 			clocks = <&cpufreq_hw 0>;
+ 			enable-method = "psci";
++			capacity-dmips-mhz = <1024>;
++			dynamic-power-coefficient = <100>;
+ 			next-level-cache = <&l2_100>;
+ 			qcom,freq-domain = <&cpufreq_hw 0>;
+ 			power-domains = <&cpu_pd1>;
+@@ -105,6 +109,8 @@ cpu2: cpu@200 {
+ 			reg = <0x0 0x200>;
+ 			clocks = <&cpufreq_hw 0>;
+ 			enable-method = "psci";
++			capacity-dmips-mhz = <1024>;
++			dynamic-power-coefficient = <100>;
+ 			next-level-cache = <&l2_200>;
+ 			qcom,freq-domain = <&cpufreq_hw 0>;
+ 			power-domains = <&cpu_pd2>;
+@@ -124,6 +130,8 @@ cpu3: cpu@300 {
+ 			reg = <0x0 0x300>;
+ 			clocks = <&cpufreq_hw 0>;
+ 			enable-method = "psci";
++			capacity-dmips-mhz = <1024>;
++			dynamic-power-coefficient = <100>;
+ 			next-level-cache = <&l2_300>;
+ 			qcom,freq-domain = <&cpufreq_hw 0>;
+ 			power-domains = <&cpu_pd3>;
+@@ -143,6 +151,8 @@ cpu4: cpu@400 {
+ 			reg = <0x0 0x400>;
+ 			clocks = <&cpufreq_hw 1>;
+ 			enable-method = "psci";
++			capacity-dmips-mhz = <1946>;
++			dynamic-power-coefficient = <499>;
+ 			next-level-cache = <&l2_400>;
+ 			qcom,freq-domain = <&cpufreq_hw 1>;
+ 			power-domains = <&cpu_pd4>;
+@@ -162,6 +172,8 @@ cpu5: cpu@500 {
+ 			reg = <0x0 0x500>;
+ 			clocks = <&cpufreq_hw 1>;
+ 			enable-method = "psci";
++			capacity-dmips-mhz = <1946>;
++			dynamic-power-coefficient = <499>;
+ 			next-level-cache = <&l2_500>;
+ 			qcom,freq-domain = <&cpufreq_hw 1>;
+ 			power-domains = <&cpu_pd5>;
+@@ -181,6 +193,8 @@ cpu6: cpu@600 {
+ 			reg = <0x0 0x600>;
+ 			clocks = <&cpufreq_hw 1>;
+ 			enable-method = "psci";
++			capacity-dmips-mhz = <1946>;
++			dynamic-power-coefficient = <499>;
+ 			next-level-cache = <&l2_600>;
+ 			qcom,freq-domain = <&cpufreq_hw 1>;
+ 			power-domains = <&cpu_pd6>;
+@@ -200,6 +214,8 @@ cpu7: cpu@700 {
+ 			reg = <0x0 0x700>;
+ 			clocks = <&cpufreq_hw 2>;
+ 			enable-method = "psci";
++			capacity-dmips-mhz = <2048>;
++			dynamic-power-coefficient = <760>;
+ 			next-level-cache = <&l2_700>;
+ 			qcom,freq-domain = <&cpufreq_hw 2>;
+ 			power-domains = <&cpu_pd7>;

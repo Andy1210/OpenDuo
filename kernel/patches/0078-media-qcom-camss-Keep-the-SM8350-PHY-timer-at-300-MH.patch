@@ -1,0 +1,36 @@
+From d081de2146cbfecb546ea876d664c0c1706156e3 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 01:35:22 +0100
+Subject: [PATCH 078/137] media: qcom: camss: Keep the SM8350 PHY timer at 300
+ MHz up to 2.5 Gb/s
+
+The CSIPHY wants its timer clock above a quarter of the link frequency,
+which at the wide camera's 1248 MHz (2496 Mb/s per lane) is more than the
+SM8350 timer's 300 MHz. The vendor driver runs the timer at 300 MHz at
+every rate, and the IMX563 streams at 2496 Mb/s with it without receiver
+errors: on SM8350 use the highest level instead of failing.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/media/platform/qcom/camss/camss-csiphy.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/drivers/media/platform/qcom/camss/camss-csiphy.c b/drivers/media/platform/qcom/camss/camss-csiphy.c
+index 539ac4888b60..92816f1d2e5a 100644
+--- a/drivers/media/platform/qcom/camss/camss-csiphy.c
++++ b/drivers/media/platform/qcom/camss/camss-csiphy.c
+@@ -162,6 +162,14 @@ static int csiphy_set_clock_rates(struct csiphy_device *csiphy)
+ 				if (min_rate < clock->freq[j])
+ 					break;
+ 
++			/*
++			 * SM8350: the vendor driver runs the PHY timer at
++			 * 300 MHz for every rate, 2.5 Gb/s per lane included.
++			 */
++			if (j == clock->nfreqs &&
++			    csiphy->camss->res->version == CAMSS_8350)
++				j = clock->nfreqs - 1;
++
+ 			if (j == clock->nfreqs) {
+ 				dev_err(dev,
+ 					"Pixel clock is too high for CSIPHY\n");

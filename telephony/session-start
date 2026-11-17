@@ -1,0 +1,19 @@
+#!/bin/sh
+# duo2-os: run by duo-telephony-session.service (a user unit) whenever duo-wc's
+# session starts: Calls and Chatty as background services (incoming calls and
+# SMS while their windows are closed). Started only once the session has
+# announced its display to the user manager: they are Wayland apps, and the
+# services take their environment from the manager.
+set -u
+[ -r /run/duo-wc/session.env ] || exit 0
+i=0
+while [ "$i" -lt 40 ]; do
+    systemctl --user show-environment 2>/dev/null | grep -q '^WAYLAND_DISPLAY=' && break
+    sleep 0.25
+    i=$((i + 1))
+done
+sleep 1
+for app in duo-calls-daemon duo-chatty-daemon; do
+    systemctl --user start "$app.service" || echo "could not start $app" >&2
+done
+exit 0

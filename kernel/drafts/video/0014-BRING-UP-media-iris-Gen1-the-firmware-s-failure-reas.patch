@@ -1,0 +1,95 @@
+From 9643cd0f4d667c20ce2b20774d8e111032e4c977 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Mon, 9 Nov 2026 21:38:10 +0100
+Subject: [PATCH 14/16] BRING-UP: media: iris: Gen1: the firmware's failure
+ reason, counts, a switch for the stop flush
+
+- The Subsystem Failure Reason text the firmware leaves on a system
+  error (venus prints it, iris did not): it names the firmware source
+  line that asserted.
+- Each sequence change's size, codec, buffer count and bit depth, and
+  each final session stop.
+- gen1_venus_stop_flush (default on): 0 brings back the stop sequence
+  iris had before the venus-like flush, for an A/B on the device; new
+  sessions take it.
+
+Debugging aid only, not for upstream.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../platform/qcom/iris/iris_hfi_gen1_command.c | 18 ++++++++++++++++--
+ .../qcom/iris/iris_hfi_gen1_response.c         | 13 +++++++++++++
+ 2 files changed, 29 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c b/drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c
+index 937bb3e06183..aa265f8781e2 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c
+@@ -8,6 +8,16 @@
+ #include "iris_instance.h"
+ #include "iris_vpu_buffer.h"
+ 
++/*
++ * BRING-UP: /sys/module/qcom_iris/parameters/gen1_venus_stop_flush, 0 for
++ * the stop sequence iris had before (only the output flushed when the
++ * capture queue stops, no flush before the STOP), for an A/B on the device;
++ * new sessions take it.
++ */
++static bool gen1_venus_stop_flush = true;
++module_param(gen1_venus_stop_flush, bool, 0644);
++MODULE_PARM_DESC(gen1_venus_stop_flush, "BRING-UP: Gen1 decoder stop flushes as venus does (0: as iris did)");
++
+ static u32 iris_hfi_gen1_buf_type_from_driver(enum iris_buffer_type buffer_type)
+ {
+ 	switch (buffer_type) {
+@@ -224,13 +234,17 @@ static int iris_hfi_gen1_session_stop(struct iris_inst *inst, u32 plane)
+ 			 * firmware at the STOP that follows ("Err_Fatal ...
+ 			 * video_decoder.c:1577").
+ 			 */
+-			if (V4L2_TYPE_IS_CAPTURE(plane) && (inst->sub_state & IRIS_INST_SUB_DRC))
++			if (V4L2_TYPE_IS_CAPTURE(plane) &&
++			    (!gen1_venus_stop_flush || (inst->sub_state & IRIS_INST_SUB_DRC)))
+ 				ret = iris_hfi_gen1_session_flush(inst, HFI_FLUSH_OUTPUT);
+ 			else
+ 				ret = iris_hfi_gen1_session_flush(inst, HFI_FLUSH_ALL);
+ 		} else if (inst->sub_state & IRIS_INST_SUB_LOAD_RESOURCES) {
+ 			/* The other queue stopped first: flush before the STOP. */
+-			ret = iris_hfi_gen1_session_flush(inst, HFI_FLUSH_ALL);
++			if (gen1_venus_stop_flush)
++				ret = iris_hfi_gen1_session_flush(inst, HFI_FLUSH_ALL);
++			dev_info(core->dev, "BRING-UP: session %x stop (%s flush)\n", inst->session_id,
++				 gen1_venus_stop_flush ? "venus" : "old");
+ 
+ 			reinit_completion(&inst->completion);
+ 			iris_hfi_gen1_packet_session_cmd(inst, &pkt, HFI_CMD_SESSION_STOP);
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen1_response.c b/drivers/media/platform/qcom/iris/iris_hfi_gen1_response.c
+index 0cbc54d59ff1..6d3cee5b0802 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen1_response.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen1_response.c
+@@ -156,6 +156,9 @@ static void iris_hfi_gen1_read_changed_params(struct iris_inst *inst,
+ 	}
+ 
+ 	inst->fw_min_count = event.buf_count;
++	dev_info(core->dev, "BRING-UP: seq change %ux%u, codec %.4s, firmware count %u, bit depth %#x\n",
++		 event.width, event.height, (const char *)&inst->codec, event.buf_count,
++		 event.bit_depth);
+ 	inst->buffers[BUF_OUTPUT].min_count = iris_vpu_buf_count(inst, BUF_OUTPUT);
+ 	inst->buffers[BUF_OUTPUT].size = pixmp_op->plane_fmt[0].sizeimage;
+ 	ctrl = v4l2_ctrl_find(&inst->ctrl_handler, V4L2_CID_MIN_BUFFERS_FOR_CAPTURE);
+@@ -225,6 +228,16 @@ iris_hfi_gen1_sys_event_notify(struct iris_core *core, void *packet)
+ 			pkt->event_id, pkt->shdr.session_id, pkt->event_data1,
+ 			pkt->event_data2);
+ 
++	/* BRING-UP: the Subsystem Failure Reason the firmware left (venus prints it). */
++	if (pkt->event_id == HFI_EVENT_SYS_ERROR && core->sfr_vaddr) {
++		const u32 *sfr = core->sfr_vaddr;
++		u32 size = min_t(u32, sfr[0], SFR_SIZE);
++
++		if (size > sizeof(u32))
++			dev_err(core->dev, "SFR: %.*s\n", (int)(size - sizeof(u32)),
++				(const char *)(sfr + 1));
++	}
++
+ 	core->state = IRIS_CORE_ERROR;
+ 
+ 	mutex_lock(&core->lock);

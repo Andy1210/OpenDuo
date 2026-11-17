@@ -1,0 +1,58 @@
+From fbb625d5a164d841615ab6ed9af383fe82b1a562 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 03:00:00 +0100
+Subject: [PATCH 027/137] BRING-UP: ASoC: dt-bindings: qcom: Add the SM8350
+ LPASS WSA/VA macros and sound card
+
+SM8350 (lahaina) has the SM8250 LPASS codec macro layout and runs the
+legacy APR audio firmware (AVS), so its WSA and VA macros take the SM8250
+compatible as fallback, and its sound card is one of the sm8250 machine
+driver family.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../devicetree/bindings/sound/qcom,lpass-va-macro.yaml         | 3 +++
+ .../devicetree/bindings/sound/qcom,lpass-wsa-macro.yaml        | 3 +++
+ Documentation/devicetree/bindings/sound/qcom,sm8250.yaml       | 1 +
+ 3 files changed, 7 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/sound/qcom,lpass-va-macro.yaml b/Documentation/devicetree/bindings/sound/qcom,lpass-va-macro.yaml
+index aea31fbdad37..342a7c3e97f8 100644
+--- a/Documentation/devicetree/bindings/sound/qcom,lpass-va-macro.yaml
++++ b/Documentation/devicetree/bindings/sound/qcom,lpass-va-macro.yaml
+@@ -19,6 +19,9 @@ properties:
+           - qcom,sm8450-lpass-va-macro
+           - qcom,sm8550-lpass-va-macro
+           - qcom,sc8280xp-lpass-va-macro
++      - items:
++          - const: qcom,sm8350-lpass-va-macro
++          - const: qcom,sm8250-lpass-va-macro
+       - items:
+           - enum:
+               - qcom,eliza-lpass-va-macro
+diff --git a/Documentation/devicetree/bindings/sound/qcom,lpass-wsa-macro.yaml b/Documentation/devicetree/bindings/sound/qcom,lpass-wsa-macro.yaml
+index 9fedd80532e2..171b5184f080 100644
+--- a/Documentation/devicetree/bindings/sound/qcom,lpass-wsa-macro.yaml
++++ b/Documentation/devicetree/bindings/sound/qcom,lpass-wsa-macro.yaml
+@@ -18,6 +18,9 @@ properties:
+           - qcom,sm8450-lpass-wsa-macro
+           - qcom,sm8550-lpass-wsa-macro
+           - qcom,sc8280xp-lpass-wsa-macro
++      - items:
++          - const: qcom,sm8350-lpass-wsa-macro
++          - const: qcom,sm8250-lpass-wsa-macro
+       - items:
+           - enum:
+               - qcom,eliza-lpass-wsa-macro
+diff --git a/Documentation/devicetree/bindings/sound/qcom,sm8250.yaml b/Documentation/devicetree/bindings/sound/qcom,sm8250.yaml
+index 1536fcd96d68..efd1764a4252 100644
+--- a/Documentation/devicetree/bindings/sound/qcom,sm8250.yaml
++++ b/Documentation/devicetree/bindings/sound/qcom,sm8250.yaml
+@@ -52,6 +52,7 @@ properties:
+           - qcom,sdm660-sndcard
+           - qcom,sdm845-sndcard
+           - qcom,sm8250-sndcard
++          - qcom,sm8350-sndcard
+           - qcom,sm8450-sndcard
+           - qcom,x1e80100-sndcard
+ 

@@ -1,0 +1,255 @@
+#!/usr/bin/python3 -I
+"""duo2-gnss-assist: XTRA assistance data for the modem's GNSS engine
+(docs/hardware/location.md). Off unless the owner enables the timer.
+
+Without help the GNSS engine needs each satellite's orbit from the
+satellite itself (30 s to minutes outdoors before the first fix). XTRA is
+Qualcomm's predicted-orbit file for a few days ahead, served by the
+servers the modem itself names (ModemManager's AssistanceDataServers);
+ModemManager injects it into the engine on request
+(`mmcli --location-inject-assistance-data`), the way an Android phone's
+location service does. Nothing is configured in the modem by this (no NV
+item, no SUPL server); the engine keeps the data like its own orbit cache.
+The download tells the server the phone's public address, no position.
+
+  duo2-gnss-assist status          what the modem supports, the cached file
+  duo2-gnss-assist fetch [--any-network] [--force]
+                                   download it (WiFi only unless --any-network;
+                                   not again within MAX_AGE_H unless --force)
+  duo2-gnss-assist inject          give the cached file to the modem
+  duo2-gnss-assist run             fetch if old, then inject (the timer)
+
+Exit 0 when there is nothing to do (no modem, no XTRA support, on mobile
+data); 1 on an error.
+"""
+
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.request
+
+CACHE = "/var/cache/duo2-gnss"
+DATA = os.path.join(CACHE, "xtra.bin")
+META = os.path.join(CACHE, "xtra.json")
+MAX_AGE_H = 24
+MIN_BYTES, MAX_BYTES = 1024, 1 << 20
+TIMEOUT_S = 30
+
+
+def log(*args):
+    print("duo2-gnss-assist:", *args, flush=True)
+
+
+def kv_list(kv, key):
+    """A list in mmcli's key-value output: KEY.value[N] lines (string
+    lists and arrays), or one comma-separated KEY line; "--" is empty."""
+    items = []
+    for k, v in kv.items():
+        m = re.match(r"^%s\.value\[(\d+)\]$" % re.escape(key), k)
+        if m and v not in ("", "--"):
+            items.append((int(m.group(1)), v))
+    if items:
+        return [v for _, v in sorted(items)]
+    value = kv.get(key, "")
+    return [x.strip() for x in value.split(",") if x.strip() and x.strip() != "--"]
+
+
+def parse_location_status(text):
+    """`mmcli -K -m any --location-status` (KEY : VALUE lines): the
+    supported assistance types and the servers."""
+    kv = {}
+    for line in (text or "").splitlines():
+        key, sep, value = line.partition(":")
+        if sep:
+            kv[key.strip()] = value.strip()
+    return {
+        "supported": kv_list(kv, "modem.location.gps.supported-assistance-data"),
+        "servers": kv_list(kv, "modem.location.gps.assistance-servers"),
+    }
+
+
+def usable_servers(servers):
+    return [s for s in servers if re.match(r"^https?://[A-Za-z0-9.-]+(:\d+)?/[A-Za-z0-9._/-]*$", s)]
+
+
+def default_route_dev(text):
+    """`ip -o route get 1.1.1.1` -> the interface ("wlan0", "qmapmux0.0"...)."""
+    m = re.search(r"\bdev (\S+)", text or "")
+    return m.group(1) if m else None
+
+
+def on_wifi(dev):
+    return bool(dev) and dev.startswith(("wlan", "wl"))
+
+
+def is_stale(meta, now, max_age_h=MAX_AGE_H):
+    try:
+        return now - float(meta["fetched_at"]) > max_age_h * 3600
+    except (TypeError, KeyError, ValueError):
+        return True
+
+
+def plausible(data):
+    return MIN_BYTES <= len(data) <= MAX_BYTES
+
+
+# -- the system ---------------------------------------------------------------------------------
+
+
+def run(argv, timeout=30):
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 1, "", str(e)
+    return r.returncode, r.stdout, r.stderr
+
+
+def modem_status():
+    rc, out, err = run(["mmcli", "-K", "-m", "any", "--location-status"])
+    if rc != 0:
+        return None, (err or out).strip()
+    return parse_location_status(out), None
+
+
+def read_meta():
+    try:
+        with open(META) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def cmd_status():
+    st, err = modem_status()
+    if st is None:
+        print("modem: %s" % err)
+    else:
+        print("supported assistance: %s" % (", ".join(st["supported"]) or "none"))
+        print(
+            "servers: %d (%s)"
+            % (len(st["servers"]), ", ".join(usable_servers(st["servers"])) or "-")
+        )
+    meta = read_meta()
+    if meta is None:
+        print("cached file: none")
+    else:
+        age = (time.time() - float(meta.get("fetched_at", 0))) / 3600
+        print(
+            "cached file: %d bytes, %.1f h old, sha256 %s..., last injected %s"
+            % (
+                meta.get("bytes", 0),
+                age,
+                str(meta.get("sha256", ""))[:12],
+                time.strftime("%F %T", time.localtime(meta["injected_at"]))
+                if meta.get("injected_at")
+                else "never",
+            )
+        )
+    dev = default_route_dev(run(["ip", "-o", "route", "get", "1.1.1.1"])[1])
+    print("default route: %s" % (dev or "none"))
+    return 0
+
+
+def write_meta(meta):
+    tmp = META + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(meta, f, indent=1)
+    os.replace(tmp, META)
+
+
+def cmd_fetch(any_network=False, force=False):
+    meta = read_meta()
+    if not force and meta is not None and not is_stale(meta, time.time()):
+        log("the cached file is fresh")
+        return 0
+    dev = default_route_dev(run(["ip", "-o", "route", "get", "1.1.1.1"])[1])
+    if not any_network and not on_wifi(dev):
+        log("not on WiFi (default route: %s): not downloading" % (dev or "none"))
+        return 0
+    st, err = modem_status()
+    if st is None:
+        log("no modem: %s" % err)
+        return 0
+    if "xtra" not in st["supported"]:
+        log("the modem takes no XTRA data")
+        return 0
+    servers = usable_servers(st["servers"])
+    if not servers:
+        log("the modem names no XTRA server")
+        return 0
+    os.makedirs(CACHE, mode=0o755, exist_ok=True)
+    for url in servers:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "duo2-gnss-assist"})
+            with urllib.request.urlopen(req, timeout=TIMEOUT_S) as r:
+                data = r.read(MAX_BYTES + 1)
+        except OSError as e:
+            log("%s: %s" % (url, e))
+            continue
+        if not plausible(data):
+            log("%s: implausible size %d" % (url, len(data)))
+            continue
+        tmp = DATA + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, DATA)
+        write_meta(
+            {
+                "fetched_at": time.time(),
+                "bytes": len(data),
+                "source": url,
+                "sha256": hashlib.sha256(data).hexdigest(),
+            }
+        )
+        log("downloaded %d bytes" % len(data))
+        return 0
+    return 1
+
+
+def cmd_inject():
+    meta = read_meta()
+    if meta is None or not os.path.exists(DATA):
+        log("nothing cached (fetch first)")
+        return 1
+    if is_stale(meta, time.time(), max_age_h=7 * 24):
+        log("the cached file is over a week old: not injecting")
+        return 1
+    rc, out, err = run(
+        ["mmcli", "-m", "any", "--location-inject-assistance-data=" + DATA], timeout=60
+    )
+    if rc != 0:
+        log("injection failed: %s" % (err or out).strip())
+        return 1
+    meta["injected_at"] = time.time()
+    write_meta(meta)
+    log("injected into the GNSS engine")
+    return 0
+
+
+def main(argv):
+    if not argv or argv[0] not in ("status", "fetch", "inject", "run"):
+        print(__doc__.strip().split("\n\n")[2], file=sys.stderr)
+        return 2
+    if os.geteuid() != 0:
+        print("duo2-gnss-assist: run as root", file=sys.stderr)
+        return 2
+    cmd, opts = argv[0], set(argv[1:])
+    if cmd == "status":
+        return cmd_status()
+    if cmd == "fetch":
+        return cmd_fetch("--any-network" in opts, "--force" in opts)
+    if cmd == "inject":
+        return cmd_inject()
+    rc = cmd_fetch("--any-network" in opts)
+    if rc != 0 and read_meta() is None:
+        return rc
+    return cmd_inject() if os.path.exists(DATA) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

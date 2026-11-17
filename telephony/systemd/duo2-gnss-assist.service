@@ -1,0 +1,16 @@
+[Unit]
+Description=XTRA assistance data for the modem's GNSS engine (faster first fix)
+Documentation=file:///usr/local/sbin/duo2-gnss-assist
+After=ModemManager.service network-online.target
+ConditionPathExists=/usr/bin/mmcli
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/duo2-gnss-assist run
+ProtectSystem=strict
+CacheDirectory=duo2-gnss
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+TimeoutStartSec=3min

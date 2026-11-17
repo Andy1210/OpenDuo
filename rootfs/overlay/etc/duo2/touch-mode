@@ -1,0 +1,11 @@
+# duo2-touchd's mode (docs/hardware/touch.md): the first word.
+#   stitched  the stock touch HAL's own sequence: Microsoft's heat processor
+#             gets the lit panels, the hinge angle and the orientation from
+#             duo-posed (/run/duo-posed/touch) and stitches the two panels
+#             into one surface when both are lit; if the digitizer leaves
+#             heat mode it is re-initialised, and only after 3 failures in
+#             10 minutes falls back to split (/run/duo2-touchd.fallback).
+#   split     the bring-up sequence (each panel alone, stretched, the outer
+#             edges out of reach); the last-resort fallback.
+# After a change: sudo systemctl restart duo2-touchd
+stitched

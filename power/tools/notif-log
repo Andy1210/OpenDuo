@@ -1,0 +1,31 @@
+#!/bin/sh
+# notif-log [USER]: one line per desktop notification posted in USER's session
+# (default: the GUI user, duo-wc's), with the wall clock to the millisecond, for push latency
+# tests: send a message at a noted time while the phone sleeps, compare.
+# Run it as root on the phone (systemd-run, so the ssh session that started
+# it does not hold the phone awake):
+#   sudo systemd-run --unit=notif-log /usr/local/sbin/notif-log   (or the copy in /tmp)
+#   journalctl -u notif-log -o short-precise
+# It prints the app name and the summary only, never the body.
+set -eu
+U=${1:-$(systemctl show -P User duo-wc.service)}
+[ -n "$U" ] || { echo "notif-log: no GUI user (duo-wc.service has no User=); name one" >&2; exit 2; }
+ID=$(id -u "$U")
+export XDG_RUNTIME_DIR="/run/user/$ID" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$ID/bus"
+exec setpriv --reuid="$U" --regid="$(id -g "$U")" --init-groups \
+    busctl --user monitor --json=short \
+    --match "type='method_call',interface='org.freedesktop.Notifications',member='Notify'" |
+    python3 -Iu -c '
+import json, sys, time
+for line in sys.stdin:
+    try:
+        m = json.loads(line)
+    except ValueError:
+        continue
+    d = m.get("payload", {}).get("data") or []
+    app = d[0] if len(d) > 0 else "?"
+    summary = d[3] if len(d) > 3 else "?"
+    t = time.time()
+    print("%s.%03d notification from %r: %r" % (time.strftime("%H:%M:%S", time.localtime(t)),
+          int(t * 1000) % 1000, app, summary), flush=True)
+'

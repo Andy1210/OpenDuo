@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# Step 5 of docs/hardware/audio.md: the speaker path with DIGITAL SILENCE. Sets up the
+# UCM draft's Speaker device with WSA_RX0/1 Digital Volume 0 (-84 dB) and
+# both PA Volumes 0 (-3 dB, the bottom), plays SECS seconds (default 5) of
+# /dev/zero on hw:0,0, and checks WITHOUT listening:
+#   - kernel messages (q6afe / q6asm / q6adm, SoundWire, wsa883x errors);
+#   - DAPM: SpkrLeft SPKR / SpkrRight SPKR On during the stream, Off after;
+#   - the amplifiers' registers (regmap debugfs, one line each):
+#     PA_FSM_CTL 0x3410, PA_FSM_STA 0x3413 (the PA state machine, on
+#     during the stream), PA_FSM_ERR_COND 0x3414, INTR_STATUS0/1
+#     0x3483/0x3484 (must stay 0), PDM_WD_CTL 0x344b;
+#   - NOT the SoundWire ports: no debugfs dump of the master (it reads the
+#     read FIFO too: "SWR read FIFO underflow", 2026-11-07) nor of the slaves
+#     (2026-11-08: an alert storm, a speaker UNATTACHED until a reboot);
+#   - the PCM state (RUNNING, the hw pointer moves);
+#   - the amplifier temperatures before / after, and the ADSP sleep in a
+#     window from ~10 s after the stream (the stream's votes must be given
+#     back).
+# At most a faint click: the PA switches on after the stream starts
+# (mute_unmute_on_trigger), with nothing but zeros behind it. Daytime only,
+# and only with whoever is near the phone agreeing. If anything looks wrong,
+# the path is taken down at once and the script stops.
+#
+#   scripts/duo2-spk-silence [SECS] [WINDOW]
+#
+# Loads the sound card if needed (the modules are blacklisted against the
+# automatic load only). Afterwards every playback control is back off and
+# the card stays loaded (modprobe -r snd_soc_sm8250 unloads it).
+set -euo pipefail
+. "$(dirname "$0")/lib/remote.sh"
+SECS=${1:-5}
+WINDOW=${2:-30}
+case $SECS in [1-9]|10) ;; *) echo "SECS must be 1..10" >&2; exit 2 ;; esac
+
+duo2_ssh "sudo bash -s" <<EOF
+set -u
+C=/sys/kernel/debug/asoc/Microsoft-SurfaceDuo2
+S=/sys/kernel/debug/qcom_stats/adsp
+M=/sys/kernel/debug/soundwire/master-1-0
+if ! grep -q sm8350 /proc/asound/cards; then
+    for m in apr q6core q6afe q6afe_clocks q6afe_dai q6asm q6asm_dai q6adm q6routing pinctrl_sc7280_lpass_lpi snd_soc_sm8250; do
+        /sbin/modprobe \$m
+    done
+    for i in \$(seq 1 20); do grep -q sm8350 /proc/asound/cards && break; sleep 0.5; done
+fi
+N=\$(awk '/sm8350 - Microsoft-SurfaceDuo2/ { print \$1; exit }' /proc/asound/cards)
+[ -n "\$N" ] || { echo "no sm8350 card" >&2; exit 1; }
+c() { amixer -c\$N -q cset "name=\$1" "\$2"; }
+g() { amixer -c\$N cget "name=\$1" | sed -n 's/.*: values=//p'; }
+votes() {
+    for k in LPASS_HW_MACRO LPASS_HW_DCODEC; do
+        printf '%s=%s ' \$k "\$(cat /sys/kernel/debug/clk/\$k/clk_prepare_count 2>/dev/null || echo -)"
+    done
+}
+amps() { ls -d /sys/bus/soundwire/devices/sdw:1:0:0217:0202:00:[12] 2>/dev/null; }
+name() { case \${1##*:} in 1) echo SpkrLeft ;; 2) echo SpkrRight ;; *) echo \$1 ;; esac; }
+reg() { # amp-device hexreg -> value (one regmap debugfs line: reg * 9 bytes)
+    dd if=/sys/kernel/debug/regmap/\$(basename \$1)/registers bs=9 skip=\$((0x\$2)) count=1 2>/dev/null |
+        awk -v r=\$2 'tolower(\$1) == tolower(r) ":" { print \$2; exit } END { }'
+}
+regs() {
+    for a in \$(amps); do
+        printf '   %-9s' \$(name \$a)
+        for r in 3410 3413 3414 3483 3484 344b; do printf ' %s=%s' \$r "\$(reg \$a \$r)"; done
+        echo
+    done
+}
+spkr() {
+    for s in SpkrLeft SpkrRight; do
+        f=\$(ls \$C/sdw:*/dapm/"\$s SPKR" 2>/dev/null | head -1)
+        printf '   %s\n' "\$(head -1 "\$f")"
+    done
+}
+playback_on() {
+    grep -l ': On' \$C/3240000.codec/dapm/* \$C/sdw:*/dapm/* 2>/dev/null | grep -v bias_level |
+        xargs -r -n1 basename | tr '\n' ' '
+}
+temps() {
+    for h in /sys/class/hwmon/hwmon*; do
+        [ "\$(cat \$h/name 2>/dev/null)" = wsa883x ] || continue
+        u=\$(basename \$(readlink -f \$h/device))
+        t=\$(cat \$h/temp1_input 2>/dev/null) && t="\$((t / 1000)) C" || t="n/a"
+        printf '%s %s, ' "\$(name \$u)" "\$t"
+    done
+}
+ports() { # NOT read any more: the SoundWire core's per-slave debugfs dump
+    # (soundwire/master-1-0/sdw:*/registers) resumes the slave and reads ~460
+    # registers, the unimplemented ports too; on 2026-11-08 one such dump at
+    # an idle bus left SpkrLeft in an endless alert storm (every command
+    # "read underflow") and SpkrRight UNATTACHED until a reboot
+    # (docs/hardware/audio.md). No debugfs dump of the master or the
+    # slaves; the amplifiers' own registers go through regmap, one line each.
+    echo "   (not read: no SoundWire debugfs dumps, docs/hardware/audio.md)"
+}
+off() {
+    for s in SpkrLeft SpkrRight; do
+        c "\$s DAC Switch" 0; c "\$s BOOST Switch" 0; c "\$s COMP Switch" 0; c "\$s PA Volume" 0
+    done
+    c 'WSA_COMP1 Switch' 0; c 'WSA_COMP2 Switch' 0
+    c 'WSA_RX0 INP0' ZERO; c 'WSA_RX1 INP0' ZERO
+    c 'WSA RX0 MUX' ZERO; c 'WSA RX1 MUX' ZERO
+    c 'WSA_RX0 Digital Volume' 0; c 'WSA_RX1 Digital Volume' 0
+    c 'WSA_CODEC_DMA_RX_0 Audio Mixer MultiMedia1' 0
+}
+ap=
+abort() { # stop the stream, take the path down, report
+    [ -n "\$ap" ] && kill \$ap 2>/dev/null; wait 2>/dev/null
+    off
+    echo "ABORT: \$1" >&2
+    echo "   path down; DAPM On: \$(playback_on)" >&2; exit 3
+}
+trap '' PIPE   # a lost ssh must not kill the shell before the path is down
+trap 'abort "interrupted"' INT TERM HUP
+con() { c "\$1" "\$2" || abort "cset \$1 = \$2 failed"; }
+
+echo "kernel \$(uname -r), card \$N, usb online \$(cat /sys/class/power_supply/qcom-battmgr-usb/online)"
+for k in 'WSA_RX0 Digital Volume:81' 'WSA_RX1 Digital Volume:81' 'SpkrLeft PA Volume:17' 'SpkrRight PA Volume:17'; do
+    amixer -c\$N cget "name=\${k%:*}" | grep -q ",max=\${k##*:}," || { echo "\${k%:*} not capped at \${k##*:}" >&2; exit 1; }
+done
+[ "\$(head -1 /proc/asound/card\$N/pcm0p/sub0/status)" = closed ] || { echo "playback PCM in use" >&2; exit 1; }
+echo "temperatures before: \$(temps)"
+echo "== before: DAPM"; spkr
+echo "   SoundWire slave ports (!= 0 only):"; ports
+# kernel messages from the journal, not dmesg: the touch driver's spi_hid
+# debug chatter (~70 lines/s on 2026-11-07) turns the kernel ring over in
+# seconds; its lines are left out
+T0=\$((\$(date +%s) - 1))
+kmsg() { # (+ journald's own "Missed N kernel messages", if the ring overran it)
+    { journalctl -k -q --no-pager -o short-monotonic --since "@\$T0"
+      journalctl -q --no-pager --since "@\$T0" _TRANSPORT=driver | grep -i missed; } 2>/dev/null | grep -v spi_hid
+}
+
+# the UCM draft's verb + Speaker device, volumes at the bottom (set first)
+con 'WSA_RX0 Digital Volume' 0; con 'WSA_RX1 Digital Volume' 0
+con 'WSA_CODEC_DMA_RX_0 Audio Mixer MultiMedia1' 1
+con 'WSA RX0 MUX' AIF1_PB; con 'WSA RX1 MUX' AIF1_PB
+con 'WSA_RX0 INP0' RX0; con 'WSA_RX1 INP0' RX1
+con 'WSA_COMP1 Switch' 1; con 'WSA_COMP2 Switch' 1
+for s in SpkrLeft SpkrRight; do
+    con "\$s PA Volume" 0; con "\$s WSA MODE" Speaker; con "\$s COMP Switch" 1
+    con "\$s BOOST Switch" 1; con "\$s VISENSE Switch" 0; con "\$s DAC Switch" 1
+done
+echo "controls: RX0 vol \$(g 'WSA_RX0 Digital Volume') RX1 vol \$(g 'WSA_RX1 Digital Volume'), PA \$(g 'SpkrLeft PA Volume')/\$(g 'SpkrRight PA Volume'), DAC \$(g 'SpkrLeft DAC Switch')/\$(g 'SpkrRight DAC Switch'), INP0 \$(g 'WSA_RX0 INP0')/\$(g 'WSA_RX1 INP0')"
+[ -z "\$(playback_on)" ] || abort "widgets On before the stream: \$(playback_on)"
+
+aplay -q -D hw:\$N,0 -t raw -f S16_LE -r 48000 -c 2 -d $SECS /dev/zero 2>/dev/shm/duo2-aplay.err & ap=\$!
+sleep 2
+echo "== during the stream (t = 2 s)"
+echo "   PCM: \$(grep -E '^(state|hw_ptr)' /proc/asound/card\$N/pcm0p/sub0/status | tr -s ' \n' ' ')"
+spkr
+echo "   On: \$(playback_on)"
+echo "   amplifier registers (3410 PA_FSM_CTL, 3413 PA_FSM_STA, 3414 PA_FSM_ERR_COND, 3483/3484 INTR_STATUS0/1, 344b PDM_WD_CTL):"
+regs
+echo "   SoundWire slave ports (DPn ChannelEn per bank, != 0 only):"
+ports
+echo "   PCM: \$(grep -E '^hw_ptr' /proc/asound/card\$N/pcm0p/sub0/status | tr -s ' \n' ' ')"
+echo "   votes: \$(votes)"
+e=\$(kmsg | grep -iE 'q6|apr|soundwire|swr|sdw|wsa|lpass|clash|error|fail|missed' || true)
+[ -z "\$e" ] || abort "kernel errors during the stream: \$e"
+wait \$ap; rc=\$?; ap=
+[ \$rc = 0 ] || abort "aplay failed (\$rc): \$(cat /dev/shm/duo2-aplay.err)"
+rm -f /dev/shm/duo2-aplay.err
+echo "== after the stream"
+for i in \$(seq 1 16); do [ -z "\$(playback_on)" ] && break; sleep 0.5; done
+spkr
+echo "   On: \$(playback_on)"
+for a in \$(amps); do echo on > \$a/power/control; done
+regs
+ports
+for a in \$(amps); do echo auto > \$a/power/control; done
+off
+echo "   path down: RX0 vol \$(g 'WSA_RX0 Digital Volume'), DAC \$(g 'SpkrLeft DAC Switch')/\$(g 'SpkrRight DAC Switch'), INP0 \$(g 'WSA_RX0 INP0')/\$(g 'WSA_RX1 INP0'), MM1 \$(g 'WSA_CODEC_DMA_RX_0 Audio Mixer MultiMedia1')"
+echo "temperatures after: \$(temps)"
+sleep 1; new=\$(kmsg)
+if [ -n "\$new" ]; then echo "kernel messages meanwhile:"; echo "\$new" | sed 's/^/   /'; else echo "kernel messages meanwhile: none"; fi
+sleep 10
+a=\$(awk '/Accumulated/{print \$3}' \$S); cc=\$(awk '/Count/{print \$2}' \$S)
+sleep $WINDOW
+b=\$(awk '/Accumulated/{print \$3}' \$S); d=\$(awk '/Count/{print \$2}' \$S)
+echo "ADSP from 10 s after the stream: sleep \$(( (b - a) / 19200000 )) s / $WINDOW s, +\$((d - cc)) entries; votes: \$(votes)"
+echo "runtime PM: \$(for d in 3240000.codec 3250000.soundwire; do printf '%s=%s ' \$d \$(cat /sys/bus/platform/devices/\$d/power/runtime_status); done; for a in \$(amps) /sys/bus/soundwire/devices/sdw:1:0:0217:0202:00:3; do printf '%s=%s ' \$(basename \$a) \$(cat \$a/power/runtime_status); done)"
+EOF

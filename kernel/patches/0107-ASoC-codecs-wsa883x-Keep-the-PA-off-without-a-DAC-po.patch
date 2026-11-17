@@ -1,0 +1,70 @@
+From 817738e037078ff89ea77a9010f6a20ded923a86 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 19:31:56 +0100
+Subject: [PATCH 107/137] ASoC: codecs: wsa883x: Keep the PA off without a DAC
+ port
+
+An earpiece amplifier can share the master ports of a speaker amplifier
+(Surface Duo 2: the "Receiver" WSA8830 and SpkrLeft are both fed from
+WSA_SPK1 on ports 1-3). Both then sit on the same DAI link and only one
+of them may have its ports switched on, but both amplifiers' SPKR
+widgets power up with WSA_SPK1 OUT, and the unmute at trigger time sets
+GLOBAL_PA_EN on every codec DAI of the link: the amplifier that gets no
+data on the bus had its PDM input and PA enabled as well.
+
+Only power up the PDM path and the PA of an amplifier whose DAC port is
+enabled, and only undo it for one that was powered up.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ sound/soc/codecs/wsa883x.c | 19 ++++++++++++++++++-
+ 1 file changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/sound/soc/codecs/wsa883x.c b/sound/soc/codecs/wsa883x.c
+index b52f315db83e..41707c7e447e 100644
+--- a/sound/soc/codecs/wsa883x.c
++++ b/sound/soc/codecs/wsa883x.c
+@@ -1258,9 +1258,19 @@ static int wsa883x_spkr_event(struct snd_soc_dapm_widget *w,
+ {
+ 	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
+ 	struct wsa883x_priv *wsa883x = snd_soc_component_get_drvdata(component);
++	bool pa_on;
+ 
+ 	switch (event) {
+ 	case SND_SOC_DAPM_POST_PMU:
++		/*
++		 * An amplifier whose DAC port is off gets no data on the bus:
++		 * it shares the link with one that does (an earpiece and a
++		 * speaker on the same master ports, only one of them
++		 * streaming). Leave it off.
++		 */
++		if (!wsa883x->port_enable[WSA883X_PORT_DAC])
++			break;
++
+ 		scoped_guard(mutex, &wsa883x->sp_lock)
+ 			wsa883x->pa_on = true;
+ 
+@@ -1304,6 +1314,11 @@ static int wsa883x_spkr_event(struct snd_soc_dapm_widget *w,
+ 
+ 		break;
+ 	case SND_SOC_DAPM_PRE_PMD:
++		scoped_guard(mutex, &wsa883x->sp_lock)
++			pa_on = wsa883x->pa_on;
++		if (!pa_on)
++			break;
++
+ 		snd_soc_component_write_field(component, WSA883X_VBAT_ADC_FLT_CTL,
+ 					      WSA883X_VBAT_ADC_FLT_EN_MASK, 0x0);
+ 		snd_soc_component_write_field(component, WSA883X_VBAT_ADC_FLT_CTL,
+@@ -1403,8 +1418,10 @@ static int wsa883x_set_sdw_stream(struct snd_soc_dai *dai,
+ static int wsa883x_digital_mute(struct snd_soc_dai *dai, int mute, int stream)
+ {
+ 	struct snd_soc_component *component = dai->component;
++	struct wsa883x_priv *wsa883x = snd_soc_component_get_drvdata(component);
+ 
+-	if (mute) {
++	/* no DAC port, no data: keep the PA off (see wsa883x_spkr_event()) */
++	if (mute || !wsa883x->port_enable[WSA883X_PORT_DAC]) {
+ 		snd_soc_component_write_field(component, WSA883X_DRE_CTL_1,
+ 					      WSA883X_DRE_GAIN_EN_MASK, 0);
+ 		snd_soc_component_write_field(component, WSA883X_PA_FSM_CTL,

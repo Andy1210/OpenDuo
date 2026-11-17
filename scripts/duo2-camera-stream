@@ -1,0 +1,174 @@
+#!/bin/bash
+# Frames through CAMSS (docs/hardware/camera.md), run ON THE PHONE
+# as root on a try kernel with the camera modules loaded (duo2-camera-probe):
+#
+#   sudo duo2-camera-stream tpg [TPG [PATTERN]]   TPG n -> csid0 -> vfe0_rdi0
+#                                                  PATTERN 1 default, 2 colour bars
+#   sudo [MODE=WxH] [FRAMES=n] duo2-camera-stream CAMERA [PATTERN]
+#                                                  CAMERA uw, front, tele or wide:
+#                                                  its sensor -> its CSIPHY -> csid0
+#                                                  -> vfe0_rdi0; PATTERN is the sensor's
+#                                                  test pattern menu index (2 = colour
+#                                                  bars, the default; 1 = solid colour,
+#                                                  the *_pixel_value controls; 0 = the
+#                                                  scene: only global numbers are printed;
+#                                                  EXPECT=red,blue: the means a SoftISP with
+#                                                  these AWB gains should give, RGGB modes)
+#
+# The frames stay in /dev/shm, are checked numerically (frame count, rate,
+# per-bar averages of the four Bayer sites for a test pattern; for the scene,
+# PATTERN 0, only per-site mean and spread) and deleted; nothing is shown or
+# copied anywhere. Never opens the iris codec's nodes (checked by name).
+set -u
+what=${1:-tpg}
+M=/dev/media0
+if ! command -v media-ctl >/dev/null || ! command -v v4l2-ctl >/dev/null; then
+    echo "needs v4l-utils" >&2; exit 1
+fi
+node() { media-ctl -d $M -e "$1"; }
+CSID=0 VFE=0
+video=$(node "msm_vfe${VFE}_video0")
+# the node numbers depend on the probe order (since the camera modules load
+# at boot, the iris codec comes last): check the node's name, never open the
+# codec's
+[ -n "$video" ] && [ "$(cat /sys/class/video4linux/"${video#/dev/}"/name 2>/dev/null)" = "msm_vfe${VFE}_video0" ] ||
+    { echo "unexpected video node '$video'" >&2; exit 1; }
+
+case $what in
+tpg)
+    tpg=${2:-0}; pattern=${3:-1}
+    W=1920 H=1080
+    src="msm_tpg$tpg"
+    ;;
+uw|front|tele|wide)
+    pattern=${2:-2}
+    # the I2C bus numbers follow the CCIs' probe order, which changes from boot
+    # to boot: find the sensor by its DT node
+    case $what in
+        uw) dtn=cci@ac50000/i2c-bus@0/camera@10 phy=4 ;;
+        front) dtn=cci@ac50000/i2c-bus@1/camera@1a phy=5 ;;
+        tele) dtn=cci@ac4f000/i2c-bus@0/camera@1a phy=0 ;;
+        wide) dtn=cci@ac4f000/i2c-bus@1/camera@1a phy=2 ;;
+    esac
+    bus=
+    for d in /sys/bus/i2c/devices/*-*; do
+        case $(readlink -f "$d/of_node" 2>/dev/null) in */$dtn) bus=${d##*/} ;; esac
+    done
+    [ -n "$bus" ] || { echo "no I2C device for $dtn" >&2; exit 1; }
+    src=$(media-ctl -d $M -p | sed -n "s/^- entity [0-9]*: \(imx4[0-9x]* $bus\|imx5[0-9]* $bus\).*/\1/p")
+    [ -n "$src" ] || { echo "no $what sensor entity (*$bus)" >&2; exit 1; }
+    sensordev=$(node "$src")
+    MODE=${MODE:-1536x864}
+    W=${MODE%x*} H=${MODE#*x}
+    ;;
+*) echo "usage: $0 tpg [TPG [PATTERN]] | uw|front|tele|wide [PATTERN]" >&2; exit 2 ;;
+esac
+frames=${FRAMES:-16}
+
+echo "== $src -> msm_csid$CSID -> msm_vfe${VFE}_rdi0 -> $video, ${W}x${H}, pattern $pattern"
+mark=$(dmesg | wc -l)
+media-ctl -d $M -r
+F="SRGGB10_1X10/${W}x${H} field:none"
+if [ "$what" = tpg ]; then
+    media-ctl -d $M -l "\"$src\":0->\"msm_csid$CSID\":0[1]" || exit 1
+    media-ctl -d $M -V "\"$src\":0[fmt:$F]"
+    srcdev=$(node "$src")
+    v4l2-ctl -d "$srcdev" -c test_pattern="$pattern" || exit 1
+else
+    media-ctl -d $M -l "\"msm_csiphy$phy\":1->\"msm_csid$CSID\":0[1]" || exit 1
+    media-ctl -d $M -V "\"$src\":0[fmt:$F]"
+    # the mode's own colour filter order (and the size the sensor chose)
+    F=$(media-ctl -d $M --get-v4l2 "\"$src\":0" | sed -n 's/.*fmt:\([A-Z0-9_]*\/[0-9]*x[0-9]*\).*/\1/p')
+    W=${F#*/}; W=${W%x*}; H=${F#*x}
+    F="$F field:none"
+    echo "== sensor format $F"
+    media-ctl -d $M -V "\"msm_csiphy$phy\":0[fmt:$F]"
+    v4l2-ctl -d "$sensordev" -c test_pattern="$pattern" || exit 1
+    v4l2-ctl -d "$sensordev" -l 2>/dev/null | grep -E "test_pattern|exposure|vertical_blanking|pixel_rate|link_frequency" | sed 's/^/   /'
+fi
+media-ctl -d $M -l "\"msm_csid$CSID\":1->\"msm_vfe${VFE}_rdi0\":0[1]" || exit 1
+media-ctl -d $M -V "\"msm_csid$CSID\":0[fmt:$F]"
+media-ctl -d $M -V "\"msm_csid$CSID\":1[fmt:$F]"
+media-ctl -d $M -V "\"msm_vfe${VFE}_rdi0\":0[fmt:$F]"
+
+out=$(mktemp /dev/shm/duo2-cam.XXXXXX)
+trap 'rm -f "$out"' EXIT
+case $F in SBGGR10*) fcc=pBAA ;; SGBRG10*) fcc=pGAA ;; SGRBG10*) fcc=pgAA ;; *) fcc=pRAA ;; esac
+v4l2-ctl -d "$video" "--set-fmt-video=width=$W,height=$H,pixelformat=$fcc" >/dev/null
+bpl=$(v4l2-ctl -d "$video" --get-fmt-video | sed -n 's/.*Bytes per Line *: *\([0-9]*\).*/\1/p')
+echo "== streaming $frames frames (bytes per line $bpl)"
+start=$(date +%s.%N)
+timeout 30 v4l2-ctl -d "$video" --stream-mmap --stream-count="$frames" --stream-to="$out" 2>&1 |
+    tr '<' '\n' | grep -v '^$' | tail -2
+end=$(date +%s.%N)
+if [ "$what" = tpg ]; then v4l2-ctl -d "$(node "$src")" -c test_pattern=0 2>/dev/null; fi
+[ "$what" != tpg ] && v4l2-ctl -d "$sensordev" -c test_pattern=0 2>/dev/null
+size=$(stat -c %s "$out")
+echo "== $size bytes in $(awk "BEGIN{print $end - $start}") s ($((size / (bpl * H > 0 ? bpl * H : 1))) frames)"
+python3 -I - "$out" "$W" "$H" "$bpl" "$pattern" "${F%%/*}" "${EXPECT:-}" <<'EOF'
+import sys
+path, w, h, bpl = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
+real = sys.argv[5] == '0'      # no test pattern: the scene; global numbers only
+code, expect = sys.argv[6], sys.argv[7]
+data = open(path, 'rb').read()
+fsz = bpl * h
+n = len(data) // fsz if fsz else 0
+if not n:
+    sys.exit('no complete frame')
+f = data[(n - 1) * fsz:n * fsz]          # the last frame
+def px(row, x):                          # RAW10, MIPI packed: 4 pixels in 5 bytes
+    b = row[(x // 4) * 5:(x // 4) * 5 + 5]
+    return (b[x % 4] << 2) | ((b[4] >> (2 * (x % 4))) & 3)
+nz = sum(1 for c in f[::97] if c)
+print('last frame: %d of %d sampled bytes non-zero' % (nz, len(f[::97])))
+if real:
+    # the scene: per Bayer site mean, and the spread, over a sparse sample; nothing spatial
+    v = [[], [], [], []]
+    for y in range(0, h - 1, max(2, h // 128) & ~1):
+        for dy in (0, 1):
+            row = f[(y + dy) * bpl:(y + dy + 1) * bpl]
+            for x in range(0, w - 1, max(2, w // 128) & ~1):
+                for dx in (0, 1):
+                    v[dy * 2 + dx].append(px(row, x + dx))
+    if expect and code.startswith('SRGGB'):
+        # what a SoftISP should make of it: black level 64, the AWB gains given
+        # (EXPECT=red,blue), no colour matrix, gamma 2.2; per-channel means
+        gr, gb = (float(g) for g in expect.split(','))
+        def out(x, g):
+            return 255 * min(max((x - 64) * g / 959, 0), 1) ** (1 / 2.2)
+        e = [0.0, 0.0, 0.0]
+        for i in range(len(v[0])):
+            e[0] += out(v[0][i], gr)
+            e[1] += out((v[1][i] + v[2][i]) / 2, 1)
+            e[2] += out(v[3][i], gb)
+        print('expected output: mean R %.1f  G %.1f  B %.1f' % tuple(c / len(v[0]) for c in e))
+    for s, a in enumerate(v):
+        a.sort()
+        print('site %d%d: mean %6.1f  min %4d  p50 %4d  p99 %4d  max %4d' % (
+            s // 2, s % 2, sum(a) / len(a), a[0], a[len(a) // 2], a[len(a) * 99 // 100], a[-1]))
+    sys.exit(0)
+bars = 8
+sums = [[0, 0, 0, 0] for _ in range(bars)]
+cnt = [[0, 0, 0, 0] for _ in range(bars)]
+rows = range(h // 4, 3 * h // 4, max(2, (h // 2) // 64) & ~1)
+for y0 in rows:
+    for dy in (0, 1):
+        row = f[(y0 + dy) * bpl:(y0 + dy + 1) * bpl]
+        for bi in range(bars):
+            xs = bi * w // bars + w // (bars * 4)
+            for x in range(xs & ~1, xs + w // (bars * 2), 6):
+                for dx in (0, 1):
+                    s = dy * 2 + dx
+                    sums[bi][s] += px(row, x + dx)
+                    cnt[bi][s] += 1
+print('per bar mean of the 2x2 sites (00 01 10 11):')
+for bi in range(bars):
+    print('  bar %d: %s' % (bi, ' '.join('%4d' % (sums[bi][s] // max(1, cnt[bi][s])) for s in range(4))))
+# frame-to-frame: are the frames the same pattern?
+if n > 1:
+    a = data[0:fsz:4099]; b = f[::4099]
+    print('first vs last frame: %d of %d sampled bytes differ' % (sum(1 for i, j in zip(a, b) if i != j), len(a)))
+EOF
+echo "== kernel"
+dmesg | tail -n +$((mark + 1)) | grep -v -E "wlan0|ath11k|audit" | tail -20
+media-ctl -d $M -r

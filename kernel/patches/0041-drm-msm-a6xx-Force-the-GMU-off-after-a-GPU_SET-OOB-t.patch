@@ -1,0 +1,42 @@
+From 7f31786cc73fdc8a5c49eadf50776e4bf5fe35d6 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 08:45:49 +0100
+Subject: [PATCH 041/137] drm/msm/a6xx: Force the GMU off after a GPU_SET OOB
+ timeout
+
+When the GMU does not acknowledge the GPU_SET OOB in hw_init(), the
+next a6xx_gmu_stop() still takes the graceful path:
+a6xx_gmu_shutdown() first repeats the GPU_SET handshake (needs_hw_init
+is still set), times out again and only then falls back to
+a6xx_gmu_force_off(). Mark the GMU hung right away, as the GMU fault
+interrupts do, so that recovery halts the CM3, resets the GPU and
+stops the RSC without talking to a GMU that is not answering.
+gmu->hung is cleared again by a6xx_gmu_resume().
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/gpu/drm/msm/adreno/a6xx_gpu.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/msm/adreno/a6xx_gpu.c b/drivers/gpu/drm/msm/adreno/a6xx_gpu.c
+index 081e79ea4652..372542ba1a67 100644
+--- a/drivers/gpu/drm/msm/adreno/a6xx_gpu.c
++++ b/drivers/gpu/drm/msm/adreno/a6xx_gpu.c
+@@ -1188,8 +1188,16 @@ static int hw_init(struct msm_gpu *gpu)
+ 	if (!adreno_has_gmu_wrapper(adreno_gpu)) {
+ 		/* Make sure the GMU keeps the GPU on while we set it up */
+ 		ret = a6xx_gmu_set_oob(&a6xx_gpu->gmu, GMU_OOB_GPU_SET);
+-		if (ret)
++		if (ret) {
++			/*
++			 * The GMU did not bring GX up: treat it as hung, so
++			 * that the next stop (recovery) forces it off instead
++			 * of a graceful shutdown that starts with another
++			 * GPU_SET handshake.
++			 */
++			gmu->hung = true;
+ 			return ret;
++		}
+ 	}
+ 
+ 	/* Clear GBIF halt in case GX domain was not collapsed */

@@ -1,0 +1,42 @@
+From 2614558c600af3f8d85f44a0bff138832490c5a6 Mon Sep 17 00:00:00 2001
+From: duo2 <duo2@localhost>
+Date: Fri, 6 Nov 2026 22:43:00 +0100
+Subject: [PATCH 3/3] hexagonrpcd: apps_std: log a refused write once per file
+
+A sensors process that has to rebuild its registry (SSC registry version 2,
+from the json configuration) asks to write <registry>/../temp.json for every
+registry group: about 8000 refused opens, each logged, at every start of the
+DSP. Log the first refusal of a file and stay quiet about its repeats.
+---
+ hexagonrpcd/apps_std.c | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/hexagonrpcd/apps_std.c b/hexagonrpcd/apps_std.c
+index 6728f1e..e5b66aa 100644
+--- a/hexagonrpcd/apps_std.c
++++ b/hexagonrpcd/apps_std.c
+@@ -167,8 +167,19 @@ static uint32_t apps_std_fopen_with_env(void *data,
+ 
+ 	rw_mode = ((const char *) inbufs[4].p)[0];
+ 	if (rw_mode == 'w' || rw_mode == 'a') {
+-		fprintf(stderr, "Tried to open %s for writing\n",
+-				(const char *) inbufs[3].p);
++		/*
++		 * Files are served read-only. A sensors process that rebuilds its
++		 * registry tries the same file for every registry group, thousands
++		 * of times per start: say it once per file.
++		 */
++		static char last_refused[256];
++
++		if (strncmp(last_refused, inbufs[3].p, sizeof(last_refused) - 1)) {
++			fprintf(stderr, "Tried to open %s for writing (refused, read-only; "
++					"repeats not logged)\n",
++					(const char *) inbufs[3].p);
++			strncpy(last_refused, inbufs[3].p, sizeof(last_refused) - 1);
++		}
+ 		return AEE_EUNSUPPORTED;
+ 	}
+ 
+-- 
+2.43.0
+

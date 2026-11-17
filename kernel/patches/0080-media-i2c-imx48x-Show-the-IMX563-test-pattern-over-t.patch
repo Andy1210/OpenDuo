@@ -1,0 +1,59 @@
+From 33734cb9bb53eddca5d90bfc13a2a06595eab37b Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 01:46:17 +0100
+Subject: [PATCH 080/137] media: i2c: imx48x: Show the IMX563 test pattern over
+ the whole frame
+
+The IMX563's full-resolution modes send four lines of a test pattern a
+frame unless 0xb000 is cleared, as the module's own test pattern
+settings do (the binned modes and the scene are not affected): clear it
+when a test pattern is selected.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/media/i2c/imx48x.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/drivers/media/i2c/imx48x.c b/drivers/media/i2c/imx48x.c
+index d19b144501fd..5f02b4379e53 100644
+--- a/drivers/media/i2c/imx48x.c
++++ b/drivers/media/i2c/imx48x.c
+@@ -59,6 +59,8 @@
+ #define IMX48X_REG_TEST_DATA_BLUE	CCI_REG16(0x0606)
+ #define IMX48X_REG_TEST_DATA_GREENB	CCI_REG16(0x0608)
+ #define IMX48X_TEST_DATA_MAX		0x3ff
++/* IMX563: the test pattern covers the whole frame only with this cleared */
++#define IMX563_REG_TEST_PATTERN_AREA	CCI_REG8(0xb000)
+ 
+ /* the standard registers a mode table is read for (8-bit halves) */
+ #define IMX48X_CSI_DATA_FORMAT		0x0112
+@@ -131,6 +133,7 @@ struct imx48x_variant {
+ 	 */
+ 	unsigned int vt_pixels;
+ 	unsigned int llp_div;
++	bool tp_area;			/* IMX563_REG_TEST_PATTERN_AREA */
+ };
+ 
+ static const struct imx48x_variant imx481_variant = {
+@@ -159,6 +162,12 @@ static const struct imx48x_variant imx563_variant = {
+ 	/* its line length counts in quarters of a video timing clock */
+ 	.vt_pixels = 1,
+ 	.llp_div = 4,
++	/*
++	 * Its full-resolution modes send four lines of a test pattern
++	 * unless 0xb000 is cleared (the module's own test pattern settings
++	 * clear it; the binned modes do not need it).
++	 */
++	.tp_area = true,
+ };
+ 
+ struct imx48x_mode {
+@@ -536,6 +545,8 @@ static int imx48x_set_ctrl(struct v4l2_ctrl *ctrl)
+ 			  format->height + ctrl->val, &ret);
+ 		break;
+ 	case V4L2_CID_TEST_PATTERN:
++		if (sensor->variant->tp_area && ctrl->val)
++			cci_write(sensor->regmap, IMX563_REG_TEST_PATTERN_AREA, 0, &ret);
+ 		cci_write(sensor->regmap, IMX48X_REG_TEST_PATTERN,
+ 			  imx48x_test_pattern_val[ctrl->val], &ret);
+ 		break;

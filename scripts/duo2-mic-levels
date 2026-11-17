@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Step 4 of docs/hardware/audio.md: does each digital microphone deliver a signal?
+# Records SECS seconds (default 3, at most 5) from each DMIC pair through the
+# VA macro (DMIC0+1, DMIC2+3, DMIC4+5: the back end is two channels) and
+# prints only NUMBERS per channel: DC offset, AC RMS and peak in dBFS, the
+# number of distinct sample values, min / max.
+#
+#   scripts/duo2-mic-levels [SECS] [GAIN_DB]
+#
+# GAIN_DB (0..40, default 0) is the decimators' digital gain: a quiet room
+# sits at the microphones' own noise floor, about -90 dBFS at 0 dB, one or
+# two LSBs of a 16-bit sample. The correlation of the two channels of a pair
+# tells two microphones (near 0) from one microphone whose idle edge only
+# echoes the data line's bus keeper (near 1, difference RMS far lower).
+#
+# Privacy: the audio never touches a file. arecord writes raw samples into a
+# pipe, python3 on the phone reduces them to the numbers above and drops
+# them; nothing is copied off the phone, nothing is kept. Nothing is played:
+# only the capture front end (MultiMedia2) is opened, and while it records
+# the DAPM state of the WSA macro and the amplifiers is checked (must be all
+# Off; otherwise the capture is stopped and the script fails). Afterwards the
+# capture route is switched off again.
+#
+# Needs the sound card loaded (modprobe snd_soc_sm8250, docs/hardware/audio.md).
+set -euo pipefail
+. "$(dirname "$0")/lib/remote.sh"
+SECS=${1:-3}
+GAIN=${2:-0}
+case $SECS in [1-5]) ;; *) echo "SECS must be 1..5" >&2; exit 2 ;; esac
+case $GAIN in [0-9]|[1-3][0-9]|40) ;; *) echo "GAIN_DB must be 0..40" >&2; exit 2 ;; esac
+VOL=$((84 + GAIN))
+
+duo2_ssh "sudo bash -s" <<EOF
+set -u
+C=/sys/kernel/debug/asoc/Microsoft-SurfaceDuo2
+F=/dev/shm/duo2-mic.fifo
+grep -q sm8350 /proc/asound/cards || { echo "no sm8350 card: load snd_soc_sm8250 first" >&2; exit 1; }
+c() { amixer -c0 -q cset "name=\$1" "\$2"; }
+playback_on() { # DAPM widgets of the playback side that are On
+    grep -l ': On' \$C/3240000.codec/dapm/* \$C/sdw:*/dapm/* 2>/dev/null | grep -v bias_level
+}
+levels() { # raw S16_LE stereo on stdin -> numbers only
+    python3 -I -c '
+import sys, array, math
+raw = sys.stdin.buffer.read()
+a = array.array("h"); a.frombytes(raw[:len(raw) // 4 * 4]); del raw
+skip = 24000                     # the first 0.5 s: decimator / HPF settling
+db = lambda v: 20 * math.log10(max(v, 1e-3) / 32768)
+ch = []
+for c, name in ((0, sys.argv[1]), (1, sys.argv[2])):
+    x = a[c::2][skip:]
+    if not x:
+        print("   %s: no samples" % name); continue
+    m = sum(x) / len(x)
+    r = math.sqrt(sum((v - m) ** 2 for v in x) / len(x))
+    p = max(abs(v - m) for v in x)
+    ch.append((x, m, r))
+    print("   %s: %d samples, DC %+.1f, AC RMS %.1f dBFS, peak %.1f dBFS, %d distinct values, min %d max %d"
+          % (name, len(x), m, db(r), db(p), len(set(x)), min(x), max(x)))
+if len(ch) == 2 and ch[0][2] > 0 and ch[1][2] > 0:
+    (x, mx, rx), (y, my, ry) = ch
+    n = min(len(x), len(y))
+    cov = sum((x[i] - mx) * (y[i] - my) for i in range(n)) / n
+    d = math.sqrt(sum((x[i] - y[i]) ** 2 for i in range(n)) / n)
+    print("   pair: correlation %.3f, difference RMS %.1f dBFS" % (cov / (rx * ry), db(d)))
+del a, ch' "\$1" "\$2"
+}
+c 'MultiMedia2 Mixer VA_CODEC_DMA_TX_0' 1
+for p in "0 1" "2 3" "4 5"; do
+    set -- \$p
+    c 'VA DEC0 MUX' VA_DMIC; c 'VA DMIC MUX0' DMIC\$1; c 'VA_AIF1_CAP Mixer DEC0' 1; c 'VA_DEC0 Volume' $VOL
+    c 'VA DEC1 MUX' VA_DMIC; c 'VA DMIC MUX1' DMIC\$2; c 'VA_AIF1_CAP Mixer DEC1' 1; c 'VA_DEC1 Volume' $VOL
+    echo "== DMIC\$1 + DMIC\$2, $SECS s, gain $GAIN dB"
+    # a FIFO: the samples pass through a kernel pipe buffer, never a file
+    rm -f \$F; mkfifo -m 600 \$F
+    levels DMIC\$1 DMIC\$2 < \$F & lv=\$!
+    arecord -q -D hw:0,1 -f S16_LE -r 48000 -c 2 -d $SECS -t raw \$F 2>/dev/shm/duo2-arecord.err & ar=\$!
+    sleep 1.5
+    on=\$(playback_on)
+    va=\$(grep -l ': On' \$C/3370000.codec/dapm/* 2>/dev/null | xargs -r -n1 basename | tr '\n' ' ')
+    if [ -n "\$on" ]; then
+        kill \$ar \$lv; rm -f \$F; echo "   UNSAFE: playback widgets On: \$on" >&2; exit 3
+    fi
+    echo "   during capture: playback side all Off; VA widgets On: \$va"
+    wait \$ar || echo "   arecord failed: \$(cat /dev/shm/duo2-arecord.err)"
+    wait \$lv
+    rm -f \$F
+done
+rm -f /dev/shm/duo2-arecord.err
+for d in 0 1; do c "VA_AIF1_CAP Mixer DEC\$d" 0; c "VA DMIC MUX\$d" ZERO; c "VA_DEC\$d Volume" 84; done
+c 'MultiMedia2 Mixer VA_CODEC_DMA_TX_0' 0
+echo "capture route off again; PCM: \$(cat /proc/asound/card0/pcm1c/sub0/status | head -1)"
+EOF

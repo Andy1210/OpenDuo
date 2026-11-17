@@ -1,0 +1,37 @@
+From 6e18c2fb411d645ffc0bb80300599be4af21a7bc Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Thu, 12 Nov 2026 16:27:17 +0100
+Subject: [PATCH 132/137] wifi: ath11k: Keep a user's country that 11d had
+ already set
+
+A user regulatory hint for the country the phy already has (typically
+one 11d found in the beacons a moment earlier) returned without doing
+anything: 11d stayed on and could later replace the user's choice, and
+ar->alpha2 kept 11d's code. Treat it like any other user setting: stop
+the 11d scan, mark the regdomain as set by the user and keep the code to
+send again after a firmware restart (resume). No WMI command is needed,
+the firmware already runs that country.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/net/wireless/ath/ath11k/reg.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/drivers/net/wireless/ath/ath11k/reg.c b/drivers/net/wireless/ath/ath11k/reg.c
+index 6bae8d1906c9..e4b12727806b 100644
+--- a/drivers/net/wireless/ath/ath11k/reg.c
++++ b/drivers/net/wireless/ath/ath11k/reg.c
+@@ -87,6 +87,13 @@ ath11k_reg_notifier(struct wiphy *wiphy, struct regulatory_request *request)
+ 
+ 	if (!ath11k_regdom_changes(ar, request->alpha2)) {
+ 		ath11k_dbg(ar->ab, ATH11K_DBG_REG, "Country is already set\n");
++		/* 11d may have set the same country: from now on it is the
++		 * user's, which 11d does not change and a firmware restart
++		 * gets again.
++		 */
++		memcpy(&ar->alpha2, request->alpha2, 2);
++		ath11k_mac_11d_scan_stop(ar);
++		ar->regdom_set_by_user = true;
+ 		return;
+ 	}
+ 

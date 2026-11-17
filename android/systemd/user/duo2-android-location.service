@@ -1,0 +1,11 @@
+[Unit]
+Description=The phone's position for Android apps (geoclue into Waydroid, only while an app asks)
+# Started with the Android session (its Wants=) and stopped with it.
+BindsTo=duo2-waydroid-session.service
+After=duo2-waydroid-session.service
+
+[Service]
+ExecStart=/usr/local/lib/duo2-waydroid/duo2-android-location
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=10

@@ -1,0 +1,233 @@
+From eda9b6de33d206069ad3716bd57ceda7e0eefc08 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 12:02:42 +0100
+Subject: [PATCH 043/137] BRING-UP: HID: spi-hid: Keep the digitizer off long
+ enough, quieten per-report logging
+
+Two fixes to Microsoft's spi-hid driver (added for bring-up earlier in
+this series) on the Surface Duo 2's G6 digitizer:
+
+- Powered on again ~160 ms after being powered off (a touch daemon that
+  restarts: its close powers the device down, the next open powers it
+  up), the digitizer comes up half reset. It answers the reset and the
+  descriptors, but stays in its single-point fallback (report 0x40) and
+  never streams heat frames again until a reboot; once the report
+  descriptor read back short, and the HID device was re-created under the
+  next hidraw number. After 375 ms off (boot) or a second or more it
+  comes up right. spi_hid_power_up() now waits until the device has been
+  off for at least 500 ms.
+
+- Every report and every heartbeat was logged at error level ("read
+  header", "Input Report Handler" and a heartbeat warning every two
+  seconds per panel): a few hundred lines a second in the journal while
+  touching, and on the console. Those are debug messages now, the power
+  transitions info.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/hid/spi-hid/spi-hid-core.c | 65 ++++++++++++++++++------------
+ drivers/hid/spi-hid/spi-hid-core.h |  3 ++
+ 2 files changed, 43 insertions(+), 25 deletions(-)
+
+diff --git a/drivers/hid/spi-hid/spi-hid-core.c b/drivers/hid/spi-hid/spi-hid-core.c
+index 0bebe1413320..4cadabb6a44f 100644
+--- a/drivers/hid/spi-hid/spi-hid-core.c
++++ b/drivers/hid/spi-hid/spi-hid-core.c
+@@ -252,6 +252,7 @@ static int spi_hid_power_down(struct spi_hid *shid)
+ 	}
+ 
+ 	shid->powered = false;
++	shid->power_off_time = ktime_get();
+ 
+ 	return 0;
+ }
+@@ -376,7 +377,7 @@ static void spi_hid_reset_work(struct work_struct *work)
+ 
+ 	trace_spi_hid_reset_work(shid);
+ 
+-	dev_err(dev, "Reset Handler\n");
++	dev_dbg(dev, "Reset Handler\n");
+ 	if (shid->ready) {
+ 		dev_err(dev, "Spontaneous FW reset!");
+ 		shid->ready = false;
+@@ -412,7 +413,7 @@ static int spi_hid_input_report_handler(struct spi_hid *shid,
+ 	struct spi_hid_input_report r;
+ 	int ret;
+ 
+-	dev_err(dev, "Input Report Handler\n");
++	dev_dbg(dev, "Input Report Handler\n");
+ 
+ 	trace_spi_hid_input_report_handler(shid);
+ 
+@@ -470,7 +471,7 @@ static int spi_hid_response_handler(struct spi_hid *shid,
+ 				    struct spi_hid_input_buf *buf)
+ {
+ 	trace_spi_hid_response_handler(shid);
+-	dev_err(&shid->spi->dev, "Response Handler\n");
++	dev_dbg(&shid->spi->dev, "Response Handler\n");
+ 
+ 	/* completion_done returns 0 if there are waiters, otherwise 1 */
+ 	if (completion_done(&shid->output_done))
+@@ -616,8 +617,8 @@ static int spi_hid_process_input_report(struct spi_hid *shid,
+ 	}
+ 
+ 	if (body.content_id == SPI_HID_HEARTBEAT_REPORT_ID) {
+-		dev_warn(dev, "Heartbeat ID 0x%x from device %u\n",
+-			 buf->content[1], buf->content[0]);
++		dev_dbg(dev, "Heartbeat ID 0x%x from device %u\n",
++			buf->content[1], buf->content[0]);
+ 	}
+ 
+ 	switch (header.report_type) {
+@@ -629,7 +630,7 @@ static int spi_hid_process_input_report(struct spi_hid *shid,
+ 		ret = 0;
+ 		break;
+ 	case SPI_HID_REPORT_TYPE_DEVICE_DESC:
+-		dev_err(dev, "Received device descriptor\n");
++		dev_dbg(dev, "Received device descriptor\n");
+ 		/* Reset attempts at every device descriptor fetch */
+ 		shid->attempts = 0;
+ 		raw = (struct spi_hid_device_desc_raw *)buf->content;
+@@ -745,7 +746,7 @@ static void spi_hid_create_device_work(struct work_struct *work)
+ 	int ret;
+ 
+ 	trace_spi_hid_create_device_work(shid);
+-	dev_err(dev, "Create device work\n");
++	dev_dbg(dev, "Create device work\n");
+ 
+ 	if (shid->desc.hid_version != SPI_HID_SUPPORTED_VERSION) {
+ 		dev_err(dev, "Unsupported device descriptor version %4x\n",
+@@ -777,9 +778,9 @@ static void spi_hid_create_device_work(struct work_struct *work)
+ 	}
+ 
+ 	shid->power_state = SPI_HID_POWER_MODE_OFF;
+-	dev_err(dev, "%s: %s -> %s\n", __func__,
+-		spi_hid_power_mode_string(prev_state),
+-		spi_hid_power_mode_string(shid->power_state));
++	dev_info(dev, "%s: %s -> %s\n", __func__,
++		 spi_hid_power_mode_string(prev_state),
++		 spi_hid_power_mode_string(shid->power_state));
+ }
+ 
+ static void spi_hid_refresh_device_work(struct work_struct *work)
+@@ -792,7 +793,7 @@ static void spi_hid_refresh_device_work(struct work_struct *work)
+ 	u32 new_crc32;
+ 
+ 	trace_spi_hid_refresh_device_work(shid);
+-	dev_err(dev, "Refresh device work\n");
++	dev_dbg(dev, "Refresh device work\n");
+ 
+ 	if (shid->desc.hid_version != SPI_HID_SUPPORTED_VERSION) {
+ 		dev_err(dev, "Unsupported device descriptor version %4x\n",
+@@ -819,7 +820,7 @@ static void spi_hid_refresh_device_work(struct work_struct *work)
+ 	new_crc32 = crc32_le(0, (unsigned char const *)shid->response.content,
+ 			     (size_t)ret);
+ 	if (new_crc32 == shid->report_descriptor_crc32) {
+-		dev_err(dev, "Refresh device work - returning\n");
++		dev_dbg(dev, "Refresh device work - returning\n");
+ 		shid->ready = true;
+ 		sysfs_notify(&dev->kobj, NULL, "ready");
+ 		goto out;
+@@ -954,7 +955,7 @@ static void spi_hid_input_header_complete(void *_shid)
+ 
+ 	spi_hid_populate_input_header(shid->input.header, &header);
+ 
+-	dev_err(dev,
++	dev_dbg(dev,
+ 		"read header: version=0x%02x, report_type=0x%02x, report_length=%u, fragment_id=0x%02x, sync_const=0x%02x\n",
+ 		header.version, header.report_type, header.report_length,
+ 		header.fragment_id, header.sync_const);
+@@ -962,10 +963,9 @@ static void spi_hid_input_header_complete(void *_shid)
+ 	ret = spi_hid_bus_validate_header(shid, &header);
+ 	if (ret) {
+ 		dev_err(dev, "failed to validate header: %d\n", ret);
+-		print_hex_dump(KERN_ERR,
+-			       "spi_hid: header buffer: ", DUMP_PREFIX_NONE, 16,
+-			       1, shid->input.header,
+-			       sizeof(shid->input.header), false);
++		print_hex_dump_debug("spi_hid: header buffer: ",
++				     DUMP_PREFIX_NONE, 16, 1, shid->input.header,
++				     sizeof(shid->input.header), false);
+ 		shid->bus_error_count++;
+ 		shid->bus_last_error = ret;
+ 		goto out;
+@@ -1055,6 +1055,21 @@ static int spi_hid_power_up(struct spi_hid *shid)
+ 	if (shid->powered)
+ 		return 0;
+ 
++	/*
++	 * Powered on again too soon after being powered off, the G6 digitizer
++	 * on the Surface Duo 2 comes up half reset: it answers the reset and
++	 * the descriptors, but stays in its single-point fallback and never
++	 * enters heat mode again (or a descriptor reads back short). Seen
++	 * when the touch daemon restarts: its close powers the device off and
++	 * the next open powers it on ~160 ms later. Keep it off long enough.
++	 */
++	if (shid->power_off_time) {
++		s64 off_ms = ktime_ms_delta(ktime_get(), shid->power_off_time);
++
++		if (off_ms < SPI_HID_MIN_POWER_OFF_MS)
++			msleep(SPI_HID_MIN_POWER_OFF_MS - off_ms);
++	}
++
+ 	shid->input_transfer_pending = 0;
+ 	shid->powered = true;
+ 
+@@ -1190,9 +1205,9 @@ static int spi_hid_ll_open(struct hid_device *hid)
+ 		goto err2;
+ 	}
+ 
+-	dev_err(dev, "%s: %s -> %s\n", __func__,
+-		spi_hid_power_mode_string(prev_state),
+-		spi_hid_power_mode_string(shid->power_state));
++	dev_info(dev, "%s: %s -> %s\n", __func__,
++		 spi_hid_power_mode_string(prev_state),
++		 spi_hid_power_mode_string(shid->power_state));
+ 
+ 	return 0;
+ 
+@@ -1241,9 +1256,9 @@ static void spi_hid_ll_close(struct hid_device *hid)
+ 	}
+ 
+ 	shid->power_state = SPI_HID_POWER_MODE_OFF;
+-	dev_err(dev, "%s: %s -> %s\n", __func__,
+-		spi_hid_power_mode_string(prev_state),
+-		spi_hid_power_mode_string(shid->power_state));
++	dev_info(dev, "%s: %s -> %s\n", __func__,
++		 spi_hid_power_mode_string(prev_state),
++		 spi_hid_power_mode_string(shid->power_state));
+ 
+ out:
+ 	mutex_unlock(&shid->power_lock);
+@@ -1728,8 +1743,8 @@ static int spi_hid_probe(struct spi_device *spi)
+ 		goto err1;
+ 	}
+ 
+-	dev_err(dev, "%s: d3 -> %s\n", __func__,
+-		spi_hid_power_mode_string(shid->power_state));
++	dev_info(dev, "%s: d3 -> %s\n", __func__,
++		 spi_hid_power_mode_string(shid->power_state));
+ 
+ 	return 0;
+ 
+diff --git a/drivers/hid/spi-hid/spi-hid-core.h b/drivers/hid/spi-hid/spi-hid-core.h
+index ecbf58b5b785..a6bf00a39c30 100644
+--- a/drivers/hid/spi-hid/spi-hid-core.h
++++ b/drivers/hid/spi-hid/spi-hid-core.h
+@@ -65,6 +65,8 @@
+ 
+ /* Protocol constants */
+ #define SPI_HID_READ_APPROVAL_CONSTANT 0xff
++/* how long the device stays unpowered at least before it is powered again */
++#define SPI_HID_MIN_POWER_OFF_MS 500
+ #define SPI_HID_INPUT_HEADER_SYNC_BYTE 0x5a
+ 
+ #define SPI_HID_INPUT_HEADER_VERSION 0x02
+@@ -220,6 +222,7 @@ struct spi_hid {
+ 	u16 hid_desc_addr;
+ 	u8 power_state;
+ 	u8 attempts;
++	ktime_t power_off_time; /* last power-down, 0 if never */
+ 
+ 	/*
+ 	 * ready flag indicates that the FW is ready to accept commands and requests.

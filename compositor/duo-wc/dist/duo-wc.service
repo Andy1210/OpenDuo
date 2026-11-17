@@ -1,0 +1,62 @@
+# duo-wc on the Surface Duo 2: both panels, one Wayland desktop.
+#
+# Seat: seatd (`seatd -g video`, Debian's seatd.service), not a logind
+# session. seatd opens the DRM device (and becomes DRM master) and the input
+# devices for us, and puts the active VT into graphics mode, so fbcon stops
+# drawing on the panels while duo-wc runs and comes back when it stops.
+#
+# Why not logind (PAMName=login + TTYPath=/dev/tty1, which also works): every
+# systemd TTY reset (starting/stopping a unit with a TTYPath, the getty@tty1
+# it conflicts with) takes a lock on /dev/console, and on this phone the
+# serial getty on the USB gadget (ttyGS0) holds that lock forever while no USB
+# host reads the port. Starting duo-wc that way froze systemd (PID 1) on
+# 2026-11-06. This unit has no TTY at all, so it never needs that lock.
+#
+# @USER@ is filled in by install.sh; the user must be in the video group
+# (seatd's), and gets /run/duo-wc as XDG_RUNTIME_DIR (Wayland socket
+# wayland-1, the user's control socket duo-wc.sock and the admin socket
+# admin.sock live there). The directory is 0711: others may reach a socket
+# by its name (the admin socket answers root, duo2admin and duo-posed by
+# their credentials), not list it; wayland-1 and duo-wc.sock stay the
+# user's (docs/hardware/security.md).
+[Unit]
+Description=duo-wc Wayland compositor (both panels)
+Requires=seatd.service
+After=seatd.service duo2-touchd.service systemd-user-sessions.service
+Wants=duo2-touchd.service
+
+[Service]
+# READY=1 once every lit panel shows duo-wc's first frame (at the latest
+# after 12 s): units ordered after this one (the boot splash leaving,
+# duo2-plymouth-quit.service) wait for the first picture.
+Type=notify
+User=@USER@
+RuntimeDirectory=duo-wc
+RuntimeDirectoryMode=0711
+Environment=XDG_RUNTIME_DIR=/run/duo-wc
+Environment=LIBSEAT_BACKEND=seatd
+Environment=XDG_SESSION_TYPE=wayland
+Environment=RUST_LOG=info,duo_wc=debug
+# Panics come with a backtrace (duo-wc logs one itself too; this is for the
+# session's Rust clients, squeekboard). Not for anyhow's error values:
+# RUST_LIB_BACKTRACE=0 keeps those from walking the stack each time.
+Environment=RUST_BACKTRACE=1
+Environment=RUST_LIB_BACKTRACE=0
+# Language and formats (Duo Settings > Language & region): read at every start.
+EnvironmentFile=-/etc/locale.conf
+ExecStart=/usr/local/bin/duo-wc -- /usr/local/lib/duo-wc/session
+# Always: the session normally never ends, but if it does (or duo-wc stops on
+# Ctrl+Alt+Backspace) the phone must not be left without a compositor.
+# `systemctl stop duo-wc` still stops it for good.
+Restart=always
+RestartSec=3
+# A lock outlives a restart of duo-wc in systemd's descriptor store, which
+# only duo-wc's main process may change (src/lock.rs: an app of the same user
+# could delete a flag file and restart duo-wc unlocked). Kept across stop and
+# start; a reboot (or `systemctl clean --what=fdstore duo-wc`) empties it.
+NotifyAccess=main
+FileDescriptorStoreMax=4
+FileDescriptorStorePreserve=yes
+
+[Install]
+WantedBy=graphical.target

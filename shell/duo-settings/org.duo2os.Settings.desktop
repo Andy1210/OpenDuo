@@ -1,0 +1,26 @@
+[Desktop Entry]
+Type=Application
+Name=Settings
+Name[hu]=Beállítások
+GenericName=Duo Settings
+Comment=Wi-Fi, Bluetooth, display, sound, lock and more
+Comment[hu]=Wi-Fi, Bluetooth, kijelző, hang, zár és a többi
+Keywords=wifi;wlan;network;bluetooth;display;brightness;sound;volume;lock;pin;time;timezone;touch;calibration;rotation;about;
+Exec=duo-settings
+Icon=org.duo2os.Settings
+Terminal=false
+Categories=GTK;Settings;System;
+StartupNotify=true
+DBusActivatable=false
+X-Purism-FormFactor=Workstation;Mobile;
+Actions=battery;wallpaper;
+
+[Desktop Action battery]
+Name=Battery
+Name[hu]=Akkumulátor
+Exec=duo-settings battery
+
+[Desktop Action wallpaper]
+Name=Wallpaper
+Name[hu]=Háttérkép
+Exec=duo-settings wallpaper

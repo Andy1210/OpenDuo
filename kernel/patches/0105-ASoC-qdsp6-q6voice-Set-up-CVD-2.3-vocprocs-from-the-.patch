@@ -1,0 +1,553 @@
+From 5e06a945f97893662a8a8bb3063f307cf70da7e6 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 19:31:42 +0100
+Subject: [PATCH 105/137] ASoC: qdsp6: q6voice: Set up CVD 2.3 vocprocs from
+ the back ends
+
+CVD 2.3 and later (CVP API version 2) want a vocproc to be created with
+CREATE_FULL_CONTROL_SESSION_V3 and then told the channels of each side
+and the media format of its AFE port before the topology is committed.
+The sequence added for SDM670 used a fixed format (48 kHz, 16 bit, one
+TX and two RX channels), was selected by a DT property only, ignored
+every error, and the endpoint media format packet put its channel map
+at the offset of the channel info structure, with the port id as the
+channel count.
+
+- q6cvp reads the CVP API version from q6core when it probes and logs
+  it. The V3 sequence stays the choice of the qcom,cvd-v2.3 property: on
+  SM8350 (CVD 2.3, CVP API version 2.0) V3 brings the downlink up but the
+  uplink stays silent, while V2, where the DSP takes the formats from the
+  AFE ports itself, carries a call both ways.
+- One SET_PARAM_V2 helper builds the in-band parameter packets; the
+  channel info and endpoint format take the channels, bits and rate.
+- The path starts at prepare instead of startup: by then the back ends
+  have their (fixed-up) hw_params and their AFE ports run. The DAI
+  passes the parameters of the back end whose port the path uses.
+- A path without a port selected passes VSS_IVOCPROC_PORT_ID_NONE, not
+  the port of DAI id 0, and unselecting a port no longer selects that
+  one either.
+- Every step is checked, and a vocproc that failed is released.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ sound/soc/qcom/qdsp6/q6cvp.c       | 153 +++++++++++++++++++----------
+ sound/soc/qcom/qdsp6/q6cvp.h       |   8 +-
+ sound/soc/qcom/qdsp6/q6voice-dai.c |  54 +++++++++-
+ sound/soc/qcom/qdsp6/q6voice.c     | 117 ++++++++++++++++------
+ sound/soc/qcom/qdsp6/q6voice.h     |   9 ++
+ 5 files changed, 252 insertions(+), 89 deletions(-)
+
+diff --git a/sound/soc/qcom/qdsp6/q6cvp.c b/sound/soc/qcom/qdsp6/q6cvp.c
+index d87849b6dc99..3a3a81ea7222 100644
+--- a/sound/soc/qcom/qdsp6/q6cvp.c
++++ b/sound/soc/qcom/qdsp6/q6cvp.c
+@@ -5,6 +5,7 @@
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/soc/qcom/apr.h>
++#include "q6core.h"
+ #include "q6cvp.h"
+ #include "q6dsp-common.h"
+ #include "q6voice-common.h"
+@@ -214,72 +215,92 @@ struct q6voice_session *q6cvp_session_create_v3(enum q6voice_path_type path,
+ }
+ EXPORT_SYMBOL_GPL(q6cvp_session_create_v3);
+ 
+-int q6cvp_send_channel_info(struct q6voice_session *cvp, bool is_tx)
++static int q6cvp_set_param(struct q6voice_session *cvp, u32 param_id,
++			   const void *data, u16 size)
+ {
+-	struct vss_icommon_cmd_set_param_v2_cmd cmd;
++	struct vss_icommon_cmd_set_param_v2_cmd cmd = {};
++	size_t len = offsetof(struct vss_icommon_param_data, media_format_info) + size;
+ 
+-	cmd.hdr.pkt_size = offsetof(struct vss_icommon_cmd_set_param_v2_cmd, param_data.channel_info)
+-			 + sizeof(struct vss_param_vocproc_dev_channel_info);
+-	cmd.hdr.opcode = VSS_ICOMMON_CMD_SET_PARAM_V2;
++	if (size > sizeof(cmd.param_data.media_format_info) &&
++	    size > sizeof(cmd.param_data.channel_info))
++		return -EINVAL;
+ 
+-	cmd.mem_handle = 0;
+-	cmd.mem_size = offsetof(struct vss_icommon_param_data, channel_info)
+-		     + sizeof(struct vss_param_vocproc_dev_channel_info);
++	cmd.hdr.pkt_size = offsetof(struct vss_icommon_cmd_set_param_v2_cmd,
++				    param_data) + len;
++	cmd.hdr.opcode = VSS_ICOMMON_CMD_SET_PARAM_V2;
+ 
++	/* in-band: no memory handle, the data follows */
++	cmd.mem_size = len;
+ 	cmd.param_data.module_id = VSS_MODULE_CVD_GENERIC;
+-	cmd.param_data.param_id = is_tx ? VSS_PARAM_VOCPROC_TX_CHANNEL_INFO
+-					: VSS_PARAM_VOCPROC_RX_CHANNEL_INFO;
+-	cmd.param_data.param_size = sizeof(struct vss_param_vocproc_dev_channel_info);
+-	cmd.param_data.reserved = 0;
+-
+-	if (is_tx)
+-		cmd.param_data.channel_info.num_channels = 1;
+-	else
+-		cmd.param_data.channel_info.num_channels = 2;
+-
+-	cmd.param_data.channel_info.bits_per_sample = 16;
+-
+-	q6dsp_map_channels(cmd.param_data.channel_info.channel_mapping,
+-			   cmd.param_data.channel_info.num_channels);
++	cmd.param_data.param_id = param_id;
++	cmd.param_data.param_size = size;
++	memcpy(&cmd.param_data.media_format_info, data, size);
+ 
+ 	return q6voice_common_send(cvp, &cmd.hdr);
+ }
+-EXPORT_SYMBOL_GPL(q6cvp_send_channel_info);
+ 
+-int q6cvp_send_media_format(struct q6voice_session *cvp, int port_id, bool is_tx)
++/**
++ * q6cvp_set_channel_info() - describe the channels a vocproc direction uses
++ * @cvp: CVP session
++ * @is_tx: the TX (microphone) side, else the RX side
++ * @channels: number of device channels (1..8)
++ * @bits: bits per sample (16 or 24)
++ *
++ * Needed by CVD 2.3 and later (CVP API version 2) before the topology is
++ * committed.
++ */
++int q6cvp_set_channel_info(struct q6voice_session *cvp, bool is_tx,
++			   unsigned int channels, unsigned int bits)
+ {
+-	struct vss_icommon_cmd_set_param_v2_cmd cmd;
+-
+-	cmd.hdr.pkt_size = offsetof(struct vss_icommon_cmd_set_param_v2_cmd, param_data.media_format_info)
+-			 + sizeof(struct vss_param_endpoint_media_format_info);
+-	cmd.hdr.opcode = VSS_ICOMMON_CMD_SET_PARAM_V2;
+-
+-	cmd.mem_handle = 0;
+-	cmd.mem_size = offsetof(struct vss_icommon_param_data, media_format_info)
+-		     + sizeof(struct vss_param_endpoint_media_format_info);
+-
+-	cmd.param_data.module_id = VSS_MODULE_CVD_GENERIC;
+-	cmd.param_data.param_id = is_tx ? VSS_PARAM_TX_PORT_ENDPOINT_MEDIA_INFO
+-					: VSS_PARAM_RX_PORT_ENDPOINT_MEDIA_INFO;
+-	cmd.param_data.param_size = sizeof(struct vss_param_endpoint_media_format_info);
+-	cmd.param_data.reserved = 0;
+-
+-	cmd.param_data.media_format_info.port_id = port_id;
++	struct vss_param_vocproc_dev_channel_info info = {
++		.num_channels = channels,
++		.bits_per_sample = bits,
++	};
++	int ret;
+ 
+-	if (is_tx)
+-		cmd.param_data.media_format_info.num_channels = 1;
+-	else
+-		cmd.param_data.media_format_info.num_channels = 2;
++	ret = q6dsp_map_channels(info.channel_mapping, channels);
++	if (ret)
++		return ret;
+ 
+-	cmd.param_data.media_format_info.bits_per_sample = 16;
+-	cmd.param_data.media_format_info.sample_rate = 48000;
++	return q6cvp_set_param(cvp, is_tx ? VSS_PARAM_VOCPROC_TX_CHANNEL_INFO :
++					    VSS_PARAM_VOCPROC_RX_CHANNEL_INFO,
++			       &info, sizeof(info));
++}
++EXPORT_SYMBOL_GPL(q6cvp_set_channel_info);
++
++/**
++ * q6cvp_set_endpoint_format() - describe the AFE port a vocproc side uses
++ * @cvp: CVP session
++ * @is_tx: the TX (microphone) side, else the RX side
++ * @port_id: AFE port id
++ * @rate: sample rate of the port in Hz
++ * @channels: channels of the port (1..8)
++ * @bits: bits per sample of the port (16 or 24)
++ *
++ * Needed by CVD 2.3 and later (CVP API version 2): without it the vocproc
++ * assumes a format that need not be the one the port runs at.
++ */
++int q6cvp_set_endpoint_format(struct q6voice_session *cvp, bool is_tx,
++			      u16 port_id, unsigned int rate,
++			      unsigned int channels, unsigned int bits)
++{
++	struct vss_param_endpoint_media_format_info info = {
++		.port_id = port_id,
++		.num_channels = channels,
++		.bits_per_sample = bits,
++		.sample_rate = rate,
++	};
++	int ret;
+ 
+-	q6dsp_map_channels(cmd.param_data.channel_info.channel_mapping,
+-			   cmd.param_data.channel_info.num_channels);
++	ret = q6dsp_map_channels(info.channel_mapping, channels);
++	if (ret)
++		return ret;
+ 
+-	return q6voice_common_send(cvp, &cmd.hdr);
++	return q6cvp_set_param(cvp, is_tx ? VSS_PARAM_TX_PORT_ENDPOINT_MEDIA_INFO :
++					    VSS_PARAM_RX_PORT_ENDPOINT_MEDIA_INFO,
++			       &info, sizeof(info));
+ }
+-EXPORT_SYMBOL_GPL(q6cvp_send_media_format);
++EXPORT_SYMBOL_GPL(q6cvp_set_endpoint_format);
+ 
+ int q6cvp_topology_commit(struct q6voice_session *cvp)
+ {
+@@ -303,9 +324,37 @@ int q6cvp_enable(struct q6voice_session *cvp, bool state)
+ }
+ EXPORT_SYMBOL_GPL(q6cvp_enable);
+ 
++static u32 q6cvp_api_version;
++
++/**
++ * q6cvp_get_api_version() - CVP service API version the ADSP reported
++ *
++ * 1 up to CVD 2.2; 2 from CVD 2.3 on, which wants the
++ * CREATE_FULL_CONTROL_SESSION_V3 sequence (channel info and endpoint media
++ * formats, then a topology commit). 0 if the ADSP did not say.
++ */
++u32 q6cvp_get_api_version(void)
++{
++	return q6cvp_api_version;
++}
++EXPORT_SYMBOL_GPL(q6cvp_get_api_version);
++
+ static int q6cvp_probe(struct apr_device *adev)
+ {
+-	return q6voice_common_probe(adev, Q6VOICE_SERVICE_CVP);
++	struct q6core_svc_api_info ainfo = {};
++	int ret;
++
++	ret = q6voice_common_probe(adev, Q6VOICE_SERVICE_CVP);
++	if (ret)
++		return ret;
++
++	if (!q6core_get_svc_api_info(adev->svc_id, &ainfo)) {
++		q6cvp_api_version = ainfo.api_version;
++		dev_info(&adev->dev, "CVP API version %u.%u\n",
++			 ainfo.api_version, ainfo.api_branch_version);
++	}
++
++	return 0;
+ }
+ 
+ static const struct of_device_id q6cvp_device_id[]  = {
+diff --git a/sound/soc/qcom/qdsp6/q6cvp.h b/sound/soc/qcom/qdsp6/q6cvp.h
+index aad99eb9e95d..4bba58c2964c 100644
+--- a/sound/soc/qcom/qdsp6/q6cvp.h
++++ b/sound/soc/qcom/qdsp6/q6cvp.h
+@@ -12,9 +12,13 @@ struct q6voice_session *q6cvp_session_create(enum q6voice_path_type path,
+ struct q6voice_session *q6cvp_session_create_v3(enum q6voice_path_type path,
+ 						u16 tx_port, u16 rx_port,
+ 						u32 tx_topo, u32 rx_topo);
+-int q6cvp_send_channel_info(struct q6voice_session *cvp, bool is_tx);
+-int q6cvp_send_media_format(struct q6voice_session *cvp, int port_id, bool is_tx);
++int q6cvp_set_channel_info(struct q6voice_session *cvp, bool is_tx,
++			   unsigned int channels, unsigned int bits);
++int q6cvp_set_endpoint_format(struct q6voice_session *cvp, bool is_tx,
++			      u16 port_id, unsigned int rate,
++			      unsigned int channels, unsigned int bits);
+ int q6cvp_topology_commit(struct q6voice_session *cvp);
+ int q6cvp_enable(struct q6voice_session *cvp, bool enable);
++u32 q6cvp_get_api_version(void);
+ 
+ #endif /*_Q6_CVP_H */
+diff --git a/sound/soc/qcom/qdsp6/q6voice-dai.c b/sound/soc/qcom/qdsp6/q6voice-dai.c
+index 14eed7e55589..740f7ff0cb2a 100644
+--- a/sound/soc/qcom/qdsp6/q6voice-dai.c
++++ b/sound/soc/qcom/qdsp6/q6voice-dai.c
+@@ -5,7 +5,9 @@
+ #include <linux/limits.h>
+ #include <linux/module.h>
+ #include <linux/platform_device.h>
++#include <sound/pcm_params.h>
+ #include <sound/soc.h>
++#include <sound/soc-dpcm.h>
+ #include <dt-bindings/sound/qcom,q6afe.h>
+ #include <dt-bindings/sound/qcom,q6voice.h>
+ #include "q6voice.h"
+@@ -26,18 +28,60 @@ static enum q6voice_path_type q6voice_get_path(unsigned int dai_id)
+ 	return Q6VOICE_PATH_COUNT;
+ }
+ 
+-static int q6voice_dai_startup(struct snd_pcm_substream *substream,
++/*
++ * The vocproc connects straight to the AFE ports of the back ends: tell it
++ * the format they run at (the back end's fixed-up hw_params), for the back
++ * end whose port is the one the path uses.
++ */
++static void q6voice_dai_set_be_format(struct q6voice *v,
++				      enum q6voice_path_type path,
++				      struct snd_pcm_substream *substream)
++{
++	struct snd_soc_pcm_runtime *fe = snd_soc_substream_to_rtd(substream);
++	int stream = substream->stream;
++	int port = q6voice_get_port(v, path, stream == SNDRV_PCM_STREAM_CAPTURE);
++	struct snd_soc_dpcm *dpcm;
++
++	for_each_dpcm_be(fe, stream, dpcm) {
++		struct snd_soc_pcm_runtime *be = dpcm->be;
++		struct snd_pcm_hw_params *params = &be->dpcm[stream].hw_params;
++		struct q6voice_port_format fmt;
++
++		if (snd_soc_rtd_to_cpu(be, 0)->id != port)
++			continue;
++
++		fmt.rate = params_rate(params);
++		fmt.channels = params_channels(params);
++		fmt.bits = params_width(params);
++		q6voice_set_format(v, path, stream == SNDRV_PCM_STREAM_CAPTURE,
++				   &fmt);
++		dev_dbg(fe->dev, "voice path %d %s: %s, %u Hz, %u ch, %u bit\n",
++			path, stream ? "tx" : "rx", be->dai_link->name,
++			fmt.rate, fmt.channels, fmt.bits);
++		return;
++	}
++}
++
++/*
++ * The path starts when both of its directions are prepared: by then the
++ * back ends have their parameters and their AFE ports run.
++ */
++static int q6voice_dai_prepare(struct snd_pcm_substream *substream,
+ 			       struct snd_soc_dai *dai)
+ {
+ 	struct q6voice *v = snd_soc_dai_get_drvdata(dai);
+ 	enum q6voice_path_type path = q6voice_get_path(dai->driver->id);
++	int ret;
+ 
+ 	if (path == Q6VOICE_PATH_COUNT) {
+ 		dev_err(dai->dev, "Invalid DAI ID %u\n", dai->driver->id);
+ 		return -EINVAL;
+ 	}
+ 
+-	return q6voice_start(v, path, substream->stream);
++	q6voice_dai_set_be_format(v, path, substream);
++
++	ret = q6voice_start(v, path, substream->stream);
++	return ret == -EALREADY ? 0 : ret;
+ }
+ 
+ static void q6voice_dai_shutdown(struct snd_pcm_substream *substream,
+@@ -54,8 +98,8 @@ static void q6voice_dai_shutdown(struct snd_pcm_substream *substream,
+ 	q6voice_stop(v, path, substream->stream);
+ }
+ 
+-static struct snd_soc_dai_ops q6voice_dai_ops = {
+-	.startup = q6voice_dai_startup,
++static const struct snd_soc_dai_ops q6voice_dai_ops = {
++	.prepare = q6voice_dai_prepare,
+ 	.shutdown = q6voice_dai_shutdown,
+ };
+ 
+@@ -187,7 +231,7 @@ static int q6voice_put_mixer(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_
+ 	if (val)
+ 		q6voice_set_port(v, path, capture, mc->reg);
+ 	else if (q6voice_get_port(v, path, capture) == mc->reg)
+-		q6voice_set_port(v, path, capture, 0);
++		q6voice_set_port(v, path, capture, -1);
+ 
+ 	snd_soc_dapm_mixer_update_power(dapm, kcontrol, val, NULL);
+ 	return 1;
+diff --git a/sound/soc/qcom/qdsp6/q6voice.c b/sound/soc/qcom/qdsp6/q6voice.c
+index bb27cb7c0d0b..2c1cfa106d41 100644
+--- a/sound/soc/qcom/qdsp6/q6voice.c
++++ b/sound/soc/qcom/qdsp6/q6voice.c
+@@ -28,6 +28,7 @@ struct q6voice_path {
+ 	enum q6voice_path_type type;
+ 	int tx_port, rx_port;
+ 	u32 tx_topo, rx_topo;
++	struct q6voice_port_format tx_fmt, rx_fmt;
+ 	/* Serialize access to voice path session */
+ 	struct mutex lock;
+ 	struct q6voice_path_runtime *runtime;
+@@ -39,34 +40,71 @@ struct q6voice {
+ 	struct q6voice_path paths[Q6VOICE_PATH_COUNT];
+ };
+ 
+-static inline struct q6voice_session *session_create(enum q6voice_path_type type,
+-						     int tx_port, int rx_port,
+-						     u32 tx_topo, u32 rx_topo)
++#define VSS_IVOCPROC_PORT_ID_NONE	0xFFFF
++
++static u16 q6voice_afe_port_id(int index)
+ {
+-	return q6cvp_session_create(type, tx_port, rx_port, tx_topo, rx_topo);
++	int id = q6afe_get_port_id(index);
++
++	return id < 0 ? VSS_IVOCPROC_PORT_ID_NONE : id;
+ }
+ 
+-static struct q6voice_session *session_create_v3(enum q6voice_path_type type,
+-						 int tx_port, int rx_port,
+-						 u32 tx_topo, u32 rx_topo)
++/*
++ * CVD 2.3 and later: the session is created with the V3 command, then each
++ * side is told its channels and the format of its AFE port, and the
++ * topology is committed before the vocproc is enabled.
++ */
++static struct q6voice_session *q6voice_cvp_create_v3(struct q6voice_path *p)
+ {
++	u16 tx_port = q6voice_afe_port_id(p->tx_port);
++	u16 rx_port = q6voice_afe_port_id(p->rx_port);
++	const struct q6voice_port_format *tx = &p->tx_fmt, *rx = &p->rx_fmt;
+ 	struct q6voice_session *cvp;
++	int ret;
+ 
+-	cvp = q6cvp_session_create_v3(type, tx_port, rx_port, tx_topo, rx_topo);
+-	if (cvp == NULL)
+-		return NULL;
+-
+-	q6cvp_send_channel_info(cvp, false);
+-	q6cvp_send_channel_info(cvp, true);
+-
+-	q6cvp_send_media_format(cvp, rx_port, false);
+-	q6cvp_send_media_format(cvp, tx_port, true);
+-
+-	q6cvp_topology_commit(cvp);
++	cvp = q6cvp_session_create_v3(p->type, tx_port, rx_port,
++				      p->tx_topo, p->rx_topo);
++	if (IS_ERR(cvp))
++		return cvp;
++
++	ret = q6cvp_set_channel_info(cvp, false, rx->channels, rx->bits);
++	if (!ret)
++		ret = q6cvp_set_channel_info(cvp, true, tx->channels, tx->bits);
++	if (!ret && rx_port != VSS_IVOCPROC_PORT_ID_NONE)
++		ret = q6cvp_set_endpoint_format(cvp, false, rx_port, rx->rate,
++						rx->channels, rx->bits);
++	if (!ret && tx_port != VSS_IVOCPROC_PORT_ID_NONE)
++		ret = q6cvp_set_endpoint_format(cvp, true, tx_port, tx->rate,
++						tx->channels, tx->bits);
++	if (!ret)
++		ret = q6cvp_topology_commit(cvp);
++	if (ret) {
++		dev_err(p->v->dev, "failed to set up the vocproc: %d\n", ret);
++		q6voice_session_release(cvp);
++		return ERR_PTR(ret);
++	}
+ 
+ 	return cvp;
+ }
+ 
++static struct q6voice_session *q6voice_cvp_create(struct q6voice_path *p)
++{
++	struct q6voice *v = p->v;
++
++	/*
++	 * The V3 sequence only where the DT asks for it: on SM8350 (CVD 2.3,
++	 * CVP API version 2.0) it brings the downlink up but leaves the uplink
++	 * silent, while the V2 sequence, where the DSP takes the formats from
++	 * the AFE ports itself, carries both directions.
++	 */
++	if (v->cvd_v2_3)
++		return q6voice_cvp_create_v3(p);
++
++	return q6cvp_session_create(p->type, q6voice_afe_port_id(p->tx_port),
++				    q6voice_afe_port_id(p->rx_port),
++				    p->tx_topo, p->rx_topo);
++}
++
+ static int q6voice_path_start(struct q6voice_path *p)
+ {
+ 	struct device *dev = p->v->dev;
+@@ -85,17 +123,7 @@ static int q6voice_path_start(struct q6voice_path *p)
+ 
+ 	cvp = p->runtime->sessions[Q6VOICE_SERVICE_CVP];
+ 	if (!cvp) {
+-		if (p->v->cvd_v2_3)
+-			cvp = session_create_v3(p->type,
+-						q6afe_get_port_id(p->tx_port),
+-						q6afe_get_port_id(p->rx_port),
+-						p->tx_topo, p->rx_topo);
+-		else
+-			cvp = session_create(p->type,
+-					     q6afe_get_port_id(p->tx_port),
+-					     q6afe_get_port_id(p->rx_port),
+-					     p->tx_topo, p->rx_topo);
+-
++		cvp = q6voice_cvp_create(p);
+ 		if (IS_ERR(cvp))
+ 			return PTR_ERR(cvp);
+ 		p->runtime->sessions[Q6VOICE_SERVICE_CVP] = cvp;
+@@ -137,7 +165,7 @@ int q6voice_start(struct q6voice *v, enum q6voice_path_type path, bool capture)
+ 
+ 	mutex_lock(&p->lock);
+ 	if (!p->runtime) {
+-		p->runtime = kzalloc(sizeof(*p), GFP_KERNEL);
++		p->runtime = kzalloc(sizeof(*p->runtime), GFP_KERNEL);
+ 		if (!p->runtime) {
+ 			ret = -ENOMEM;
+ 			goto out;
+@@ -268,8 +296,13 @@ struct q6voice *q6voice_create(struct device *dev, bool cvd_v2_3)
+ 
+ 		p->v = v;
+ 		p->type = path;
++		p->tx_port = -1;
++		p->rx_port = -1;
+ 		p->tx_topo = VSS_IVOCPROC_TOPOLOGY_ID_NONE;
+ 		p->rx_topo = VSS_IVOCPROC_TOPOLOGY_ID_RX_DEFAULT;
++		/* until the back ends say otherwise (CVD 2.3 and later) */
++		p->tx_fmt = (struct q6voice_port_format) { 48000, 1, 16 };
++		p->rx_fmt = (struct q6voice_port_format) { 48000, 2, 16 };
+ 		mutex_init(&p->lock);
+ 	}
+ 
+@@ -305,6 +338,30 @@ void q6voice_set_port(struct q6voice *v, enum q6voice_path_type path,
+ }
+ EXPORT_SYMBOL_GPL(q6voice_set_port);
+ 
++/**
++ * q6voice_set_format() - format of the AFE port a voice path side uses
++ * @v: q6voice instance
++ * @path: voice path
++ * @capture: the TX (uplink) side, else the RX side
++ * @fmt: rate, channels and bits per sample the port runs at
++ *
++ * Takes effect when the path starts next. CVD 2.3 and later need it to
++ * match the port.
++ */
++void q6voice_set_format(struct q6voice *v, enum q6voice_path_type path,
++			bool capture, const struct q6voice_port_format *fmt)
++{
++	struct q6voice_path *p = &v->paths[path];
++
++	mutex_lock(&p->lock);
++	if (capture)
++		p->tx_fmt = *fmt;
++	else
++		p->rx_fmt = *fmt;
++	mutex_unlock(&p->lock);
++}
++EXPORT_SYMBOL_GPL(q6voice_set_format);
++
+ u32 q6voice_get_topology(struct q6voice *v, enum q6voice_path_type path,
+ 			 bool capture)
+ {
+diff --git a/sound/soc/qcom/qdsp6/q6voice.h b/sound/soc/qcom/qdsp6/q6voice.h
+index 3d002a9a5a27..73562627ef2e 100644
+--- a/sound/soc/qcom/qdsp6/q6voice.h
++++ b/sound/soc/qcom/qdsp6/q6voice.h
+@@ -16,6 +16,12 @@ enum q6voice_path_type {
+ 
+ struct q6voice;
+ 
++struct q6voice_port_format {
++	unsigned int rate;
++	unsigned int channels;
++	unsigned int bits;
++};
++
+ struct q6voice *q6voice_create(struct device *dev, bool cvd_v2_3);
+ int q6voice_start(struct q6voice *v, enum q6voice_path_type path, bool capture);
+ int q6voice_stop(struct q6voice *v, enum q6voice_path_type path, bool capture);
+@@ -25,6 +31,9 @@ int q6voice_get_port(struct q6voice *v, enum q6voice_path_type path,
+ void q6voice_set_port(struct q6voice *v, enum q6voice_path_type path,
+ 		      bool capture, int index);
+ 
++void q6voice_set_format(struct q6voice *v, enum q6voice_path_type path,
++			bool capture, const struct q6voice_port_format *fmt);
++
+ u32 q6voice_get_topology(struct q6voice *v, enum q6voice_path_type path,
+ 			 bool capture);
+ void q6voice_set_topology(struct q6voice *v, enum q6voice_path_type path,

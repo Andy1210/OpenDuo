@@ -1,0 +1,49 @@
+# duo2-os: AppArmor profile of the Waydroid container (lxc.apparmor.profile
+# in /etc/duo2/waydroid/lxc.conf). docs/hardware/android.md.
+# The name starts with lxc-: /usr/bin/lxc-start may only change_profile to
+# lxc-* (Debian's usr.bin.lxc-start).
+#
+# The container is a privileged LXC container: its root is the host's root,
+# with Waydroid's capability list. Waydroid's own lxc-waydroid profile is in
+# complain mode and allows "mount" and "/sys** rw", so it confines nothing.
+# This one is LXC's container-base (what Debian / Ubuntu run privileged
+# system containers with: no read-write procfs / sysfs / debugfs /
+# securityfs, no /proc/sys writes outside the container's own namespaces,
+# no sysrq, no kcore, mounts only from a short list) plus what Android's
+# init needs.
+abi <abi/4.0>,
+#include <tunables/global>
+
+profile lxc-duo2-waydroid flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/lxc/container-base>
+
+  # Android's own mounts inside the container's mount namespace (Android 13,
+  # from a complain-mode boot): init's cgroups, the /storage and /mnt views of
+  # vold and zygote, the data_mirror of the app profiles, linkerconfig
+  mount fstype=cgroup options=(rw,nosuid,nodev,noexec) -> /dev/*/,
+  mount fstype=cgroup2 options=(rw,nosuid,nodev,noexec) -> /sys/fs/cgroup/,
+  mount options=(rw,rbind) /mnt/** -> /storage/,
+  mount options=(rw,rbind) /mnt/** -> /mnt/**,
+  mount options=(rw,rbind) /data/** -> /data_mirror/**,
+  mount options=(rw,rbind) /data_mirror/** -> /data/**,
+  mount options=(rw,rbind) /data/** -> /data/**,
+  mount options=(rw,rbind) /linkerconfig/** -> /linkerconfig/,
+
+  # Capabilities Waydroid keeps but the host does not want used (LXC must
+  # keep them in the bounding set, or Android's init stops logd): the host's
+  # audit stream (logd would take it over, AppArmor messages included), the
+  # host kernel log, the host clock. block_suspend stays usable: Android's
+  # input reader aborts system_server without it (EPOLLWAKEUP).
+  deny capability audit_control,
+  deny capability syslog,
+  deny capability sys_time,
+
+  # configfs is the host's (the USB gadget: the phone's USB network): Android's
+  # init may not mount it (not in the list above), nor write it if mounted
+  deny /config/** wklx,
+  # the host's tracing and BPF filesystems
+  deny mount fstype=tracefs,
+  deny mount fstype=bpf,
+  deny mount fstype=pstore,
+  deny mount fstype=efivarfs,
+}

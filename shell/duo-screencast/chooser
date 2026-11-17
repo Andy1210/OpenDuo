@@ -1,0 +1,131 @@
+#!/usr/bin/python3 -I
+"""The screen-cast portal's chooser: which panel an app may see.
+
+    chooser                 screen sharing (xdg-desktop-portal-wlr's
+                            chooser_cmd, chooser_type=simple)
+    chooser --screenshot    a screenshot (the grim gate); also offers both
+                            panels
+
+A page on the panel the phone was touched on last: one big button per panel
+and Cancel. It prints the chosen output's name (DSI-1, DSI-2; `all` for
+both panels in screenshot mode) on standard output and exits 0; Cancel,
+closing the window or 60 s without an answer print nothing (the portal
+reads that as "declined"). Never exits 127 (xdg-desktop-portal-wlr's "no
+such chooser").
+
+It runs as a child of the portal, which holds a capture-only trust factory
+(docs/SCREENCAST.md): the chooser drops it first, it needs no trust.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+TIMEOUT_S = 60
+
+
+def drop_trust():
+    fd = os.environ.pop("DUO_WC_TRUST_FD", "")
+    if fd.isdigit():
+        try:
+            os.close(int(fd))
+        except OSError:
+            pass
+
+
+def main(argv):
+    drop_trust()
+    screenshot = "--screenshot" in argv[1:]
+    from duoscreencast import panels
+
+    outputs = panels.query_outputs()
+    options = panels.choices(outputs, screenshot)
+    if not options:
+        print("chooser: duo-wc named no panel", file=sys.stderr)
+        return 0
+
+    import gi
+
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Adw", "1")
+    from gi.repository import Adw, Gio, GLib, Gtk
+
+    answer = {"value": None}
+
+    def run(app):
+        win = Adw.ApplicationWindow(application=app)
+        win.set_title("Share the screen" if not screenshot else "Screenshot")
+        win.set_default_size(538, 757)
+
+        page = Adw.StatusPage()
+        if screenshot:
+            page.set_icon_name("applets-screenshooter-symbolic")
+            page.set_title("Take a screenshot?")
+            page.set_description("An app asks for a picture of the screen. Pick what it gets.")
+        else:
+            page.set_icon_name("video-display-symbolic")
+            page.set_title("Share the screen?")
+            page.set_description(
+                "An app asks to see the screen. It sees only the panel you pick, "
+                "until it stops sharing. Nothing is shared while the phone is locked."
+            )
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        box.set_halign(Gtk.Align.CENTER)
+        box.set_size_request(300, -1)
+
+        def chose(value):
+            answer["value"] = value
+            win.close()
+
+        for value, label in options:
+            button = Gtk.Button(label=label)
+            button.add_css_class("pill")
+            button.add_css_class("suggested-action")
+            button.set_size_request(-1, 64)
+            button.connect("clicked", lambda _b, v=value: chose(v))
+            box.append(button)
+        cancel = Gtk.Button(label="Cancel")
+        cancel.add_css_class("pill")
+        cancel.set_size_request(-1, 64)
+        cancel.connect("clicked", lambda _b: chose(None))
+        box.append(cancel)
+        page.set_child(box)
+
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_child(page)
+        win.set_content(scroller)
+
+        def too_late():
+            if answer["value"] is None:
+                win.close()
+            return GLib.SOURCE_REMOVE
+
+        GLib.timeout_add_seconds(TIMEOUT_S, too_late)
+        win.present()
+
+    Adw.init()
+    app = Adw.Application(
+        application_id="org.duo2os.ScreencastChooser", flags=Gio.ApplicationFlags.NON_UNIQUE
+    )
+    app.connect("activate", run)
+    style = Adw.StyleManager.get_default()
+    style.set_color_scheme(Adw.ColorScheme.PREFER_DARK)
+    app.run([argv[0]])
+
+    value = answer["value"]
+    if value is not None and panels.valid_answer(value, outputs, screenshot):
+        print(value, flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except SystemExit:
+        raise
+    except BaseException as e:  # never 127, never a traceback for the portal
+        print("chooser: %r" % (e,), file=sys.stderr)
+        sys.exit(1)

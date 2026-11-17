@@ -1,0 +1,466 @@
+#!/usr/bin/env python3
+"""check-personal-data: find personal data before it reaches git.
+
+    scripts/check-personal-data               the staged changes (added lines)
+    scripts/check-personal-data --all         every tracked file
+    scripts/check-personal-data --history     every line ever added (git log -p --all)
+    scripts/check-personal-data FILE...       these files
+
+The pre-commit hook (scripts/install-personal-data-hook) runs the first form.
+
+What counts as personal (category: what is matched):
+  local    the patterns of the local list: local.personal-data in the
+           repository root (never committed; see local.personal-data.example),
+           plus the phone's address and MAC from local.env
+  device   IMEI / IMEISV / IMSI-like numbers (15-16 digits), ICCIDs (18-20
+           digits starting with 89) and eSIM EIDs (32 digits), except obvious
+           placeholders (mostly one digit, 123456789) and date-time stamps
+  phone    international phone numbers (+CC...), except obvious placeholders
+           (a run like 1234567 or 0000) and the fictional ranges (+44 7700 900xxx,
+           +1 NPA 555-01xx)
+  mac      MAC and Bluetooth addresses, except placeholders (00:11:22:33:44:55,
+           aa:bb:cc:..., at least three 00 bytes, ff:ff:...)
+  ip       private-range IPv4 addresses (10/8, 172.16/12, 192.168/16: a home
+           or office network) outside the project's own subnets (USB
+           network, hotspot, Waydroid; ALLOWED_NETS below). Examples belong in
+           the documentation ranges 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
+  home     /home/NAME paths with a real-looking NAME (not user, you, $USER...)
+  email    e-mail addresses, except example domains (example.com, .invalid,
+           .test, localhost, noreply@...), systemd unit names (getty@tty1.service)
+           and message ids inside URLs
+  secret   private keys, ssh public keys, well-known token formats, WPA PSKs
+  blob     binary files and files over 1 MiB (not in --history)
+
+Authorship lines are not checked for e-mail addresses and local patterns
+(publishing one's name as an author is the author's choice): the header and
+trailer lines of kernel-style patches (From:, Signed-off-by:,
+Co-developed-by:, ..., the "From <sha>" line) and copyright notices
+(Copyright, SPDX-FileCopyrightText, MODULE_AUTHOR, Author). A line containing "personal-data: ok" is skipped (a deliberate
+example that only looks personal). Lines of the local list that start with
+"!" are allow patterns: a finding whose matched text OR line matches one is
+dropped.
+
+Every finding prints as PLACE: CATEGORY: MASKED, where MASKED shows only the
+first and last two characters, so the output can be pasted into a report.
+Exit status: 1 when something was found, 0 when clean, 2 on errors.
+"""
+
+import ipaddress
+import os
+import re
+import subprocess
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LOCAL_LIST = os.environ.get("DUO2_PERSONAL_DATA", os.path.join(ROOT, "local.personal-data"))
+LOCAL_ENV = os.path.join(ROOT, "local.env")
+
+SKIP_MARK = "personal-data: ok"
+BLOB_LIMIT = 1 << 20
+
+# The project's own private subnets (they are the same on every phone):
+# the USB development network, the hotspot's candidate subnets, Waydroid's.
+ALLOWED_NETS = [
+    ipaddress.ip_network(n)
+    for n in (
+        "10.15.19.0/24",  # usb0 (rootfs/overlay/etc/systemd/network/10-usb0.network, rescue/init)
+        "10.15.43.0/24",
+        "192.168.43.0/24",
+        "172.20.43.0/24",  # hotspot over WiFi (hotspot.conf)
+        "10.15.44.0/24",
+        "192.168.44.0/24",
+        "172.20.44.0/24",  # hotspot over USB
+        "192.168.240.0/24",  # waydroid0
+    )
+]
+PRIVATE_NETS = [
+    ipaddress.ip_network(n)
+    for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")  # personal-data: ok
+]
+
+# Placeholder parts of names and addresses that are never personal.
+HOME_OK = {
+    "user",
+    "username",
+    "you",
+    "your-user",
+    "yourname",
+    "me",
+    "x",
+    "u",
+    "duo",
+    "duo2",
+    "duo2admin",
+    "admin",
+    "owner",
+    "name",
+    "someone",
+    "test",
+    "example",
+    "foo",
+    "phablet",
+    "alarm",
+    "pi",
+    "build",
+    "builder",
+    "runner",
+    "ubuntu",
+    "debian",
+}
+EMAIL_OK_DOMAIN = re.compile(
+    r"(^|\.)(example\.(com|org|net)|example|invalid|test|localhost|local|lan|internal|localdomain|home\.arpa)$",
+    re.IGNORECASE,
+)
+EMAIL_OK_LOCAL = re.compile(r"^(noreply|no-reply|nobody|user|you|someone|root|git)$", re.IGNORECASE)
+SYSTEMD_UNIT = re.compile(
+    r"\.(service|socket|timer|target|mount|automount|path|device|slice|scope|swap)"
+    r"(\.d|\.wants|\.requires)?$"
+)
+
+# The example values of local.env.example.
+EXAMPLE_VALUES = {"192.0.2.50", "00:11:22:33:44:55"}
+
+# Authorship: who wrote something is the author's own choice to publish.
+PATCH_AUTHOR = re.compile(
+    r"^(From [0-9a-f]{40} |From:|Date:|Subject:|Signed-off-by:|Co-developed-by:|Co-authored-by:|"
+    r"Reported-by:|Tested-by:|Reviewed-by:|Acked-by:|Suggested-by:|Cc:|Link:|Closes:|Fixes:|"
+    r"Message-ID:|Message-Id:|In-Reply-To:|Change-Id:)",
+    re.IGNORECASE,
+)
+COPYRIGHT = re.compile(
+    r"Copyright|SPDX-FileCopyrightText|MODULE_AUTHOR|^\W*Author\b", re.IGNORECASE
+)
+# A maintainers: entry of a device-tree binding in a patch: "+  - Name <mail>".
+PATCH_MAINTAINER = re.compile(r"^\+\s+-\s+[^<>@]+<[^<>\s]+@[^<>\s]+>\s*$")
+
+DIGITS = re.compile(r"(?<![0-9A-Za-z_])(\d{15,16}|89\d{16,18}F?|89\d{30})(?![0-9A-Za-z_])")
+DIGITS_SEP = re.compile(r"(?<![0-9A-Za-z])(\d{2}[- ]\d{6}[- ]\d{6}[- ]\d{1,2})(?![0-9A-Za-z])")
+PHONE = re.compile(r"(?<![0-9A-Za-z+])(\+[1-9]\d{0,2}(?:[ .\-/]?\(?\d\)?){7,13})(?![0-9])")
+MAC = re.compile(
+    r"(?<![0-9A-Fa-f:\-])((?:[0-9A-Fa-f]{2}([:\-]))(?:[0-9A-Fa-f]{2}\2){4}[0-9A-Fa-f]{2})"
+    r"(?![0-9A-Fa-f]|:[0-9A-Fa-f])"
+)
+IPV4 = re.compile(r"(?<![0-9.])((?:\d{1,3}\.){3}\d{1,3})(?![0-9]|\.\d)")
+HOME = re.compile(r"/home/([A-Za-z0-9._-]+)")
+EMAIL = re.compile(
+    r"(?<![A-Za-z0-9._%+-])([A-Za-z0-9._%+-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}))"
+)
+SECRETS = [
+    ("private key", re.compile(r"-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----")),
+    (
+        "ssh key",
+        re.compile(
+            r"\b((?:ssh-(?:rsa|ed25519|dss)|ecdsa-sha2-nistp\d+|sk-ssh-ed25519@openssh\.com) "
+            r"AAAA[0-9A-Za-z+/]{40,}={0,2})"
+        ),
+    ),
+    ("github token", re.compile(r"\b(gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,})")),
+    ("aws key", re.compile(r"\b((?:AKIA|ASIA)[0-9A-Z]{16})\b")),
+    ("google key", re.compile(r"\b(AIza[0-9A-Za-z_\-]{35})")),
+    ("slack token", re.compile(r"\b(xox[abposr]-[0-9A-Za-z\-]{10,})")),
+    ("wpa psk", re.compile(r"\bpsk\s*=\s*([0-9a-fA-F]{64})\b")),
+    ("wpa passphrase", re.compile(r"\b(?:wpa_passphrase|psk)\s*=\s*\"([^\"$%{<]{8,63})\"")),
+]
+
+
+def mask(text):
+    """'0123456789' -> '01…89': enough to find it again, too little to use."""
+    text = text.strip()
+    if len(text) <= 6:
+        return text[:1] + "…"
+    return text[:2] + "…" + text[-2:]
+
+
+def luhn_ok(digits):
+    total = 0
+    for i, c in enumerate(reversed(digits)):
+        d = int(c)
+        if i % 2:
+            d = d * 2 - 9 if d > 4 else d * 2
+        total += d
+    return total % 10 == 0
+
+
+def placeholder_digits(digits):
+    """Mostly one digit, a plain run, or a date-time stamp: not a real identifier."""
+    most = max(digits.count(c) for c in set(digits))
+    if most >= len(digits) - 5:
+        return True
+    if any(run in digits for run in ("123456789", "987654321", "0000000")):
+        return True
+    return bool(
+        re.match(r"(19|20)\d\d(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])([01]\d|2[0-3])[0-5]\d", digits)
+    )
+
+
+def placeholder_phone(digits):
+    """A run (1234567, 0000) or a range kept for fiction: Ofcom's
+    +44 7700 900xxx and +44 20 7946 0xxx, North America's 555-01xx."""
+    if placeholder_digits(digits) or any(
+        r in digits for r in ("1234567", "7654321", "0000", "1111")
+    ):
+        return True
+    return bool(re.match(r"(447700900|442079460|1\d{3}55501)", digits))
+
+
+def in_url(line, start):
+    """Is the text at start part of a URL (a message id in a lore link)?"""
+    word = re.split(r"[\s(<\[\"'`]", line[:start])[-1]
+    return "://" in word
+
+
+def placeholder_mac(mac):
+    """00:11:22:33:44:55, aa:bb:cc:dd:ee:01, 02:00:00:00:00:01, ff:ff:..., the
+    Qualcomm WLAN firmware's unprovisioned 00:03:7f:12:..: not a device's own."""
+    octets = [int(x, 16) for x in re.split(r"[:\-]", mac)]
+    text = "".join("%02x" % o for o in octets)
+    if octets.count(0) >= 3 or octets.count(0xFF) >= 3:
+        return True
+    if octets[0] & 2 and octets.count(0) >= 2:
+        return True  # locally administered with zeros: 02:00:5e:10:00:01
+    if sum(1 for o in octets if o >> 4 == o & 15) >= 4:
+        return True  # bytes of one repeated nibble: aa:bb:cc:dd:ee:01
+    if text.startswith("00037f12"):
+        return True
+    return any(run in text for run in ("001122", "112233", "123456", "abcdef"))
+
+
+def ip_private(text):
+    try:
+        addr = ipaddress.ip_address(text)
+    except ValueError:
+        return False
+    if not any(addr in net for net in PRIVATE_NETS):
+        return False
+    return not any(addr in net for net in ALLOWED_NETS)
+
+
+class Rules:
+    """The patterns: the generic ones and the local list."""
+
+    def __init__(self, local=(), allow=()):
+        self.local = [re.compile(p) for p in local]
+        self.allow = [re.compile(p) for p in allow]
+
+    @classmethod
+    def load(cls, path=LOCAL_LIST, env=LOCAL_ENV):
+        local, allow = [], []
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                for raw in f:
+                    line = raw.rstrip("\n")
+                    if not line.strip() or line.lstrip().startswith("#"):
+                        continue
+                    (allow if line.startswith("!") else local).append(
+                        line[1:] if line.startswith("!") else line
+                    )
+        local.extend(local_env_patterns(env))
+        return cls(local, allow)
+
+    def scan_line(self, line, path=""):
+        """[(category, matched text)] for one line."""
+        if SKIP_MARK in line:
+            return []
+        authorship = bool(COPYRIGHT.search(line)) or (
+            path.endswith((".patch", ".mbox", ".eml"))
+            and bool(PATCH_AUTHOR.match(line) or PATCH_MAINTAINER.match(line))
+        )
+        found = []
+        if not authorship:
+            for rx in self.local:
+                for m in rx.finditer(line):
+                    found.append(("local", m.group(0)))
+        for m in DIGITS.finditer(line):
+            d = m.group(1).rstrip("F")
+            if placeholder_digits(d):
+                continue
+            found.append(("device", m.group(1)))  # IMEI(SV) / IMSI, ICCID, EID
+        for m in DIGITS_SEP.finditer(line):
+            d = re.sub(r"\D", "", m.group(1))
+            if len(d) in (15, 16) and not placeholder_digits(d) and (len(d) == 16 or luhn_ok(d)):
+                found.append(("device", m.group(1)))
+        for m in PHONE.finditer(line):
+            if not placeholder_phone(re.sub(r"\D", "", m.group(1))):
+                found.append(("phone", m.group(1)))
+        for m in MAC.finditer(line):
+            if not placeholder_mac(m.group(1)):
+                found.append(("mac", m.group(1)))
+        for m in IPV4.finditer(line):
+            if ip_private(m.group(1)):
+                found.append(("ip", m.group(1)))
+        for m in HOME.finditer(line):
+            name = m.group(1)
+            if name.lower() in HOME_OK or not re.match(r"[a-z][a-z0-9._-]*$", name):
+                continue  # $USER, %s, *, <user>, CAPS placeholders
+            found.append(("home", m.group(0)))
+        if not authorship:
+            for m in EMAIL.finditer(line):
+                local_part, domain = m.group(1).split("@", 1)
+                if EMAIL_OK_DOMAIN.search(domain) or EMAIL_OK_LOCAL.match(local_part):
+                    continue
+                if SYSTEMD_UNIT.search(domain) or in_url(line, m.start(1)):
+                    continue
+                found.append(("email", m.group(1)))
+        for name, rx in SECRETS:
+            for m in rx.finditer(line):
+                found.append(("secret", "%s %s" % (name, m.group(m.lastindex or 0))))
+        if self.allow:
+            found = [
+                (c, t)
+                for c, t in found
+                if not any(a.search(t) or a.search(line) for a in self.allow)
+            ]
+        return found
+
+
+def local_env_patterns(path):
+    """The phone's address and MAC in local.env are personal by definition."""
+    out = []
+    if not os.path.exists(path):
+        return out
+    with open(path, encoding="utf-8") as f:
+        for raw in f:
+            m = re.match(r"\s*(DUO2_HOST|DUO2_MAC)=[\"']?([^\"'\s#]+)", raw)
+            if not m:
+                continue
+            value = m.group(2).rsplit("@", 1)[-1]
+            if not value or value.startswith("$") or value in EXAMPLE_VALUES:
+                continue
+            if m.group(1) == "DUO2_MAC":
+                out.append("(?i)" + re.escape(value))
+            else:
+                out.append(r"(?<![0-9A-Za-z.])" + re.escape(value) + r"(?![0-9A-Za-z])")
+    return out
+
+
+# --- where the lines come from ----------------------------------------------
+
+
+def git(*args):
+    return subprocess.run(
+        ["git", "-C", ROOT] + list(args), check=True, stdout=subprocess.PIPE
+    ).stdout
+
+
+def added_lines(diff_text):
+    """Unified diff (-U0) -> [(path, line number, text, commit)]."""
+    out, path, lineno, commit = [], None, 0, ""
+    for raw in diff_text.splitlines():
+        if raw.startswith("commit ") and len(raw) == 47:
+            commit = raw[7:19]
+            continue
+        if raw.startswith("+++ "):
+            path = raw[6:] if raw.startswith("+++ b/") else None
+            continue
+        if raw.startswith("@@"):
+            m = re.match(r"@@ -\S+ \+(\d+)", raw)
+            lineno = int(m.group(1)) if m else 0
+            continue
+        if path and raw.startswith("+"):
+            out.append((path, lineno, raw[1:], commit))
+            lineno += 1
+    return out
+
+
+def staged():
+    diff = git("diff", "--cached", "-U0", "--no-color", "--no-ext-diff", "--diff-filter=ACMR")
+    lines = added_lines(diff.decode("utf-8", "replace"))
+    blobs = []
+    numstat = git("diff", "--cached", "--numstat", "-z", "--diff-filter=ACMR").decode(
+        "utf-8", "replace"
+    )
+    for entry in numstat.split("\0"):
+        parts = entry.split("\t")
+        if len(parts) != 3 or not parts[2]:
+            continue
+        added, _deleted, path = parts
+        size = int(git("cat-file", "-s", ":" + path).strip() or 0)
+        if added == "-" or size > BLOB_LIMIT:
+            blobs.append((path, size, added == "-"))
+    return lines, blobs
+
+
+def tracked():
+    return [p for p in git("ls-files", "-z").decode("utf-8", "replace").split("\0") if p]
+
+
+def file_lines(paths):
+    lines, blobs = [], []
+    for path in paths:
+        full = path if os.path.isabs(path) else os.path.join(ROOT, path)
+        if os.path.islink(full) or not os.path.isfile(full):
+            continue
+        with open(full, "rb") as f:
+            data = f.read()
+        binary = b"\0" in data[:8192]
+        if binary or len(data) > BLOB_LIMIT:
+            blobs.append((path, len(data), binary))
+        if binary:
+            continue
+        for n, text in enumerate(data.decode("utf-8", "replace").splitlines(), 1):
+            lines.append((path, n, text, ""))
+    return lines, blobs
+
+
+def history():
+    log = git("log", "-p", "--all", "-U0", "--no-color", "--no-ext-diff", "--format=commit %H")
+    return added_lines(log.decode("utf-8", "replace")), []
+
+
+def report(rules, lines, blobs, dedupe=False, out=sys.stdout):
+    seen, count = set(), 0
+    for path, n, text, commit in lines:
+        for category, match in rules.scan_line(text, path):
+            if dedupe:
+                key = (path, category, match)
+                if key in seen:
+                    continue
+                seen.add(key)
+            place = "%s%s:%d" % (commit + ":" if commit else "", path, n)
+            out.write("%s: %s: %s\n" % (place, category, mask(match)))
+            count += 1
+    for path, size, binary in blobs:
+        out.write("%s: blob: %s, %d bytes\n" % (path, "binary" if binary else "large", size))
+        count += 1
+    return count
+
+
+def main(argv):
+    if argv[:1] in (["-h"], ["--help"]):
+        print(__doc__)
+        return 0
+    try:
+        rules = Rules.load()
+    except (re.error, OSError, UnicodeDecodeError) as e:
+        sys.stderr.write("check-personal-data: the local list (%s): %s\n" % (LOCAL_LIST, e))
+        return 2
+    try:
+        if not argv:
+            lines, blobs = staged()
+            dedupe = False
+        elif argv == ["--all"]:
+            lines, blobs = file_lines(tracked())
+            dedupe = False
+        elif argv == ["--history"]:
+            lines, blobs = history()
+            dedupe = True
+        elif argv[0].startswith("-"):
+            sys.stderr.write(__doc__)
+            return 2
+        else:
+            lines, blobs = file_lines(argv)
+            dedupe = False
+    except (subprocess.CalledProcessError, OSError) as e:
+        sys.stderr.write("check-personal-data: %s\n" % e)
+        return 2
+    count = report(rules, lines, blobs, dedupe)
+    sys.stdout.flush()
+    if count:
+        sys.stderr.write(
+            "check-personal-data: %d finding(s); see scripts/check-personal-data --help\n" % count
+        )
+    return 1 if count else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

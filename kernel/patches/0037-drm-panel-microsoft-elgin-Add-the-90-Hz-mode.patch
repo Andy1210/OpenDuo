@@ -1,0 +1,187 @@
+From 2a3eb767988764e85d539aa4e03cdc4033326f9f Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 05:37:07 +0100
+Subject: [PATCH 037/137] drm/panel: microsoft-elgin: Add the 90 Hz mode
+
+The panels run at 60 or 90 Hz: the vendor device tree has a timing node
+for each, with the same geometry, porches and init sequence except for
+register 0x76 of the display driver IC (0x00 = 60 Hz, 0x01 = 90 Hz),
+which also sets the TE rate the DPU's tear check follows.
+
+Advertise both modes, 90 Hz preferred, and pick the register value from
+the mode of the commit that prepares the panel. The "refresh" module
+parameter makes 60 Hz the preferred mode instead.
+
+The 90 Hz mode runs the link at the vendor's rate for it, 760 Mbps per
+lane, through a longer horizontal front porch (in command mode the
+porches only set the link rate); the 60 Hz mode is unchanged.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/gpu/drm/panel/panel-microsoft-elgin.c | 103 +++++++++++++++---
+ 1 file changed, 86 insertions(+), 17 deletions(-)
+
+diff --git a/drivers/gpu/drm/panel/panel-microsoft-elgin.c b/drivers/gpu/drm/panel/panel-microsoft-elgin.c
+index 2a170632c237..54aa99a354ce 100644
+--- a/drivers/gpu/drm/panel/panel-microsoft-elgin.c
++++ b/drivers/gpu/drm/panel/panel-microsoft-elgin.c
+@@ -7,17 +7,26 @@
+  * Each panel sits on its own DSI link (left: DSI0, right: DSI1) with its own
+  * reset and TE line; both share the same supplies. The command sequences are
+  * the ones the vendor device tree carries for the retail ("MP") board.
++ *
++ * Two modes, 90 Hz (preferred) and 60 Hz, as in the vendor's two timing
++ * nodes: the same geometry and porches, the same init sequence except for
++ * the DDIC's refresh rate register (0x76), which also sets the TE rate. The
++ * mode is picked by a full modeset; the "refresh" module parameter chooses
++ * which of the two is advertised as preferred.
+  */
+ 
+ #include <linux/backlight.h>
+ #include <linux/delay.h>
+ #include <linux/gpio/consumer.h>
+ #include <linux/module.h>
++#include <linux/moduleparam.h>
+ #include <linux/of.h>
+ #include <linux/regulator/consumer.h>
+ 
+ #include <drm/display/drm_dsc.h>
+ #include <drm/display/drm_dsc_helper.h>
++#include <drm/drm_connector.h>
++#include <drm/drm_crtc.h>
+ #include <drm/drm_mipi_dsi.h>
+ #include <drm/drm_modes.h>
+ #include <drm/drm_panel.h>
+@@ -28,9 +37,14 @@
+ #define ELGIN_WIDTH	1344
+ #define ELGIN_HEIGHT	1892
+ 
++static unsigned int refresh = 90;
++module_param(refresh, uint, 0644);
++MODULE_PARM_DESC(refresh, "Preferred refresh rate in Hz, 90 (default) or 60; read when the modes are probed");
++
+ struct elgin {
+ 	struct drm_panel panel;
+ 	struct mipi_dsi_device *dsi;
++	struct drm_connector *connector;
+ 	struct drm_dsc_config dsc;
+ 	struct gpio_desc *reset_gpio;
+ 	struct regulator_bulk_data *supplies;
+@@ -58,9 +72,27 @@ static void elgin_reset(struct elgin *ctx)
+ 	usleep_range(10000, 11000);
+ }
+ 
++/*
++ * The refresh rate of the mode being set: prepare runs in the commit, after
++ * the new state has been swapped in (the way panel-novatek-nt35950 finds its
++ * mode). 60 when nothing is known yet.
++ */
++static int elgin_current_refresh(struct elgin *ctx)
++{
++	struct drm_connector *connector = ctx->connector;
++
++	if (!connector || !connector->state || !connector->state->crtc ||
++	    !connector->state->crtc->state)
++		return 60;
++
++	return drm_mode_vrefresh(&connector->state->crtc->state->mode);
++}
++
+ /* The vendor sequence up to the DSC picture parameter set (low-power mode). */
+ static int elgin_init(struct elgin *ctx)
+ {
++	/* refresh rate (and TE rate): 0x00 = 60 Hz, 0x01 = 90 Hz */
++	const u8 rate[] = { 0x76, elgin_current_refresh(ctx) == 90 ? 0x01 : 0x00 };
+ 	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
+ 
+ 	ctx->dsi->mode_flags |= MIPI_DSI_MODE_LPM;
+@@ -84,8 +116,7 @@ static int elgin_init(struct elgin *ctx)
+ 				     0xff, 0xf0, 0x00);
+ 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x58, 0x00, 0x00, 0x00, 0xf8,
+ 				     0xff, 0xfc);
+-	/* refresh rate: 0x00 = 60 Hz, 0x01 = 90 Hz */
+-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x76, 0x00);
++	mipi_dsi_dcs_write_buffer_multi(&dsi_ctx, rate, sizeof(rate));
+ 
+ 	return dsi_ctx.accum_err;
+ }
+@@ -177,26 +208,64 @@ static int elgin_unprepare(struct drm_panel *panel)
+ 	return 0;
+ }
+ 
+-/* 60 Hz; porches from the vendor timing node (they only pace the link). */
+-static const struct drm_display_mode elgin_mode = {
+-	.clock = (ELGIN_WIDTH + 32 + 32 + 32) * (ELGIN_HEIGHT + 32 + 10 + 32) * 60 / 1000,
+-	.hdisplay = ELGIN_WIDTH,
+-	.hsync_start = ELGIN_WIDTH + 32,
+-	.hsync_end = ELGIN_WIDTH + 32 + 32,
+-	.htotal = ELGIN_WIDTH + 32 + 32 + 32,
+-	.vdisplay = ELGIN_HEIGHT,
+-	.vsync_start = ELGIN_HEIGHT + 32,
+-	.vsync_end = ELGIN_HEIGHT + 32 + 10,
+-	.vtotal = ELGIN_HEIGHT + 32 + 10 + 32,
+-	.width_mm = 85,
+-	.height_mm = 120,
+-	.type = DRM_MODE_TYPE_DRIVER,
++/*
++ * The vendor timing nodes have the same porches for both rates (h 32/32/32,
++ * v 32/10/32) and a link rate of their own: 700 Mbps per lane at 60 Hz, 760
++ * at 90. In command mode the porches do not reach the wire, they only set
++ * the link rate (the DSI host derives it from the mode clock), so the 90 Hz
++ * mode takes the vendor's 760 Mbps through a longer horizontal front porch:
++ * a frame then goes out in about 6.7 ms of its 11.1 (with the vendor
++ * porches it would be 578 Mbps and 8.9 ms). The 60 Hz mode keeps the
++ * vendor porches as they are (385 Mbps, about 13 ms of 16.7).
++ */
++#define ELGIN_HFP_90	(32 + 172)
++
++#define ELGIN_MODE(fps, hfp) {						\
++	.clock = (ELGIN_WIDTH + (hfp) + 32 + 32) *			\
++		 (ELGIN_HEIGHT + 32 + 10 + 32) * (fps) / 1000,		\
++	.hdisplay = ELGIN_WIDTH,					\
++	.hsync_start = ELGIN_WIDTH + (hfp),				\
++	.hsync_end = ELGIN_WIDTH + (hfp) + 32,				\
++	.htotal = ELGIN_WIDTH + (hfp) + 32 + 32,			\
++	.vdisplay = ELGIN_HEIGHT,					\
++	.vsync_start = ELGIN_HEIGHT + 32,				\
++	.vsync_end = ELGIN_HEIGHT + 32 + 10,				\
++	.vtotal = ELGIN_HEIGHT + 32 + 10 + 32,				\
++	.width_mm = 85,							\
++	.height_mm = 120,						\
++	.type = DRM_MODE_TYPE_DRIVER,					\
++}
++
++static const struct drm_display_mode elgin_modes[] = {
++	ELGIN_MODE(90, ELGIN_HFP_90),
++	ELGIN_MODE(60, 32),
+ };
+ 
+ static int elgin_get_modes(struct drm_panel *panel,
+ 			   struct drm_connector *connector)
+ {
+-	return drm_connector_helper_get_modes_fixed(connector, &elgin_mode);
++	struct elgin *ctx = to_elgin(panel);
++	unsigned int preferred = refresh == 60 ? 60 : 90;
++	struct drm_display_mode *mode;
++	int i;
++
++	ctx->connector = connector;
++
++	for (i = 0; i < ARRAY_SIZE(elgin_modes); i++) {
++		mode = drm_mode_duplicate(connector->dev, &elgin_modes[i]);
++		if (!mode)
++			return -ENOMEM;
++
++		drm_mode_set_name(mode);
++		if (drm_mode_vrefresh(mode) == preferred)
++			mode->type |= DRM_MODE_TYPE_PREFERRED;
++		drm_mode_probed_add(connector, mode);
++	}
++
++	connector->display_info.width_mm = elgin_modes[0].width_mm;
++	connector->display_info.height_mm = elgin_modes[0].height_mm;
++
++	return ARRAY_SIZE(elgin_modes);
+ }
+ 
+ static const struct drm_panel_funcs elgin_panel_funcs = {

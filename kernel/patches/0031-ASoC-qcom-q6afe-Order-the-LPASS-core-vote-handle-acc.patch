@@ -1,0 +1,106 @@
+From 7b9d57efb830a1a7f170bd0399b5dc8042d4fc64 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 03:55:27 +0100
+Subject: [PATCH 031/137] ASoC: qcom: q6afe: Order the LPASS core vote handle,
+ accept the devote
+
+Since commit f3c7bee984aa ("ASoC: qcom: qdsp6: q6afe: fix clk vote
+response type mismatch") the client handle the DSP returns in
+AFE_CMD_RSP_REMOTE_LPASS_CORE_HW_VOTE_REQUEST is kept for the devote.
+Three things are left:
+
+- The callback sets the opcode the waiter in afe_apr_send_pkt() tests
+  before it stores the handle, and the waiter reads the handle after
+  afe->lock is dropped: it can see the response and still read the
+  previous vote's handle. Store the handle first, with a write barrier,
+  read it after a read barrier, and serialise the votes so the handle
+  read is the one of this vote.
+- The handle is read without looking at the payload size.
+- The devote's basic response, AFE_CMD_REMOTE_LPASS_CORE_HW_DEVOTE_REQUEST,
+  is logged as "Unknown cmd 0x100f6" at error level on every runtime
+  suspend of an LPASS macro or the LPI pin controller. Nobody waits for
+  it, and a failure is already reported by the status check above.
+
+On SM8350 (Surface Duo 2), before the upstream fix every devote failed
+("cmd = 0x100f6 returned error = 0x1"), the LPASS_HW_MACRO and
+LPASS_HW_DCODEC votes stayed in the DSP, and the ADSP never went to sleep
+again once the audio stack had been used.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ sound/soc/qcom/qdsp6/q6afe.c | 22 ++++++++++++++++------
+ 1 file changed, 16 insertions(+), 6 deletions(-)
+
+diff --git a/sound/soc/qcom/qdsp6/q6afe.c b/sound/soc/qcom/qdsp6/q6afe.c
+index 9ac51c304ead..d6de3011cb27 100644
+--- a/sound/soc/qcom/qdsp6/q6afe.c
++++ b/sound/soc/qcom/qdsp6/q6afe.c
+@@ -394,6 +394,8 @@ struct q6afe {
+ 	struct mutex lock;
+ 	struct aprv2_ibasic_rsp_result_t result;
+ 	uint32_t vote_result;
++	/* LPASS core votes: one at a time, so vote_result is this vote's */
++	struct mutex vote_lock;
+ 	wait_queue_head_t wait;
+ 	struct list_head port_list;
+ 	spinlock_t port_list_lock;
+@@ -1011,7 +1013,6 @@ static int q6afe_callback(struct apr_device *adev, const struct apr_resp_pkt *da
+ 	const struct aprv2_ibasic_rsp_result_t *res;
+ 	const struct apr_hdr *hdr = &data->hdr;
+ 	struct q6afe_port *port;
+-	uint32_t *vote_res;
+ 
+ 	if (!data->payload_size)
+ 		return 0;
+@@ -1038,6 +1039,9 @@ static int q6afe_callback(struct apr_device *adev, const struct apr_resp_pkt *da
+ 				wake_up(&afe->wait);
+ 			}
+ 			break;
++		case AFE_CMD_REMOTE_LPASS_CORE_HW_DEVOTE_REQUEST:
++			/* nobody waits for it; a failure is reported above */
++			break;
+ 		default:
+ 			dev_err(afe->dev, "Unknown cmd 0x%x\n",	res->opcode);
+ 			break;
+@@ -1045,10 +1049,11 @@ static int q6afe_callback(struct apr_device *adev, const struct apr_resp_pkt *da
+ 	}
+ 		break;
+ 	case AFE_CMD_RSP_REMOTE_LPASS_CORE_HW_VOTE_REQUEST:
+-		vote_res = data->payload;
+-		afe->result.opcode = hdr->opcode;
++		if (data->payload_size >= sizeof(u32))
++			afe->vote_result = *(const u32 *)data->payload;
+ 		afe->result.status = 0;
+-		afe->vote_result = *vote_res;
++		smp_wmb();	/* the handle before the opcode the waiter tests */
++		afe->result.opcode = hdr->opcode;
+ 		wake_up(&afe->wait);
+ 		break;
+ 	default:
+@@ -1955,12 +1960,16 @@ int q6afe_vote_lpass_core_hw(struct device *dev, uint32_t hw_block_id,
+ 	strscpy(vote_cfg->client_name, client_name,
+ 			sizeof(vote_cfg->client_name));
+ 
++	mutex_lock(&afe->vote_lock);
+ 	ret = afe_apr_send_pkt(afe, pkt, NULL,
+ 			       AFE_CMD_RSP_REMOTE_LPASS_CORE_HW_VOTE_REQUEST);
+-	if (ret)
++	if (ret) {
+ 		dev_err(afe->dev, "AFE failed to vote (%d)\n", hw_block_id);
+-	else
++	} else {
++		smp_rmb();	/* pairs with the callback's smp_wmb() */
+ 		*client_handle = afe->vote_result;
++	}
++	mutex_unlock(&afe->vote_lock);
+ 
+ 	return ret;
+ }
+@@ -1978,6 +1987,7 @@ static int q6afe_probe(struct apr_device *adev)
+ 	q6core_get_svc_api_info(adev->svc_id, &afe->ainfo);
+ 	afe->apr = adev;
+ 	mutex_init(&afe->lock);
++	mutex_init(&afe->vote_lock);
+ 	init_waitqueue_head(&afe->wait);
+ 	afe->dev = dev;
+ 	INIT_LIST_HEAD(&afe->port_list);

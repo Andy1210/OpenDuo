@@ -1,0 +1,387 @@
+#!/usr/bin/python3 -I
+"""duo2-backup: the owner's data from the phone to his NAS or PC (rsync
+over ssh, pushed by the phone as root). docs/UPDATES.md "Backups".
+
+  duo2-backup init            the key (/etc/duo2/backup/id_ed25519, root only)
+                              and /etc/duo2/backup.conf; prints the line for
+                              the target's authorized_keys
+  duo2-backup trust-host      fetch the target's host key, show its
+                              fingerprint, keep it when the owner says yes
+  duo2-backup list            what goes and how big it is
+  duo2-backup run [--now] [--dry-run]
+                              stage the system's part, then rsync (only on
+                              WiFi and charging unless --now; the phone does
+                              not sleep meanwhile)
+  duo2-backup stage           only the staging (scripts/duo2-backup-pull: a PC
+                              that pulls instead)
+  duo2-backup status          the last run
+  duo2-backup restore-owners LIST [ROOT]
+                              after copying Android's data back: its owners
+                              and modes from the list (staged/android-owners.nul.gz)
+
+The settings are in /etc/duo2/backup.conf (root, 0600; nothing of it is in
+git): TARGET=user@host:path and the rest (maint/backup.conf.example).
+"""
+
+import gzip
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+for _p in (HERE, "/usr/local/lib/duo2-maint"):  # the repo's maint/, or installed
+    if os.path.isdir(os.path.join(_p, "duo2maint")):
+        sys.path.insert(0, _p)
+        break
+
+from duo2maint import backup as bk  # noqa: E402
+from duo2maint import system  # noqa: E402
+
+STATE = "/var/lib/duo2-backup/last.json"
+EXAMPLE = "/usr/local/share/duo2-maint/backup.conf.example"
+
+
+def say(*args):
+    print("duo2-backup:", *args, flush=True)
+
+
+def load():
+    try:
+        with open(bk.CONF) as f:
+            return bk.parse_conf(f.read(), system.gui_user())
+    except OSError:
+        return bk.parse_conf("", system.gui_user())
+
+
+def cmd_init():
+    os.makedirs(bk.KEY_DIR, mode=0o700, exist_ok=True)
+    os.chmod(bk.KEY_DIR, 0o700)
+    if not os.path.exists(bk.CONF):
+        src = EXAMPLE if os.path.exists(EXAMPLE) else os.path.join(HERE, "backup.conf.example")
+        shutil.copyfile(src, bk.CONF)
+        os.chmod(bk.CONF, 0o600)
+        say("wrote %s: set TARGET in it" % bk.CONF)
+    cfg = load()
+    if not os.path.exists(cfg["KEY"]):
+        rc, _o, err = system.run(
+            [
+                "ssh-keygen",
+                "-q",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-C",
+                "duo2-backup@" + socket.gethostname(),
+                "-f",
+                cfg["KEY"],
+            ]
+        )
+        if rc != 0:
+            say("ssh-keygen: %s" % err.strip())
+            return 1
+        say("made the key %s (root only)" % cfg["KEY"])
+    with open(cfg["KEY"] + ".pub") as f:
+        pub = f.read().strip()
+    target_dir = cfg["TARGET"].rpartition(":")[2] or "/path/to/the/backup/dir"
+    print(
+        "\nOn the target, as the user the backup logs in as, add to ~/.ssh/authorized_keys"
+        " (one line; rrsync comes with rsync 3.2.4+; with it, set TARGET to user@host: and RESTRICTED=yes):\n"
+    )
+    print(
+        bk.authorized_keys_line(
+            pub, target_dir if target_dir.startswith("/") else "/ABSOLUTE/" + target_dir
+        )
+    )
+    print("\nThen: duo2-backup trust-host, duo2-backup run --now --dry-run")
+    return 0
+
+
+def cmd_trust_host():
+    cfg = load()
+    problems = bk.check_conf(cfg)
+    if problems:
+        for p in problems:
+            say(p)
+        return 1
+    host = cfg["TARGET"].rpartition(":")[0].rpartition("@")[2].strip("[]")
+    rc, keys, err = system.run(
+        ["ssh-keyscan", "-p", cfg["PORT"], "-t", "ed25519,ecdsa,rsa", host], timeout=30
+    )
+    if rc != 0 or not keys.strip():
+        say("ssh-keyscan %s: %s" % (host, err.strip() or "no answer"))
+        return 1
+    tmp = cfg["KNOWN_HOSTS"] + ".new"
+    with open(tmp, "w") as f:
+        f.write(keys)
+    rc, fp, _ = system.run(["ssh-keygen", "-l", "-f", tmp])
+    print(fp.strip())
+    print(
+        "Compare with the target's own: ssh-keygen -l -f /etc/ssh/ssh_host_ed25519_key.pub (on it)"
+    )
+    if not sys.stdin.isatty() or input("Is this the target's key? [y/N] ").strip().lower() not in (
+        "y",
+        "yes",
+        "i",
+    ):
+        os.unlink(tmp)
+        return 1
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, cfg["KNOWN_HOSTS"])
+    say("kept in %s" % cfg["KNOWN_HOSTS"])
+    return 0
+
+
+def stage(cfg):
+    """The system's part and Android's owners, in /var/backups/duo2/backup/staged."""
+    staged = os.path.join(bk.STAGE, "staged")
+    os.makedirs(bk.STAGE, mode=0o700, exist_ok=True)
+    os.chmod(bk.STAGE, 0o700)
+    tmp = staged + ".new"
+    shutil.rmtree(tmp, ignore_errors=True)
+    os.makedirs(os.path.join(tmp, "system"), mode=0o700)
+    if bk.yes(cfg["INCLUDE_SYSTEM"]):
+        sysdir = os.path.join(tmp, "system")
+        with open(os.path.join(sysdir, "packages.tsv"), "w") as f:
+            f.write(system.dpkg_packages_text())
+        for name, argv in (
+            ("manual.txt", ["apt-mark", "showmanual"]),
+            ("holds.txt", ["apt-mark", "showhold"]),
+        ):
+            with open(os.path.join(sysdir, name), "w") as f:
+                f.write(system.run(argv)[1])
+        members = ["etc"] + sorted(
+            "var/lib/" + d
+            for d in os.listdir("/var/lib")
+            if d.startswith("duo2") or d == "bluetooth"
+        )
+        rc, _o, err = system.run(
+            [
+                "tar",
+                "-C",
+                "/",
+                "--numeric-owner",
+                "--xattrs",
+                "--acls",
+                "-czf",
+                os.path.join(sysdir, "config.tar.gz"),
+            ]
+            + members
+        )
+        if rc not in (0, 1):
+            raise RuntimeError("tar: %s" % err.strip())
+        with open(os.path.join(sysdir, "README.txt"), "w") as f:
+            f.write(
+                "duo2-os system configuration of %s, %s.\n"
+                "config.tar.gz: /etc, /var/lib/duo2*, /var/lib/bluetooth (owners and modes kept;\n"
+                "WiFi passwords, ssh host keys, Bluetooth link keys are in it). packages.tsv,\n"
+                "manual.txt: the packages (docs/UPDATES.md: reinstalling from them).\n"
+                % (socket.gethostname(), time.strftime("%F %T"))
+            )
+    data = bk.android_dir(cfg["USER"])
+    if bk.yes(cfg["INCLUDE_ANDROID"]) and os.path.isdir(data):
+        out = os.path.join(tmp, "android-owners.nul.gz")
+        p = subprocess.Popen(
+            ["find", data, "-mindepth", "1", "-printf", "%U %G %m %P\\0"], stdout=subprocess.PIPE
+        )
+        with gzip.open(out, "wb") as f:
+            shutil.copyfileobj(p.stdout, f)
+        p.wait()
+    shutil.rmtree(staged, ignore_errors=True)
+    os.rename(tmp, staged)
+
+
+def conditions(cfg, forced):
+    wifi = (system.default_route_dev() or "").startswith(("wlan", "wl"))
+    ac = bk.on_ac(system.power_supplies())
+    return bk.may_run(cfg, wifi, ac, forced)
+
+
+HOME_LOCKED = "/run/duo2-home/locked"
+
+
+def write_state(data):
+    os.makedirs(os.path.dirname(STATE), mode=0o700, exist_ok=True)
+    with open(STATE + ".tmp", "w") as f:
+        json.dump(data, f, indent=1)
+    os.replace(STATE + ".tmp", STATE)
+
+
+def cmd_run(args):
+    cfg = load()
+    problems = bk.check_conf(cfg)
+    if not os.path.exists(cfg["KEY"]):
+        problems.append("no key: duo2-backup init")
+    if not os.path.exists(cfg["KNOWN_HOSTS"]):
+        problems.append("the target's host key is not known: duo2-backup trust-host")
+    if shutil.which("rsync") is None:
+        problems.append(
+            "rsync is not installed (sudo apt-get install --no-install-recommends rsync)"
+        )
+    if problems:
+        for p in problems:
+            say(p)
+        return 1
+    why_not = conditions(cfg, "--now" in args)
+    if why_not:
+        say("not now: %s" % why_not)
+        return 0
+    if os.path.exists(HOME_LOCKED):
+        # An encrypted home before its first unlock is an empty tmpfs
+        # (homecrypt/README.md): a backup of it would be a backup of nothing.
+        say("not now: the encrypted home is locked until the first unlock")
+        return 0
+    t0 = time.time()
+    stage(cfg)
+    filt = bk.FILTER if os.path.exists(bk.FILTER) else os.path.join(HERE, "backup.filter")
+    argv = bk.rsync_argv(cfg, time.strftime("%Y-%m-%d_%H%M%S"), "--dry-run" in args, filt)
+    inhibit = [
+        "systemd-inhibit",
+        "--what=sleep",
+        "--mode=block",
+        "--who=duo2-backup",
+        "--why=Backing up to the NAS / PC",
+    ]
+    say(
+        "rsync to %s%s"
+        % (bk.destination(cfg["TARGET"]), " (dry run)" if "--dry-run" in args else "")
+    )
+    p = subprocess.run(inhibit + argv, capture_output=True, text=True)
+    stats = bk.parse_stats(p.stdout)
+    changed = sum(
+        1
+        for line in p.stdout.splitlines()
+        if line[:1] in ("<", ">", "c", "*") and not line.startswith("*deleting")
+    )
+    deleted = sum(1 for line in p.stdout.splitlines() if line.startswith("*deleting"))
+    ok = p.returncode in (0, 24)  # 24: files vanished while sending (a cache)
+    say(
+        "%s in %.0f s: %d files, %d sent, %d moved to deleted/, %.1f MB sent%s"
+        % (
+            "done" if ok else "FAILED (rsync %d)" % p.returncode,
+            time.time() - t0,
+            stats.get("files", 0),
+            changed,
+            deleted,
+            stats.get("sent_bytes", 0) / 1e6,
+            "" if ok else ": " + p.stderr.strip()[-300:],
+        )
+    )
+    if "--dry-run" not in args:
+        write_state(
+            {
+                "time": t0,
+                "ok": ok,
+                "rc": p.returncode,
+                "seconds": round(time.time() - t0),
+                "stats": stats,
+                "target": bk.destination(cfg["TARGET"]),
+            }
+        )
+    return 0 if ok else 1
+
+
+def du(path):
+    rc, out, _ = system.run(["du", "-sxh", path], timeout=300)
+    return out.split()[0] if rc == 0 and out else "?"
+
+
+def cmd_list():
+    cfg = load()
+    home = "/home/%s" % cfg["USER"]
+    print("home %s: %s (caches left out: %s)" % (home, du(home), bk.FILTER))
+    data = bk.android_dir(cfg["USER"])
+    if os.path.isdir(data):
+        print(
+            "  of it, Android's data: %s (%s)"
+            % (du(data), "goes" if bk.yes(cfg["INCLUDE_ANDROID"]) else "left out")
+        )
+    print(
+        "system configuration: /etc %s (%s)"
+        % (du("/etc"), "goes" if bk.yes(cfg["INCLUDE_SYSTEM"]) else "left out")
+    )
+    print("target: %s" % (bk.destination(cfg["TARGET"]) if cfg["TARGET"] else "not set"))
+    return 0
+
+
+def cmd_status():
+    try:
+        with open(STATE) as f:
+            st = json.load(f)
+    except (OSError, ValueError):
+        print("no backup yet")
+        return 0
+    print(
+        "last backup %s: %s, %d s, %s"
+        % (
+            time.strftime("%F %T", time.localtime(st["time"])),
+            "ok" if st["ok"] else "FAILED (rsync %s)" % st["rc"],
+            st["seconds"],
+            st.get("target"),
+        )
+    )
+    return 0
+
+
+def cmd_restore_owners(args):
+    if not args:
+        print("duo2-backup restore-owners LIST [ROOT]", file=sys.stderr)
+        return 2
+    root = args[1] if len(args) > 1 else bk.android_dir(load()["USER"])
+    n = bad = 0
+    with gzip.open(args[0], "rb") as f:
+        for rec in f.read().split(b"\0"):
+            if not rec:
+                continue
+            try:
+                uid, gid, mode, rel = rec.split(b" ", 3)
+                path = os.path.join(root.encode(), rel)
+                if b"/../" in b"/" + rel + b"/":
+                    raise ValueError("..")
+                os.lchown(path, int(uid), int(gid))
+                if not os.path.islink(path):
+                    os.chmod(path, int(mode, 8))
+                n += 1
+            except (ValueError, OSError):
+                bad += 1
+    say(
+        "owners and modes put back on %d files under %s (%d not found or not valid)"
+        % (n, root, bad)
+    )
+    return 0
+
+
+def main(argv):
+    if os.geteuid() != 0:
+        print("duo2-backup: run as root (sudo)", file=sys.stderr)
+        return 2
+    cmd, rest = (argv[0], argv[1:]) if argv else ("", [])
+    try:
+        if cmd == "init":
+            return cmd_init()
+        if cmd == "trust-host":
+            return cmd_trust_host()
+        if cmd == "run":
+            return cmd_run(rest)
+        if cmd == "list":
+            return cmd_list()
+        if cmd == "stage":
+            stage(load())
+            return 0
+        if cmd == "status":
+            return cmd_status()
+        if cmd == "restore-owners":
+            return cmd_restore_owners(rest)
+    except RuntimeError as e:
+        say(str(e))
+        return 1
+    print(__doc__.strip().split("\n\n")[1], file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

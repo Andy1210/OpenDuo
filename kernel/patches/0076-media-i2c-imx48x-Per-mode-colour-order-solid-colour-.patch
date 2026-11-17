@@ -1,0 +1,273 @@
+From 91ffd5cd2780061aaeb5cffe75002d777b27678b Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 01:27:44 +0100
+Subject: [PATCH 076/137] media: i2c: imx48x: Per-mode colour order, solid
+ colour, model name, IMX563 timing
+
+- Name the subdevice after the model ("imx481 3-0010"), which is how
+  libcamera finds a sensor's model.
+- Each mode reports its own colour filter order: on the IMX481 the
+  binned modes start with red, the full-resolution ones with green-blue
+  (measured with the solid colour test pattern, a red value lands at
+  the second row's first site there).
+- The solid colour test pattern's four values (CCS test data registers)
+  as the standard test pattern colour controls.
+- The IMX563's line length register counts in quarters of its video
+  timing clock: report the line length and the pixel rate in the units
+  that give its real line time (the vendor's 30 and 240 fps come out),
+  which also keeps the VFE clock the pixel rate asks for within range.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/media/i2c/imx48x.c | 110 ++++++++++++++++++++++++++++++-------
+ 1 file changed, 90 insertions(+), 20 deletions(-)
+
+diff --git a/drivers/media/i2c/imx48x.c b/drivers/media/i2c/imx48x.c
+index 7b7dc9c4b454..8385a0f393d9 100644
+--- a/drivers/media/i2c/imx48x.c
++++ b/drivers/media/i2c/imx48x.c
+@@ -53,10 +53,16 @@
+ #define IMX48X_REG_DIGITAL_GAIN		CCI_REG16(0x020e)
+ #define IMX48X_REG_FRAME_LENGTH		CCI_REG16(0x0340)
+ #define IMX48X_REG_TEST_PATTERN		CCI_REG16(0x0600)
++#define IMX48X_REG_TEST_DATA_RED	CCI_REG16(0x0602)
++#define IMX48X_REG_TEST_DATA_GREENR	CCI_REG16(0x0604)
++#define IMX48X_REG_TEST_DATA_BLUE	CCI_REG16(0x0606)
++#define IMX48X_REG_TEST_DATA_GREENB	CCI_REG16(0x0608)
++#define IMX48X_TEST_DATA_MAX		0x3ff
+ 
+ /* the standard registers a mode table is read for (8-bit halves) */
+ #define IMX48X_CSI_DATA_FORMAT		0x0112
+ #define IMX48X_CSI_LANE_MODE		0x0114
++#define IMX48X_BINNING_MODE		0x0900
+ #define IMX48X_VT_PIX_CLK_DIV		0x0301
+ #define IMX48X_VT_SYS_CLK_DIV		0x0303
+ #define IMX48X_PRE_PLL_CLK_DIV		0x0305
+@@ -109,34 +115,59 @@ struct imx48x_fw_reg {
+ 
+ struct imx48x_variant {
+ 	const char *name;
++	const char *devname;		/* the subdevice's name: the model */
+ 	u16 model;
+ 	bool vcustom;			/* the IMX563's second 1.8 V supply */
+ 	unsigned int settle_ms;		/* from XCLR released to the first access */
+ 	const char *firmware;		/* the tables' default file name */
++	/* the colour filter order of the output, by binning (off, on) */
++	u32 code_full;
++	u32 code_binned;
++	/*
++	 * Pixels per video timing clock cycle, and the units of the line
++	 * length register: the pixel rate and the line length the driver
++	 * reports give the sensor's real line time.
++	 */
++	unsigned int vt_pixels;
++	unsigned int llp_div;
+ };
+ 
+ static const struct imx48x_variant imx481_variant = {
+ 	.name = "IMX481",
++	.devname = "imx481",
+ 	.model = 0x0481,
+ 	.settle_ms = 9,
+ 	.firmware = "imx481.bin",
++	/* measured with the solid colour test pattern */
++	.code_full = MEDIA_BUS_FMT_SGBRG10_1X10,
++	.code_binned = MEDIA_BUS_FMT_SRGGB10_1X10,
++	.vt_pixels = 4,
++	.llp_div = 1,
+ };
+ 
+ static const struct imx48x_variant imx563_variant = {
+ 	.name = "IMX563",
++	.devname = "imx563",
+ 	.model = 0x0563,
+ 	.vcustom = true,
+ 	.settle_ms = 11,
+ 	.firmware = "imx563.bin",
++	/* not measured yet */
++	.code_full = MEDIA_BUS_FMT_SRGGB10_1X10,
++	.code_binned = MEDIA_BUS_FMT_SRGGB10_1X10,
++	/* its line length counts in quarters of a video timing clock */
++	.vt_pixels = 1,
++	.llp_div = 4,
+ };
+ 
+ struct imx48x_mode {
+ 	const struct imx48x_fw_reg *regs;
+ 	unsigned int num_regs;
++	u32 code;
+ 	u32 width;
+ 	u32 height;
+ 	struct v4l2_rect crop;
+-	u32 llp;			/* line length, pixel clocks */
++	u32 llp;			/* line length, pixel clocks (of the pixel rate) */
+ 	u32 fll;			/* the table's frame length: its fastest */
+ 	u32 lanes;
+ 	s64 link_freq;
+@@ -267,7 +298,8 @@ static int imx48x_table_reg16(const struct imx48x_fw_reg *regs, unsigned int n,
+ 	return hi << 8 | lo;
+ }
+ 
+-static int imx48x_parse_mode(struct imx48x_mode *mode)
++static int imx48x_parse_mode(const struct imx48x_variant *variant,
++			     struct imx48x_mode *mode)
+ {
+ 	const struct imx48x_fw_reg *r = mode->regs;
+ 	unsigned int n = mode->num_regs;
+@@ -293,6 +325,9 @@ static int imx48x_parse_mode(struct imx48x_mode *mode)
+ 	op_pre = imx48x_table_reg(r, n, IMX48X_OP_PRE_PLL_CLK_DIV);
+ 	op_mult = imx48x_table_reg16(r, n, IMX48X_OP_PLL_MULTIPLIER);
+ 
++	if (llp > 0)
++		llp /= variant->llp_div;
++
+ 	/* RAW10 only */
+ 	if (fmt != 0x0a0a || lanes < 0 || w <= 0 || h <= 0 || x0 < 0 || y0 < 0 ||
+ 	    x1 < x0 || y1 < y0 || llp <= w || fll <= h || vt_sys <= 0 ||
+@@ -303,6 +338,8 @@ static int imx48x_parse_mode(struct imx48x_mode *mode)
+ 	if (vt_pix <= 0)
+ 		vt_pix = 1;
+ 
++	mode->code = imx48x_table_reg(r, n, IMX48X_BINNING_MODE) > 0 ?
++		     variant->code_binned : variant->code_full;
+ 	mode->width = w;
+ 	mode->height = h;
+ 	mode->crop.left = x0;
+@@ -317,8 +354,7 @@ static int imx48x_parse_mode(struct imx48x_mode *mode)
+ 	rate = (u64)IMX48X_MCLK_RATE * op_mult;
+ 	mode->link_freq = div_u64(rate, op_pre * op_sys * 2);
+ 
+-	/* the video timing clock handles four pixels per cycle */
+-	rate = (u64)IMX48X_MCLK_RATE * mult * 4;
++	rate = (u64)IMX48X_MCLK_RATE * mult * variant->vt_pixels;
+ 	mode->pixel_rate = div_u64(rate, pre * vt_sys * vt_pix);
+ 
+ 	return 0;
+@@ -379,7 +415,7 @@ static int imx48x_load_tables(struct imx48x *sensor)
+ 			mode = &sensor->modes[sensor->num_modes];
+ 			mode->regs = (const void *)p;
+ 			mode->num_regs = n;
+-			if (imx48x_parse_mode(mode)) {
++			if (imx48x_parse_mode(sensor->variant, mode)) {
+ 				dev_warn(sensor->dev, "table %u: not a RAW10 mode, skipped\n", i);
+ 				break;
+ 			}
+@@ -498,6 +534,18 @@ static int imx48x_set_ctrl(struct v4l2_ctrl *ctrl)
+ 		cci_write(sensor->regmap, IMX48X_REG_TEST_PATTERN,
+ 			  imx48x_test_pattern_val[ctrl->val], &ret);
+ 		break;
++	case V4L2_CID_TEST_PATTERN_RED:
++		cci_write(sensor->regmap, IMX48X_REG_TEST_DATA_RED, ctrl->val, &ret);
++		break;
++	case V4L2_CID_TEST_PATTERN_GREENR:
++		cci_write(sensor->regmap, IMX48X_REG_TEST_DATA_GREENR, ctrl->val, &ret);
++		break;
++	case V4L2_CID_TEST_PATTERN_BLUE:
++		cci_write(sensor->regmap, IMX48X_REG_TEST_DATA_BLUE, ctrl->val, &ret);
++		break;
++	case V4L2_CID_TEST_PATTERN_GREENB:
++		cci_write(sensor->regmap, IMX48X_REG_TEST_DATA_GREENB, ctrl->val, &ret);
++		break;
+ 	default:
+ 		/* read-only: pixel rate, link frequency, horizontal blanking */
+ 		break;
+@@ -518,9 +566,10 @@ static int imx48x_init_controls(struct imx48x *sensor)
+ 	struct v4l2_ctrl_handler *hdl = &sensor->ctrls;
+ 	struct v4l2_fwnode_device_properties props;
+ 	u32 fll = imx48x_default_fll(mode);
++	unsigned int i;
+ 	int ret;
+ 
+-	v4l2_ctrl_handler_init(hdl, 10);
++	v4l2_ctrl_handler_init(hdl, 14);
+ 
+ 	sensor->pixel_rate = v4l2_ctrl_new_std(hdl, &imx48x_ctrl_ops,
+ 					       V4L2_CID_PIXEL_RATE,
+@@ -564,6 +613,11 @@ static int imx48x_init_controls(struct imx48x *sensor)
+ 				     ARRAY_SIZE(imx48x_test_pattern_menu) - 1,
+ 				     0, 0, imx48x_test_pattern_menu);
+ 
++	/* the solid colour pattern's value per colour filter site: white */
++	for (i = 0; i < 4; i++)
++		v4l2_ctrl_new_std(hdl, &imx48x_ctrl_ops, V4L2_CID_TEST_PATTERN_RED + i,
++				  0, IMX48X_TEST_DATA_MAX, 1, IMX48X_TEST_DATA_MAX);
++
+ 	ret = v4l2_fwnode_device_parse(sensor->dev, &props);
+ 	if (ret)
+ 		goto error;
+@@ -591,7 +645,7 @@ static int imx48x_init_controls(struct imx48x *sensor)
+ static void imx48x_fill_format(const struct imx48x_mode *mode,
+ 			       struct v4l2_mbus_framefmt *fmt)
+ {
+-	fmt->code = MEDIA_BUS_FMT_SRGGB10_1X10;
++	fmt->code = mode->code;
+ 	fmt->width = mode->width;
+ 	fmt->height = mode->height;
+ 	fmt->field = V4L2_FIELD_NONE;
+@@ -663,12 +717,23 @@ static int imx48x_enum_mbus_code(struct v4l2_subdev *sd,
+ 				 struct v4l2_subdev_state *state,
+ 				 struct v4l2_subdev_mbus_code_enum *code)
+ {
+-	if (code->index)
+-		return -EINVAL;
++	struct imx48x *sensor = to_imx48x(sd);
++	unsigned int i, j, n = 0;
+ 
+-	code->code = MEDIA_BUS_FMT_SRGGB10_1X10;
++	/* the distinct codes of the modes, in the modes' order */
++	for (i = 0; i < sensor->num_modes; i++) {
++		for (j = 0; j < i; j++)
++			if (sensor->modes[j].code == sensor->modes[i].code)
++				break;
++		if (j < i)
++			continue;
++		if (n++ == code->index) {
++			code->code = sensor->modes[i].code;
++			return 0;
++		}
++	}
+ 
+-	return 0;
++	return -EINVAL;
+ }
+ 
+ static int imx48x_enum_frame_size(struct v4l2_subdev *sd,
+@@ -676,17 +741,21 @@ static int imx48x_enum_frame_size(struct v4l2_subdev *sd,
+ 				  struct v4l2_subdev_frame_size_enum *fse)
+ {
+ 	struct imx48x *sensor = to_imx48x(sd);
++	unsigned int i, n = 0;
+ 
+-	if (fse->code != MEDIA_BUS_FMT_SRGGB10_1X10 ||
+-	    fse->index >= sensor->num_modes)
+-		return -EINVAL;
+-
+-	fse->min_width = sensor->modes[fse->index].width;
+-	fse->max_width = fse->min_width;
+-	fse->min_height = sensor->modes[fse->index].height;
+-	fse->max_height = fse->min_height;
++	for (i = 0; i < sensor->num_modes; i++) {
++		if (sensor->modes[i].code != fse->code)
++			continue;
++		if (n++ == fse->index) {
++			fse->min_width = sensor->modes[i].width;
++			fse->max_width = fse->min_width;
++			fse->min_height = sensor->modes[i].height;
++			fse->max_height = fse->min_height;
++			return 0;
++		}
++	}
+ 
+-	return 0;
++	return -EINVAL;
+ }
+ 
+ static int imx48x_set_pad_format(struct v4l2_subdev *sd,
+@@ -936,6 +1005,7 @@ static int imx48x_probe(struct i2c_client *client)
+ 	sensor->variant = of_device_get_match_data(dev);
+ 
+ 	v4l2_i2c_subdev_init(&sensor->sd, client, &imx48x_subdev_ops);
++	v4l2_i2c_subdev_set_name(&sensor->sd, client, sensor->variant->devname, NULL);
+ 	sensor->sd.internal_ops = &imx48x_internal_ops;
+ 
+ 	ret = imx48x_parse_endpoint(sensor);

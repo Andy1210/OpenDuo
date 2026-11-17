@@ -1,0 +1,161 @@
+From 52ad00ce8ed985b33b032af3653a9754e1cf0b39 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 20:39:11 +0100
+Subject: [PATCH 128/137] net: qrtr: Report request and indication wakeups as
+ wakeup sources of their own
+
+A wakeup-source endpoint (the modem's) wakes the system for two kinds of
+messages: a request of the remote to a local server (on the Surface Duo 2
+nearly always the modem reading or writing its EFS through the remote file
+system service) and an indication of a qrtr.wake_services service (an
+incoming call, an SMS). Both were reported on the channel device's own
+wakeup source, so userspace could not tell a wake that needs the user (a
+call) from one that rmtfs answers in a moment.
+
+Give such an endpoint two named wakeup sources, "<channel>:request" and
+"<channel>:indication", and report each kind on its own; the channel
+device's power/wakeup still decides whether either wakes. The SMD transport
+registers them for a wakeup-source remote; an endpoint without them reports
+on its device as before.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ net/qrtr/af_qrtr.c | 17 +++++++++++++----
+ net/qrtr/qrtr.h    |  6 ++++++
+ net/qrtr/smd.c     | 21 +++++++++++++++++++++
+ 3 files changed, 40 insertions(+), 4 deletions(-)
+
+diff --git a/net/qrtr/af_qrtr.c b/net/qrtr/af_qrtr.c
+index 1f6f2089e9c6..7f0c0758fb1b 100644
+--- a/net/qrtr/af_qrtr.c
++++ b/net/qrtr/af_qrtr.c
+@@ -476,9 +476,18 @@ MODULE_PARM_DESC(wake_requests,
+  * answer to (remote file system, TFTP). Which service a remote port is
+  * comes from the remote's NEW_SERVER and DEL_SERVER announcements.
+  */
+-static void qrtr_wakeup(struct qrtr_node *node, struct device *dev,
++static void qrtr_wake_event(struct device *dev, struct wakeup_source *ws)
++{
++	if (ws)
++		pm_wakeup_ws_event(ws, 0, true);
++	else
++		pm_wakeup_dev_event(dev, 0, true);
++}
++
++static void qrtr_wakeup(struct qrtr_node *node, struct qrtr_endpoint *ep,
+ 			const struct qrtr_cb *cb, const void *data, size_t size)
+ {
++	struct device *dev = ep->wakeup_dev;
+ 	const struct qrtr_ctrl_pkt *pkt = data;
+ 	unsigned long flags, key;
+ 	unsigned int service;
+@@ -516,7 +525,7 @@ static void qrtr_wakeup(struct qrtr_node *node, struct device *dev,
+ 	case QMI_REQUEST:
+ 		/* from one of the remote's clients to a local server */
+ 		if (qrtr_wake_requests && !entry)
+-			pm_wakeup_dev_event(dev, 0, true);
++			qrtr_wake_event(dev, ep->wake_request);
+ 		return;
+ 	case QMI_INDICATION:
+ 		if (!entry)
+@@ -524,7 +533,7 @@ static void qrtr_wakeup(struct qrtr_node *node, struct device *dev,
+ 		service = xa_to_value(entry);
+ 		for (i = 0; i < qrtr_wake_services_n; i++) {
+ 			if (qrtr_wake_services[i] == service) {
+-				pm_wakeup_dev_event(dev, 0, true);
++				qrtr_wake_event(dev, ep->wake_indication);
+ 				return;
+ 			}
+ 		}
+@@ -617,7 +626,7 @@ int qrtr_endpoint_post(struct qrtr_endpoint *ep, const void *data, size_t len)
+ 	qrtr_node_assign(node, cb->src_node);
+ 
+ 	if (ep->wakeup_dev)
+-		qrtr_wakeup(node, ep->wakeup_dev, cb, skb->data, size);
++		qrtr_wakeup(node, ep, cb, skb->data, size);
+ 
+ 	if (cb->type == QRTR_TYPE_NEW_SERVER) {
+ 		/* Remote node endpoint can bridge other distant nodes */
+diff --git a/net/qrtr/qrtr.h b/net/qrtr/qrtr.h
+index f72dd99c3f4a..3f5e16299924 100644
+--- a/net/qrtr/qrtr.h
++++ b/net/qrtr/qrtr.h
+@@ -6,6 +6,7 @@
+ 
+ struct device;
+ struct sk_buff;
++struct wakeup_source;
+ 
+ /* endpoint node id auto assignment */
+ #define QRTR_EP_NID_AUTO (-1)
+@@ -15,6 +16,9 @@ struct sk_buff;
+  * @xmit: Callback for outgoing packets
+  * @wakeup_dev: if set, selected messages from the remote (an incoming call)
+  *	are a wakeup event of this device; its power/wakeup setting decides
++ * @wake_request: optional, the wakeup source that reports the remote's
++ *	requests to local servers (instead of @wakeup_dev's own)
++ * @wake_indication: optional, the same for the indications that wake
+  *
+  * The socket buffer passed to the xmit function becomes owned by the endpoint
+  * driver.  As such, when the driver is done with the buffer, it should
+@@ -23,6 +27,8 @@ struct sk_buff;
+ struct qrtr_endpoint {
+ 	int (*xmit)(struct qrtr_endpoint *ep, struct sk_buff *skb);
+ 	struct device *wakeup_dev;
++	struct wakeup_source *wake_request;
++	struct wakeup_source *wake_indication;
+ 	/* private: not for endpoint use */
+ 	struct qrtr_node *node;
+ };
+diff --git a/net/qrtr/smd.c b/net/qrtr/smd.c
+index 9b39912e2340..62f39290f8da 100644
+--- a/net/qrtr/smd.c
++++ b/net/qrtr/smd.c
+@@ -58,6 +58,14 @@ static int qcom_smd_qrtr_send(struct qrtr_endpoint *ep, struct sk_buff *skb)
+ 	return rc;
+ }
+ 
++static void qcom_smd_qrtr_wake_release(struct qrtr_smd_dev *qdev)
++{
++	wakeup_source_unregister(qdev->ep.wake_request);
++	wakeup_source_unregister(qdev->ep.wake_indication);
++	qdev->ep.wake_request = NULL;
++	qdev->ep.wake_indication = NULL;
++}
++
+ static int qcom_smd_qrtr_probe(struct rpmsg_device *rpdev)
+ {
+ 	struct qrtr_smd_dev *qdev;
+@@ -77,12 +85,24 @@ static int qcom_smd_qrtr_probe(struct rpmsg_device *rpdev)
+ 	 */
+ 	if (rpdev->dev.parent &&
+ 	    of_property_read_bool(rpdev->dev.parent->of_node, "wakeup-source")) {
++		char name[64];
++
+ 		device_init_wakeup(&rpdev->dev, true);
+ 		qdev->ep.wakeup_dev = &rpdev->dev;
++		/*
++		 * Why it woke, for userspace: a request of the remote (its file
++		 * system, its firmware files) or one of the indications that wake
++		 * (a call, an SMS). Without them, the channel's own source counts.
++		 */
++		snprintf(name, sizeof(name), "%s:request", dev_name(&rpdev->dev));
++		qdev->ep.wake_request = wakeup_source_register(&rpdev->dev, name);
++		snprintf(name, sizeof(name), "%s:indication", dev_name(&rpdev->dev));
++		qdev->ep.wake_indication = wakeup_source_register(&rpdev->dev, name);
+ 	}
+ 
+ 	rc = qrtr_endpoint_register(&qdev->ep, QRTR_EP_NID_AUTO);
+ 	if (rc) {
++		qcom_smd_qrtr_wake_release(qdev);
+ 		device_init_wakeup(&rpdev->dev, false);
+ 		return rc;
+ 	}
+@@ -99,6 +119,7 @@ static void qcom_smd_qrtr_remove(struct rpmsg_device *rpdev)
+ 	struct qrtr_smd_dev *qdev = dev_get_drvdata(&rpdev->dev);
+ 
+ 	qrtr_endpoint_unregister(&qdev->ep);
++	qcom_smd_qrtr_wake_release(qdev);
+ 	device_init_wakeup(&rpdev->dev, false);
+ 
+ 	dev_set_drvdata(&rpdev->dev, NULL);

@@ -1,0 +1,104 @@
+From 91626d5635db3b1c896ca58500dc57b6e7b5dde9 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 08:49:03 +0100
+Subject: [PATCH 7/8] arm64: dts: qcom: sm8350: Vote DDR bandwidth for the GPU
+
+The SM8350 GPU node has no interconnect path and its OPPs carry no
+bandwidth, and the A660 GMU gets a single "off" level in its HFI
+bandwidth table: nothing votes for the GPU's memory traffic. While the
+interconnect providers wait for sync_state everything runs at the
+maximum, so this is invisible on a board whose sync_state never
+completes; once it does (fw_devlink.sync_state=timeout), the GPU path
+is left with the keepalive minimum of MC0/SH0 plus whatever the
+display votes.
+
+Add the gfx-mem path and a peak bandwidth per OPP, as on SC8280XP and
+SM8550. The values are the default DDR level of each power level in
+the downstream Lahaina GPU tables (qcom,bus-freq-ddr8 into
+qcom,bus-table-ddr8, LPDDR5): 840-738 MHz the top level, 676 MHz the
+next one, 608-443 MHz the middle, 379 and 315 MHz the low ones.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm64/boot/dts/qcom/sm8350.dtsi | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350.dtsi b/arch/arm64/boot/dts/qcom/sm8350.dtsi
+index 7d4c13f7a..ad7b5e462 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8350.dtsi
+@@ -2268,6 +2268,9 @@ gpu: gpu@3d00000 {
+ 
+ 			iommus = <&adreno_smmu 0 0x400>, <&adreno_smmu 1 0x400>;
+ 
++			interconnects = <&gem_noc MASTER_GFX3D 0 &mc_virt SLAVE_EBI1 0>;
++			interconnect-names = "gfx-mem";
++
+ 			operating-points-v2 = <&gpu_opp_table>;
+ 
+ 			qcom,gmu = <&gmu>;
+@@ -2286,51 +2289,61 @@ gpu_opp_table: opp-table {
+ 				opp-840000000 {
+ 					opp-hz = /bits/ 64 <840000000>;
+ 					opp-level = <RPMH_REGULATOR_LEVEL_TURBO_L1>;
++					opp-peak-kBps = <12484375>;
+ 				};
+ 
+ 				opp-778000000 {
+ 					opp-hz = /bits/ 64 <778000000>;
+ 					opp-level = <RPMH_REGULATOR_LEVEL_TURBO>;
++					opp-peak-kBps = <12484375>;
+ 				};
+ 
+ 				opp-738000000 {
+ 					opp-hz = /bits/ 64 <738000000>;
+ 					opp-level = <RPMH_REGULATOR_LEVEL_NOM_L1>;
++					opp-peak-kBps = <12484375>;
+ 				};
+ 
+ 				opp-676000000 {
+ 					opp-hz = /bits/ 64 <676000000>;
+ 					opp-level = <RPMH_REGULATOR_LEVEL_NOM>;
++					opp-peak-kBps = <10687500>;
+ 				};
+ 
+ 				opp-608000000 {
+ 					opp-hz = /bits/ 64 <608000000>;
+ 					opp-level = <RPMH_REGULATOR_LEVEL_SVS_L2>;
++					opp-peak-kBps = <6074218>;
+ 				};
+ 
+ 				opp-540000000 {
+ 					opp-hz = /bits/ 64 <540000000>;
+ 					opp-level = <RPMH_REGULATOR_LEVEL_SVS_L1>;
++					opp-peak-kBps = <6074218>;
+ 				};
+ 
+ 				opp-491000000 {
+ 					opp-hz = /bits/ 64 <491000000>;
+ 					opp-level = <RPMH_REGULATOR_LEVEL_SVS_L0>;
++					opp-peak-kBps = <6074218>;
+ 				};
+ 
+ 				opp-443000000 {
+ 					opp-hz = /bits/ 64 <443000000>;
+ 					opp-level = <RPMH_REGULATOR_LEVEL_SVS>;
++					opp-peak-kBps = <6074218>;
+ 				};
+ 
+ 				opp-379000000 {
+ 					opp-hz = /bits/ 64 <379000000>;
+ 					opp-level = <80 /* RPMH_REGULATOR_LEVEL_LOW_SVS_L1 */>;
++					opp-peak-kBps = <3972656>;
+ 				};
+ 
+ 				opp-315000000 {
+ 					opp-hz = /bits/ 64 <315000000>;
+ 					opp-level = <RPMH_REGULATOR_LEVEL_LOW_SVS>;
++					opp-peak-kBps = <1761718>;
+ 				};
+ 			};
+ 		};
+-- 
+2.43.0
+

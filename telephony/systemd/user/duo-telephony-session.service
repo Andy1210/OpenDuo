@@ -1,0 +1,8 @@
+# duo2-os: once duo-wc's session has announced its display, start Calls and
+# Chatty as background services (telephony/session-start).
+[Unit]
+Description=Session start for telephony (Calls, Chatty in the background)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/duo2-telephony/session-start

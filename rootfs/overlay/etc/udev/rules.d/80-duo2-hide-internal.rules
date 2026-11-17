@@ -1,0 +1,6 @@
+# The phone's own UFS storage (7 LUNs, ~80 partitions: modem, persist, sfpd,
+# the stock A/B slots, the ESP, the root file system...) is not for the user's
+# file manager: udisks ignores every block device behind the UFS controller.
+# The user's files are in the home directory; USB drives (ID_BUS=usb) and
+# other removable media still show.
+SUBSYSTEM=="block", ENV{ID_PATH}=="platform-1d84000.ufshc*", ENV{UDISKS_IGNORE}="1"

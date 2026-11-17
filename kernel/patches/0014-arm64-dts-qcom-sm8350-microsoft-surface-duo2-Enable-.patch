@@ -1,0 +1,163 @@
+From edac75d49d1cea4307640b9619ad746c98969111 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Fri, 6 Nov 2026 14:22:31 +0100
+Subject: [PATCH 014/137] arm64: dts: qcom: sm8350-microsoft-surface-duo2:
+ Enable the displays
+
+Describe the two panels, one per DSI link: the left one on DSI0 (reset
+on gpio50, TE on gpio82), the right one on DSI1 (reset on gpio51, TE on
+gpio83, the secondary vsync input). They share their supplies, among
+them L1D of the PM8350B, which is added here.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../qcom/sm8350-microsoft-surface-duo2.dts    | 122 ++++++++++++++++++
+ 1 file changed, 122 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+index ec2987dd232b..f2b7c3e4bcc4 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+@@ -452,6 +452,19 @@ vreg_l7e_2p8: ldo7 {
+ 			regulator-always-on;
+ 		};
+ 	};
++
++	regulators-3 {
++		compatible = "qcom,pm8350b-rpmh-regulators";
++		qcom,pmic-id = "d";
++
++		/* DDIC supply of both display panels */
++		vreg_l1d_1p2: ldo1 {
++			regulator-name = "vreg_l1d_1p2";
++			regulator-min-microvolt = <1216000>;
++			regulator-max-microvolt = <1216000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++	};
+ };
+ 
+ &cdsp {
+@@ -471,6 +484,88 @@ &ipa {
+ 	status = "okay";
+ };
+ 
++/*
++ * Two 1344x1892 AMOLED panels, one per DSI link, command mode with DSC: left
++ * on DSI0 (reset gpio50, TE gpio82), right on DSI1 (reset gpio51, TE gpio83,
++ * the secondary vsync input). Supplies as in the vendor DT.
++ */
++&mdss {
++	status = "okay";
++};
++
++&mdss_dsi0 {
++	vdda-supply = <&vreg_l6b_1p2>;
++	status = "okay";
++
++	panel@0 {
++		compatible = "microsoft,elgin-panel";
++		reg = <0>;
++
++		reset-gpios = <&tlmm 50 GPIO_ACTIVE_LOW>;
++
++		vdda-supply = <&vreg_l2b_3p07>;
++		vddio-supply = <&vreg_l12c_1p8>;
++		vdd-supply = <&vreg_l13c_3p0>;
++		ddic-supply = <&vreg_l1d_1p2>;
++
++		pinctrl-0 = <&disp0_reset_n>, <&disp0_te>;
++		pinctrl-names = "default";
++
++		port {
++			panel0_in: endpoint {
++				remote-endpoint = <&mdss_dsi0_out>;
++			};
++		};
++	};
++};
++
++&mdss_dsi0_out {
++	remote-endpoint = <&panel0_in>;
++	data-lanes = <0 1 2 3>;
++};
++
++&mdss_dsi0_phy {
++	vdds-supply = <&vreg_l5b_0p88>;
++	status = "okay";
++};
++
++&mdss_dsi1 {
++	vdda-supply = <&vreg_l6b_1p2>;
++	status = "okay";
++
++	panel@0 {
++		compatible = "microsoft,elgin-panel";
++		reg = <0>;
++
++		reset-gpios = <&tlmm 51 GPIO_ACTIVE_LOW>;
++
++		vdda-supply = <&vreg_l2b_3p07>;
++		vddio-supply = <&vreg_l12c_1p8>;
++		vdd-supply = <&vreg_l13c_3p0>;
++		ddic-supply = <&vreg_l1d_1p2>;
++
++		pinctrl-0 = <&disp1_reset_n>, <&disp1_te>;
++		pinctrl-names = "default";
++
++		port {
++			panel1_in: endpoint {
++				remote-endpoint = <&mdss_dsi1_out>;
++			};
++		};
++	};
++};
++
++&mdss_dsi1_out {
++	remote-endpoint = <&panel1_in>;
++	data-lanes = <0 1 2 3>;
++	qcom,te-source = "mdp_vsync_s";
++};
++
++&mdss_dsi1_phy {
++	vdds-supply = <&vreg_l5b_0p88>;
++	status = "okay";
++};
++
+ &mpss {
+ 	status = "okay";
+ 	firmware-name = "qcom/sm8350/microsoft/modem.mbn";
+@@ -642,6 +737,33 @@ wcn_sw_ctrl: wcn-sw-ctrl-state {
+ 		drive-strength = <2>;
+ 		bias-pull-down;
+ 	};
++	disp0_reset_n: disp0-reset-n-state {
++		pins = "gpio50";
++		function = "gpio";
++		drive-strength = <8>;
++		bias-disable;
++	};
++
++	disp0_te: disp0-te-state {
++		pins = "gpio82";
++		function = "mdp_vsync";
++		drive-strength = <2>;
++		bias-pull-down;
++	};
++
++	disp1_reset_n: disp1-reset-n-state {
++		pins = "gpio51";
++		function = "gpio";
++		drive-strength = <8>;
++		bias-disable;
++	};
++
++	disp1_te: disp1-te-state {
++		pins = "gpio83";
++		function = "mdp_vsync";
++		drive-strength = <2>;
++		bias-pull-down;
++	};
+ };
+ 
+ &uart2 {

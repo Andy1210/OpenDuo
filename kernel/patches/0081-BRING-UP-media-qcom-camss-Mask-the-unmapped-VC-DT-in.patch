@@ -1,0 +1,33 @@
+From 2ead68ff4029e0dda809ab2404c0238cabff5b0d Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 01:46:17 +0100
+Subject: [PATCH 081/137] BRING-UP: media: qcom: camss: Mask the unmapped VC/DT
+ interrupt in the diagnostics
+
+Sensors send other data types (embedded data) on every line: with the
+unmapped VC/DT error unmasked that was an interrupt per line.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/media/platform/qcom/camss/camss-csid-gen2.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/camss/camss-csid-gen2.c b/drivers/media/platform/qcom/camss/camss-csid-gen2.c
+index 6d98b7934664..f279a55ca710 100644
+--- a/drivers/media/platform/qcom/camss/camss-csid-gen2.c
++++ b/drivers/media/platform/qcom/camss/camss-csid-gen2.c
+@@ -176,8 +176,12 @@
+ #define CSID_RDI_FORMAT_MEASURE1(rdi)	((csid_is_lite(csid) ? 0x27c : 0x37c) + 0x100 * (rdi))
+ #define CSID_RDI_BYTE_CNTR_PING(rdi)	((csid_is_lite(csid) ? 0x2e0 : 0x3e0) + 0x100 * (rdi))
+ #define CSID_RDI_BYTE_CNTR_PONG(rdi)	((csid_is_lite(csid) ? 0x2e4 : 0x3e4) + 0x100 * (rdi))
+-/* receiver errors, and the start / end of frame and overflow of an RDI */
+-#define CSID_DBG_RX_IRQ_MASK		GENMASK(26, 11)
++/*
++ * receiver errors (not the unmapped VC/DT one: sensors send other data
++ * types, such as embedded data, on every line), and the start / end of
++ * frame and overflow of an RDI
++ */
++#define CSID_DBG_RX_IRQ_MASK		(GENMASK(26, 11) & ~BIT(22))
+ #define CSID_DBG_RDI_IRQ_MASK		(BIT(2) | BIT(9) | BIT(12) | GENMASK(15, 13))
+ 
+ static void __csid_configure_rx(struct csid_device *csid,

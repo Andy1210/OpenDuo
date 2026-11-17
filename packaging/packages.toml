@@ -1,0 +1,295 @@
+# OpenDuo's Debian packages (packaging/build-packages.sh, docs/UPDATES.md).
+#
+# Every component package carries its component as staged by
+# scripts/lib/stage-components.sh (the same staging as the image's) in
+# /usr/lib/openduo/components/<component>/, and its postinst runs that
+# component's own install-files.sh: one list of files for the image, the
+# network installers and the packages. What a component installs, enables or
+# migrates is decided there, never here.
+#
+# Fields of a [package.NAME]:
+#   component    the staged component (stage-components.sh)
+#   arch         all, or arm64 when the component carries a built binary
+#   device       true: only for the Surface Duo 2 (the name must end in
+#                -surface-duo2, so a Duo 1 port can add its own)
+#   user         true: install-files.sh takes the GUI user as its argument
+#   summary      the package's one-line description
+#   description  the long one
+#   depends      Debian packages (what the component's network installer
+#                installs, and what install-files.sh itself runs)
+#   recommends   likewise, but removable
+#   enable       system units enabled on the FIRST install only (what the
+#                image's Dockerfile enables beside install-files.sh; an
+#                owner's later "disable" survives upgrades)
+#   restart      units restarted on an upgrade when they run (try-restart):
+#                the daemons whose restart nobody notices
+#   reboot       true: the new version takes effect with the next start (the
+#                compositor, the shell, ...): the upgrade asks for a restart
+#                (/run/reboot-required) instead of breaking the session
+#   env          variables for install-files.sh
+#   check        what packaging/tests/container-test.sh finds after an install:
+#                a path, or enabled:UNIT / enabled-global:UNIT (a user unit)
+#   license      GPL-3.0-or-later unless said (touch/: Apache-2.0; duo-wc, nibfair: MIT)
+
+[package.openduo-duo-wc]
+component = "duo-wc"
+license = "MIT"
+arch = "arm64"
+user = true
+summary = "OpenDuo's dual-screen Wayland compositor (duo-wc)"
+description = """duo-wc drives both panels: windows span or snap across the hinge, laptop
+and desktop layouts, rotation, screen casting, XWayland. Its session starts
+the shell and the on-screen keyboard."""
+depends = ["foot", "seatd", "libseat1", "libdisplay-info2", "xwayland", "libinput10", "libgbm1",
+           "libegl1", "libgles2", "libwayland-server0", "libxkbcommon0", "systemd"]
+enable = ["seatd.service", "duo-wc.service"]
+reboot = true
+check = ["/usr/local/bin/duo-wc", "/usr/local/bin/duoctl", "/usr/local/lib/duo-wc/session",
+         "/usr/local/lib/duo-wc/xwayland/Xwayland", "/etc/duo-wc/duo-wc.conf",
+         "/etc/systemd/system/duo-wc.service", "enabled:duo-wc.service", "enabled:seatd.service"]
+
+[package.openduo-duo-shell]
+component = "duo-shell"
+arch = "all"
+user = true
+summary = "OpenDuo's shell: status bars, app grid, quick menu, lock screen"
+description = """The touch-first home screen, the app drawer, notifications, the dock, the
+lock screen with its PIN store, and the shell's root helper."""
+depends = ["python3", "sudo", "python3-gi", "gir1.2-gtk-4.0", "gir1.2-gtk4layershell-1.0",
+           "libgtk4-layer-shell0", "squeekboard", "phosh-osk-stub", "libpresage-data", "hunspell-hu",
+           "dconf-gsettings-backend", "dconf-cli", "adwaita-icon-theme", "dbus-daemon", "at-spi2-core",
+           "libglib2.0-bin", "librsvg2-common", "libnotify-bin", "gir1.2-graphene-1.0",
+           "xdg-desktop-portal", "xdg-desktop-portal-gtk", "python3-pywayland", "python3-cffi-backend",
+           "wayland-protocols", "python3-cairo", "python3-gi-cairo", "gir1.2-adw-1",
+           "gir1.2-gweather-4.0", "gir1.2-pango-1.0", "fonts-cantarell", "gir1.2-modemmanager-1.0",
+           "gir1.2-gdkpixbuf-2.0", "libjxl-gdk-pixbuf", "gnome-backgrounds"]
+reboot = true
+check = ["/usr/local/lib/duo-shell/duo-shell", "/usr/local/lib/duo-shell/protocols",
+         "/usr/local/bin/duo-lock", "/etc/sudoers.d/duo-shell",
+         "/etc/dbus-1/system.d/org.duo2os.Shell.conf",
+         "/usr/share/glib-2.0/schemas/90_duo2-os.gschema.override",
+         "enabled-global:duo-wallpaper-bing.timer"]
+
+[package.openduo-duo-apps]
+component = "duo-apps"
+arch = "all"
+user = true
+summary = "OpenDuo's app integration (Clocks, Calculator, Software, Qt apps)"
+description = """How the preinstalled apps fit the phone: the alarm services, Calculator
+without the keyboard over its keypad, GNOME Software through PackageKit with
+the user's confirmation, Flathub for the user, dark Breeze for Qt apps."""
+depends = ["libglib2.0-bin", "polkitd"]
+recommends = ["fonts-cantarell", "fonts-noto-color-emoji", "appstream", "apt-config-icons",
+              "apt-config-icons-hidpi", "gnome-clocks", "gnome-calculator", "gnome-calendar",
+              "evolution-data-server", "gnome-weather", "nautilus", "portfolio-filemanager", "loupe",
+              "papers", "amberol", "celluloid", "mpv", "ffmpeg", "gstreamer1.0-libav",
+              "gstreamer1.0-plugins-bad", "gstreamer1.0-pipewire", "libgtk-4-media-gstreamer",
+              "sound-theme-freedesktop", "angelfish", "qt6-wayland", "libqt6sql6-sqlite",
+              "qml6-module-org-kde-desktop", "plasma-integration", "kde-style-breeze", "gnome-software",
+              "gnome-software-plugin-deb", "gnome-software-plugin-flatpak", "flatpak", "packagekit",
+              "packagekit-tools"]
+check = ["/usr/local/lib/duo-apps/session-start", "/etc/polkit-1/rules.d/50-duo2-packagekit.rules",
+         "/etc/environment.d/60-duo2-qt.conf", "enabled-global:duo-apps-session.path"]
+
+[package.openduo-duo-settings]
+component = "duo-settings"
+arch = "all"
+user = true
+summary = "Duo Settings, OpenDuo's settings app"
+description = """Network, display, appearance, battery, sound, mobile and eSIM, hotspot,
+Android apps, pen, security, updates, developer options, About; its root
+helper (exact subcommands) and the panels' refresh rate at boot."""
+depends = ["python3", "sudo", "python3-gi", "gir1.2-gtk-4.0", "gir1.2-adw-1", "gtk-update-icon-cache"]
+check = ["/usr/local/lib/duo-settings/duo-settings", "/usr/local/bin/duo-settings",
+         "/etc/sudoers.d/duo-settings",
+         "/usr/local/share/applications/org.duo2os.Settings.desktop",
+         "enabled:duo-panel-refresh.service"]
+
+[package.openduo-duo-screencast]
+component = "duo-screencast"
+arch = "all"
+summary = "OpenDuo's screen sharing (the portal backend's launcher, chooser and gate)"
+description = """Screen casting and screenshots through xdg-desktop-portal-wlr, with the
+compositor's own chooser and the screenshot gate."""
+depends = ["xdg-desktop-portal-wlr", "grim", "python3"]
+# (duo-screencast-test is a developer tool: installed only in developer mode)
+check = ["/usr/local/lib/duo-screencast/portal", "/usr/local/lib/duo-screencast/bin/grim",
+         "/etc/systemd/user/xdg-desktop-portal-wlr.service"]
+
+[package.openduo-battery-surface-duo2]
+component = "battery"
+arch = "all"
+device = true
+user = true
+summary = "OpenDuo's battery usage statistics for the Surface Duo 2"
+description = """The battery usage collector behind Settings > Battery, its sleep hook and
+the group that may read the history (it stays on the phone)."""
+depends = ["python3", "systemd"]
+restart = ["duo2-battery-stats.service"]
+check = ["/usr/local/lib/duo2-battery/duo2-battery-stats", "enabled:duo2-battery-stats.service"]
+
+[package.openduo-power-surface-duo2]
+component = "power"
+arch = "all"
+device = true
+user = true
+summary = "OpenDuo's power pieces for the Surface Duo 2"
+description = """Automatic sleep (held until the owner switches it on), the charge hold,
+the pen charger, the wall clock from the PMIC RTC, the torch off before a
+suspend, the USB gadget's sleep hook, the try-kernel WiFi watchdog."""
+depends = ["python3", "sudo", "systemd"]
+restart = ["duo2-autosleep.service"]
+check = ["/usr/local/sbin/duo2-autosleep", "/etc/duo2/autosleep.conf",
+         "/etc/sudoers.d/duo2-autosleep", "enabled:duo2-autosleep.service",
+         "enabled:duo2-rtc-time.service"]
+
+[package.openduo-telephony-surface-duo2]
+component = "telephony"
+arch = "arm64"
+device = true
+user = true
+summary = "OpenDuo's telephony for the Surface Duo 2: modem, mobile data, SMS, eSIM"
+description = """The modem's low-power hook, the SIM slots, mobile data, call audio, Calls
+and Chatty in the background, the eSIM (lpac), the GNSS assistance helper."""
+depends = ["python3", "sudo", "modemmanager", "gir1.2-modemmanager-1.0", "gnome-calls", "callaudiod",
+           "feedbackd", "gnome-contacts", "chatty", "mmsd-tng", "mobile-broadband-provider-info",
+           "libcurl4t64", "libpcsclite1"]
+restart = ["duo2-wwan.service"]
+check = ["/usr/local/sbin/duo2-wwan", "/usr/local/bin/lpac", "/etc/duo2/wwan.conf",
+         "enabled:duo2-wwan.service", "enabled:ModemManager.service"]
+
+[package.openduo-hotspot]
+component = "hotspot"
+arch = "all"
+user = true
+summary = "OpenDuo's mobile hotspot and USB tethering"
+description = """Shares mobile data over WiFi (hostapd, run only while sharing) or USB;
+the WiFi country from the mobile network."""
+depends = ["python3", "sudo", "hostapd"]
+check = ["/usr/local/sbin/duo2-hotspot", "/etc/duo2/hotspot.conf", "/etc/sudoers.d/duo2-hotspot"]
+
+[package.openduo-sensors-surface-duo2]
+component = "sensors"
+arch = "arm64"
+device = true
+summary = "OpenDuo's sensor stack for the Surface Duo 2 (the free half)"
+description = """hexagonrpcd (patched), libssc and iio-sensor-proxy 3.9 for the sensor DSP,
+the posture daemon (duo-posed) and automatic brightness (duo-brightness).
+The DSP's own libraries come from the owner's phone (a post-install step)."""
+depends = ["python3", "libprotobuf-c1", "polkitd", "libglib2.0-0t64", "libgudev-1.0-0", "systemd"]
+enable = ["hexagonrpcd.service", "duo-posed.service", "duo-brightness.service"]
+restart = ["duo-posed.service", "duo-brightness.service"]
+check = ["/usr/local/bin/hexagonrpcd", "/usr/local/bin/duo-posed", "/usr/local/bin/duo-brightness",
+         "/etc/systemd/system/duo-posed.service", "enabled:duo-posed.service",
+         "enabled:duo-brightness.service"]
+
+[package.openduo-touch-surface-duo2]
+component = "touch"
+arch = "arm64"
+device = true
+license = "Apache-2.0"
+summary = "OpenDuo's touch and pen pieces for the Surface Duo 2 (not the runtime)"
+description = """duo2-touchd (built from source with the Android NDK), its unit, the udev
+rule and the sleep hook, the calibration, the pen's Bluetooth daemon and the
+pen tools. The touch runtime it runs in (Microsoft's heat processor and the
+stock libraries) may not be redistributed: every owner builds it from their
+own phone (scripts/build-touch-runtime.sh), a post-install step."""
+depends = ["python3", "systemd", "udev", "bluez"]
+enable = ["duo2-touchd.service", "duo2-pend.service"]
+restart = ["duo2-pend.service"]
+check = ["/etc/systemd/system/duo2-touchd.service", "/usr/local/sbin/duo2-pend",
+         "/usr/local/lib/duo2-touch-tools/pen-fw.py", "/usr/local/lib/duo2-touch/duo2-touchd",
+         "/etc/duo2/touch-calibration", "enabled:duo2-touchd.service", "enabled:duo2-pend.service"]
+
+[package.openduo-android]
+component = "android"
+arch = "all"
+user = true
+summary = "OpenDuo's Android apps integration (Waydroid)"
+description = """The hardening of Waydroid (patches, LXC include, AppArmor, seccomp, the
+firewall), the on-demand session, the idle stop, the weekly image update and
+the location bridge. No Android image: waydroid init after installation."""
+depends = ["python3", "sudo", "lxc", "dnsmasq-base", "nftables", "apparmor"]
+recommends = ["waydroid"]
+check = ["/usr/local/sbin/duo2-waydroid-patch", "/etc/duo2/waydroid/lxc.conf",
+         "/etc/apt/apt.conf.d/80duo2-waydroid", "enabled:duo2-waydroid-reaper.timer"]
+
+[package.openduo-maint]
+component = "maint"
+arch = "all"
+user = true
+summary = "OpenDuo's updates, snapshots, backups and kernel boot entries"
+description = """duo2-update (Debian updates with a look first and a way back),
+duo2-snapshot, duo2-backup, duo2-boot (the packaged kernels' boot entries,
+health checks and blessing) and duo2-updates (Settings > Updates), the apt pin
+against Debian kernel and firmware packages."""
+depends = ["python3", "sudo", "rsync", "dpkg-repack", "systemd", "util-linux"]
+check = ["/usr/local/sbin/duo2-update", "/usr/local/sbin/duo2-boot",
+         "/usr/local/sbin/duo2-updates", "/etc/apt/preferences.d/duo2-never",
+         "/etc/sudoers.d/duo2-updates", "/etc/duo2/boot.conf", "enabled:duo2-boot-health.service",
+         "enabled:duo2-boot-bless.service", "enabled:duo2-updates-check.timer",
+         "enabled:duo2-updates-auto.timer"]
+
+[package.openduo-devmode]
+component = "devmode"
+arch = "all"
+user = true
+summary = "OpenDuo's developer mode (Settings > Developer)"
+description = """ssh (key login only), the keys that may log in, the USB network, the
+developer tools (installed only while developer mode is on) and the bug
+report with identifiers masked."""
+depends = ["python3", "sudo", "openssh-server"]
+# a phone that gets this package first is not switched to developer mode
+# (install-files.sh's default without DEVELOPER_MODE is a network install's)
+env = { DEVELOPER_MODE = "off" }
+check = ["/usr/local/sbin/duo-devmode", "/etc/duo-devmode.conf", "/etc/sudoers.d/duo-devmode",
+         "enabled:duo-devmode-sync.service"]
+
+[package.openduo-firewall]
+component = "firewall"
+arch = "all"
+summary = "OpenDuo's firewall (closed by default)"
+description = """A default-deny nftables firewall and resolved without LLMNR or mDNS."""
+depends = ["nftables", "systemd-resolved"]
+check = ["/etc/duo-firewall/firewall.nft", "/etc/systemd/system/duo-firewall.service",
+         "enabled:duo-firewall.service"]
+
+[package.openduo-homecrypt]
+component = "homecrypt"
+arch = "all"
+summary = "OpenDuo's optional encryption of the user's data (fscrypt, tied to the PIN)"
+description = """Settings > Lock screen > Encrypt my data: fscrypt for the home, direct boot
+for the alarms and calls, a recovery key. Nothing is encrypted until the
+user asks."""
+depends = ["python3", "systemd", "e2fsprogs"]
+check = ["/usr/local/sbin/duo2-home-crypt", "/var/lib/duo2-lock/home.state",
+         "enabled:duo2-home-boot.service"]
+
+[package.openduo-plymouth-theme-surface-duo2]
+component = "plymouth"
+arch = "all"
+device = true
+summary = "OpenDuo's boot splash on both panels of the Surface Duo 2"
+description = """The Plymouth theme at the panels' own scale, the start once the display
+driver is there, and the hand-over to the compositor without a black frame."""
+depends = ["plymouth", "plymouth-label", "python3"]
+check = ["/usr/share/plymouth/themes/duo2/duo2.plymouth", "/etc/plymouth/plymouthd.conf",
+         "enabled:duo2-plymouth-quit.service"]
+
+[package.openduo-nibfair]
+component = "nibfair"
+license = "MIT"
+arch = "arm64"
+summary = "Nibfair, a pen-aware game for OpenDuo"
+description = """A game played with the Surface Pen: pressure and tilt."""
+depends = ["libsdl3-0"]
+check = ["/usr/local/bin/nibfair", "/usr/local/share/applications/org.duo2os.Nibfair.desktop"]
+
+# The packages that are not components (packaging/openduo_pkg/build.py makes them):
+#   openduo-release          the OpenDuo version and build stamp: /etc/duo2-release,
+#                            /etc/os-release, the changes (CHANGELOG.md) for
+#                            Settings > Updates in its OpenDuo-Changes field
+#   openduo-archive-keyring  the repository's signing key, its sources and pins
+#   openduo-kernel-surface-duo2-<release>   a kernel build (Image, DTBs, modules),
+#                            and openduo-kernel-surface-duo2 (always the newest)
+#   openduo-surface-duo2     the whole system for the Surface Duo 2: every package above

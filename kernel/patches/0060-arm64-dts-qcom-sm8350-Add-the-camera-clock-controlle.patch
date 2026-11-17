@@ -1,0 +1,234 @@
+From afb63c6b72907e963feeb716effdd3f4cc49d05d Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 06:04:06 +0100
+Subject: [PATCH 060/137] arm64: dts: qcom: sm8350: Add the camera clock
+ controller and the CCIs
+
+Add camcc (0xad00000, MMCX) and the two camera control interfaces
+(CCI v2 as on SM8250: 0xac4f000, GIC SPI 460, and 0xac50000, GIC SPI
+271), each with its two buses, and the pin states of the vendor device
+tree: MCLK0..5 on gpio100..105, CCI0 on gpio107..110, CCI1 on
+gpio111..114 (pulled up, pulled down in sleep). Add qcom,sm8350-cci to
+the binding.
+
+Depends on "clk: qcom: Add the SM8350 camera clock controller".
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../devicetree/bindings/i2c/qcom,i2c-cci.yaml |   2 +
+ arch/arm64/boot/dts/qcom/sm8350.dtsi          | 168 ++++++++++++++++++
+ 2 files changed, 170 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/i2c/qcom,i2c-cci.yaml b/Documentation/devicetree/bindings/i2c/qcom,i2c-cci.yaml
+index 1e8def25ec0e..63083e0bdd9c 100644
+--- a/Documentation/devicetree/bindings/i2c/qcom,i2c-cci.yaml
++++ b/Documentation/devicetree/bindings/i2c/qcom,i2c-cci.yaml
+@@ -40,6 +40,7 @@ properties:
+               - qcom,sm6150-cci
+               - qcom,sm6350-cci
+               - qcom,sm8250-cci
++              - qcom,sm8350-cci
+               - qcom,sm8450-cci
+               - qcom,sm8550-cci
+               - qcom,sm8650-cci
+@@ -219,6 +220,7 @@ allOf:
+             enum:
+               - qcom,sc7280-cci
+               - qcom,sm8250-cci
++              - qcom,sm8350-cci
+               - qcom,sm8450-cci
+     then:
+       properties:
+diff --git a/arch/arm64/boot/dts/qcom/sm8350.dtsi b/arch/arm64/boot/dts/qcom/sm8350.dtsi
+index b4ebe535d728..bb9f063bd75e 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8350.dtsi
+@@ -11,6 +11,7 @@
+ #include <dt-bindings/clock/qcom,gpucc-sm8350.h>
+ #include <dt-bindings/clock/qcom,rpmh.h>
+ #include <dt-bindings/clock/qcom,sc8280xp-lpasscc.h>
++#include <dt-bindings/clock/qcom,sm8350-camcc.h>
+ #include <dt-bindings/clock/qcom,sm8350-videocc.h>
+ #include <dt-bindings/dma/qcom-gpi.h>
+ #include <dt-bindings/firmware/qcom,scm.h>
+@@ -3079,6 +3080,101 @@ videocc: clock-controller@abf0000 {
+ 			#power-domain-cells = <1>;
+ 		};
+ 
++		cci0: cci@ac4f000 {
++			compatible = "qcom,sm8350-cci", "qcom,msm8996-cci";
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			reg = <0 0x0ac4f000 0 0x1000>;
++			interrupts = <GIC_SPI 460 IRQ_TYPE_EDGE_RISING>;
++			power-domains = <&camcc TITAN_TOP_GDSC>;
++
++			clocks = <&camcc CAM_CC_CAMNOC_AXI_CLK>,
++				 <&camcc CAM_CC_SLOW_AHB_CLK_SRC>,
++				 <&camcc CAM_CC_CPAS_AHB_CLK>,
++				 <&camcc CAM_CC_CCI_0_CLK>,
++				 <&camcc CAM_CC_CCI_0_CLK_SRC>;
++			clock-names = "camnoc_axi",
++				      "slow_ahb_src",
++				      "cpas_ahb",
++				      "cci",
++				      "cci_src";
++
++			pinctrl-0 = <&cci0_default>;
++			pinctrl-1 = <&cci0_sleep>;
++			pinctrl-names = "default", "sleep";
++
++			status = "disabled";
++
++			cci0_i2c0: i2c-bus@0 {
++				reg = <0>;
++				clock-frequency = <1000000>;
++				#address-cells = <1>;
++				#size-cells = <0>;
++			};
++
++			cci0_i2c1: i2c-bus@1 {
++				reg = <1>;
++				clock-frequency = <1000000>;
++				#address-cells = <1>;
++				#size-cells = <0>;
++			};
++		};
++
++		cci1: cci@ac50000 {
++			compatible = "qcom,sm8350-cci", "qcom,msm8996-cci";
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			reg = <0 0x0ac50000 0 0x1000>;
++			interrupts = <GIC_SPI 271 IRQ_TYPE_EDGE_RISING>;
++			power-domains = <&camcc TITAN_TOP_GDSC>;
++
++			clocks = <&camcc CAM_CC_CAMNOC_AXI_CLK>,
++				 <&camcc CAM_CC_SLOW_AHB_CLK_SRC>,
++				 <&camcc CAM_CC_CPAS_AHB_CLK>,
++				 <&camcc CAM_CC_CCI_1_CLK>,
++				 <&camcc CAM_CC_CCI_1_CLK_SRC>;
++			clock-names = "camnoc_axi",
++				      "slow_ahb_src",
++				      "cpas_ahb",
++				      "cci",
++				      "cci_src";
++
++			pinctrl-0 = <&cci1_default>;
++			pinctrl-1 = <&cci1_sleep>;
++			pinctrl-names = "default", "sleep";
++
++			status = "disabled";
++
++			cci1_i2c0: i2c-bus@0 {
++				reg = <0>;
++				clock-frequency = <1000000>;
++				#address-cells = <1>;
++				#size-cells = <0>;
++			};
++
++			cci1_i2c1: i2c-bus@1 {
++				reg = <1>;
++				clock-frequency = <1000000>;
++				#address-cells = <1>;
++				#size-cells = <0>;
++			};
++		};
++
++		camcc: clock-controller@ad00000 {
++			compatible = "qcom,sm8350-camcc";
++			reg = <0 0x0ad00000 0 0x10000>;
++			clocks = <&rpmhcc RPMH_CXO_CLK>,
++				 <&rpmhcc RPMH_CXO_CLK_A>,
++				 <&sleep_clk>;
++			power-domains = <&rpmhpd RPMHPD_MMCX>;
++			required-opps = <&rpmhpd_opp_low_svs>;
++			#clock-cells = <1>;
++			#reset-cells = <1>;
++			#power-domain-cells = <1>;
++		};
++
+ 		mdss: display-subsystem@ae00000 {
+ 			compatible = "qcom,sm8350-mdss";
+ 			reg = <0 0x0ae00000 0 0x1000>;
+@@ -3640,6 +3736,78 @@ qup_uart6_default: qup-uart6-default-state {
+ 				bias-disable;
+ 			};
+ 
++			cam_mclk0_default: cam-mclk0-default-state {
++				pins = "gpio100";
++				function = "cam_mclk";
++				drive-strength = <2>;
++				bias-disable;
++			};
++
++			cam_mclk1_default: cam-mclk1-default-state {
++				pins = "gpio101";
++				function = "cam_mclk";
++				drive-strength = <2>;
++				bias-disable;
++			};
++
++			cam_mclk2_default: cam-mclk2-default-state {
++				pins = "gpio102";
++				function = "cam_mclk";
++				drive-strength = <2>;
++				bias-disable;
++			};
++
++			cam_mclk3_default: cam-mclk3-default-state {
++				pins = "gpio103";
++				function = "cam_mclk";
++				drive-strength = <2>;
++				bias-disable;
++			};
++
++			cam_mclk4_default: cam-mclk4-default-state {
++				pins = "gpio104";
++				function = "cam_mclk";
++				drive-strength = <2>;
++				bias-disable;
++			};
++
++			cam_mclk5_default: cam-mclk5-default-state {
++				pins = "gpio105";
++				function = "cam_mclk";
++				drive-strength = <2>;
++				bias-disable;
++			};
++
++			cci0_default: cci0-default-state {
++				/* SDA, SCL */
++				pins = "gpio107", "gpio108", "gpio109", "gpio110";
++				function = "cci_i2c";
++				drive-strength = <2>;
++				bias-pull-up;
++			};
++
++			cci0_sleep: cci0-sleep-state {
++				pins = "gpio107", "gpio108", "gpio109", "gpio110";
++				function = "cci_i2c";
++				drive-strength = <2>;
++				bias-pull-down;
++			};
++
++			cci1_default: cci1-default-state {
++				/* SDA, SCL */
++				pins = "gpio111", "gpio112", "gpio113", "gpio114";
++				function = "cci_i2c";
++				drive-strength = <2>;
++				bias-pull-up;
++			};
++
++			cci1_sleep: cci1-sleep-state {
++				pins = "gpio111", "gpio112", "gpio113", "gpio114";
++				function = "cci_i2c";
++				drive-strength = <2>;
++				bias-pull-down;
++			};
++
+ 			qup_uart18_default: qup-uart18-default-state {
+ 				pins = "gpio68", "gpio69";
+ 				function = "qup18";

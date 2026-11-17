@@ -1,0 +1,34 @@
+From 3d91ef799da784ddb8e39f47c543282e00d15c71 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 05:14:30 +0100
+Subject: [PATCH 036/137] arm64: dts: qcom: sm8350: Fix the IPA interrupt
+
+The IPA interrupt of SM8350 is SPI 654, as in the vendor device tree of
+the SoC ("ipa-irq", 0x28e) and as on SC7280 and SM8550, not 655. With
+the wrong line the AP never sees an IPA interrupt: /proc/interrupts
+counts 0 on every CPU, the microcontroller's INIT_COMPLETED response is
+never handled, so the IPA keeps the proxy power reference taken for the
+microcontroller forever (it never runtime-suspends), and a modem that is
+restarted after it had booted once (a stop and start, or the recovery
+after a crash) asserts 3.4 seconds later: "ipa_hwp_init.c:420:IPA Assert:
+0 failed: ipa_hwp_init_rsp_timer_cb: didnt rx any ind frm HWP", and keeps
+doing so at every recovery.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ arch/arm64/boot/dts/qcom/sm8350.dtsi | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350.dtsi b/arch/arm64/boot/dts/qcom/sm8350.dtsi
+index fed3b83468ef..7d4c13f7aef5 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8350.dtsi
+@@ -1846,7 +1846,7 @@ ipa: ipa@1e40000 {
+ 				    "ipa-shared",
+ 				    "gsi";
+ 
+-			interrupts-extended = <&intc GIC_SPI 655 IRQ_TYPE_EDGE_RISING>,
++			interrupts-extended = <&intc GIC_SPI 654 IRQ_TYPE_EDGE_RISING>,
+ 					      <&intc GIC_SPI 432 IRQ_TYPE_LEVEL_HIGH>,
+ 					      <&ipa_smp2p_in 0 IRQ_TYPE_EDGE_RISING>,
+ 					      <&ipa_smp2p_in 1 IRQ_TYPE_EDGE_RISING>;

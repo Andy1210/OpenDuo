@@ -1,0 +1,56 @@
+From a96440e0508621f006f8055cd807123610b7bc25 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 16:57:15 +0100
+Subject: [PATCH 049/137] arm64: dts: qcom: sm8350-microsoft-surface-duo2:
+ Enable the haptics
+
+Describe the HAP520 haptics module of the PM8350B (configuration,
+pattern and boost peripherals at 0xf000, 0xf100, 0xf200, the FIFO-empty
+interrupt) in pm8350b.dtsi, and enable it on the Surface Duo 2 with the
+parameters of its LRA, as the stock device tree has them: 3.05 V peak
+drive, 6135 us resonance period (~163 Hz).
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ arch/arm64/boot/dts/qcom/pm8350b.dtsi                    | 9 +++++++++
+ .../boot/dts/qcom/sm8350-microsoft-surface-duo2.dts      | 8 ++++++++
+ 2 files changed, 17 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/pm8350b.dtsi b/arch/arm64/boot/dts/qcom/pm8350b.dtsi
+index cf82f8a64a9b..14a13ed3e3fd 100644
+--- a/arch/arm64/boot/dts/qcom/pm8350b.dtsi
++++ b/arch/arm64/boot/dts/qcom/pm8350b.dtsi
+@@ -53,5 +53,14 @@ pm8350b_gpios: gpio@8800 {
+ 			interrupt-controller;
+ 			#interrupt-cells = <2>;
+ 		};
++
++		pm8350b_haptics: haptics@f000 {
++			compatible = "qcom,pm8350b-haptics";
++			reg = <0xf000>, <0xf100>, <0xf200>;
++			reg-names = "cfg", "ptn", "hbst";
++			interrupts = <0x3 0xf0 0x1 IRQ_TYPE_EDGE_RISING>;
++			interrupt-names = "fifo-empty";
++			status = "disabled";
++		};
+ 	};
+ };
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+index 1e8363fc4564..4d8d78384e50 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+@@ -733,6 +733,14 @@ vol_up_n: vol-up-n-state {
+ 	};
+ };
+ 
++&pm8350b_haptics {
++	/* The LRA: 3.05 V peak, resonant at ~163 Hz */
++	qcom,vmax-microvolt = <3050000>;
++	qcom,lra-period-us = <6135>;
++
++	status = "okay";
++};
++
+ &pmk8350_rtc {
+ 	status = "okay";
+ };

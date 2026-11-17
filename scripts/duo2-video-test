@@ -1,0 +1,335 @@
+#!/usr/bin/env bash
+# Hardware video decoding on the phone (the iris video core, /dev/video0;
+# docs/hardware/video.md): test clips, correctness, CPU, the idle state.
+#
+#   scripts/duo2-video-test clips            make the test clips here (ffmpeg,
+#                                            out/video-test/) and copy them to
+#                                            the phone's /var/tmp/duo2-video/
+#   scripts/duo2-video-test [check]          bit-exactness (hardware = software),
+#                                            mpv with the installed /etc/mpv in
+#                                            real time, GStreamer in real time,
+#                                            then the video core at rest
+#   scripts/duo2-video-test celluloid CLIP [celluloid options]
+#                                            open a clip in Celluloid on the
+#                                            panels, CPU over 8 s, close it
+#
+# The clips are test patterns with noise and no audio track: 1080p30 H.264,
+# HEVC, VP9, HEVC Main 10, 2160p30 H.264 and HEVC, 10 s each. Nothing 10-bit
+# goes to the hardware directly here (the driver refuses it and its error
+# path warns); mpv's installed configuration sends it to software.
+set -euo pipefail
+. "$(dirname "$0")/lib/remote.sh"
+WHAT=${1:-check}
+CLIPS=$R/out/video-test
+DIR=/var/tmp/duo2-video
+
+case $WHAT in
+clips)
+    mkdir -p "$CLIPS"
+    src() { echo "testsrc2=size=$1:rate=30,noise=alls=12:allf=t+u,format=$2"; }
+    enc() { # name size pixfmt codec options...
+        local n=$1 s=$2 p=$3; shift 3
+        [ -f "$CLIPS/$n" ] || nice ffmpeg -hide_banner -loglevel error -y -f lavfi -i "$(src "$s" "$p")" \
+            -t 10 -an "$@" "$CLIPS/$n"
+    }
+    X265="-x265-params pools=8:log-level=error -tag:v hvc1"
+    enc h264-1080p30.mp4 1920x1080 yuv420p -c:v libx264 -profile:v high -preset medium -b:v 8M \
+        -maxrate 10M -bufsize 16M -threads 8
+    # shellcheck disable=SC2086
+    enc hevc-1080p30.mp4 1920x1080 yuv420p -c:v libx265 -preset fast -b:v 6M $X265
+    enc vp9-1080p30.webm 1920x1080 yuv420p -c:v libvpx-vp9 -b:v 6M -deadline realtime -cpu-used 8 \
+        -row-mt 1 -threads 8
+    # shellcheck disable=SC2086
+    enc hevc10-1080p30.mp4 1920x1080 yuv420p10le -c:v libx265 -preset fast -b:v 6M -profile:v main10 $X265
+    enc h264-2160p30.mp4 3840x2160 yuv420p -c:v libx264 -profile:v high -preset faster -b:v 25M \
+        -maxrate 30M -bufsize 50M -threads 8
+    # shellcheck disable=SC2086
+    enc hevc-2160p30.mp4 3840x2160 yuv420p -c:v libx265 -preset faster -b:v 15M $X265
+    S=$(duo2_stage video-clips)
+    duo2_ssh "mkdir -p $S"
+    duo2_scp "$CLIPS"/*.mp4 "$CLIPS"/*.webm "$DUO2_HOST:$S/"
+    duo2_ssh "sudo install -d -m 755 $DIR && sudo install -m 644 $S/* $DIR/ \
+        && rm -rf $S && ls $DIR"
+    ;;
+check)
+    duo2_ssh "sudo bash -s $DIR $DUO2_USER" <<'EOF'
+set -u
+cd "$1"
+U="sudo -u $2"
+echo "dma-coherent: $([ -e /proc/device-tree/soc@0/video-codec@aa00000/dma-coherent ] && echo yes || echo no)"
+echo "== bit-exactness: hardware vs software (ffmpeg framemd5, NV12; VP9: GStreamer checksumsink)"
+for c in "h264_v4l2m2m h264 h264-1080p30.mp4" "hevc_v4l2m2m hevc hevc-1080p30.mp4" \
+         "h264_v4l2m2m h264 h264-2160p30.mp4" "hevc_v4l2m2m hevc hevc-2160p30.mp4"; do
+    set -- $c
+    $U ffmpeg -y -hide_banner -nostdin -loglevel error -c:v $1 -i $3 -pix_fmt nv12 -f framemd5 /tmp/v-hw.md5
+    ffmpeg -y -hide_banner -nostdin -loglevel error -c:v $2 -i $3 -pix_fmt nv12 -f framemd5 /tmp/v-sw.md5
+    printf '%-20s %s frames, %s\n' $3 "$(grep -vc '^#' /tmp/v-hw.md5)" \
+        "$(cmp -s <(grep -v '^#' /tmp/v-hw.md5 | cut -d, -f6) <(grep -v '^#' /tmp/v-sw.md5 | cut -d, -f6) && echo equal || echo DIFFERENT)"
+done
+for d in v4l2vp9dec avdec_vp9; do
+    $U timeout 120 gst-launch-1.0 -q filesrc location=vp9-1080p30.webm ! matroskademux ! $d ! videoconvert \
+        ! video/x-raw,format=I420 ! checksumsink sync=false > /tmp/v-$d.txt 2>&1 < /dev/null
+done
+printf '%-20s %s frames, %s\n' vp9-1080p30.webm "$(wc -l < /tmp/v-v4l2vp9dec.txt)" \
+    "$(cmp -s <(awk '{print $NF}' /tmp/v-v4l2vp9dec.txt) <(awk '{print $NF}' /tmp/v-avdec_vp9.txt) && echo equal || echo DIFFERENT)"
+rm -f /tmp/v-hw.md5 /tmp/v-sw.md5 /tmp/v-*.txt
+echo "== mpv in real time with the installed /etc/mpv (no video or audio output)"
+for f in h264-1080p30.mp4 hevc-1080p30.mp4 h264-2160p30.mp4 hevc-2160p30.mp4 hevc10-1080p30.mp4 vp9-1080p30.webm; do
+    TIMEFORMAT="%R %U %S"
+    t=$( { time $U timeout 60 mpv --vo=null --ao=null --term-status-msg='STAT ${hwdec-current} dropped ${frame-drop-count}' \
+        $f > /tmp/v-mpv.out 2>&1 < /dev/null; } 2>&1 )
+    set -- $t
+    awk -v f=$f -v r=$1 -v u=$2 -v s=$3 -v st="$(tr '\r' '\n' < /tmp/v-mpv.out | grep STAT | tail -1 | cut -d' ' -f2-)" \
+        'BEGIN { printf "%-20s %5.2f s, CPU %4.0f %% of a core, hwdec %s\n", f, r, (u + s) / r * 100, st }'
+    sleep 2
+done
+rm -f /tmp/v-mpv.out
+echo "== GStreamer in real time (playbin's choice: the V4L2 decoders)"
+for p in "h264-1080p30.mp4 v4l2h264dec" "hevc-1080p30.mp4 v4l2h265dec" "vp9-1080p30.webm v4l2vp9dec"; do
+    set -- $p
+    printf '%-20s %s\n' $1 "$($U timeout 60 gst-launch-1.0 -v filesrc location=$1 ! parsebin ! $2 \
+        ! fpsdisplaysink video-sink=fakesink text-overlay=false sync=true 2>&1 < /dev/null |
+        grep -o 'rendered: [0-9]*, dropped: [0-9]*, current: [0-9.,]*, average: [0-9.,]*' | tail -1)"
+    sleep 2
+done
+sleep 3
+D=/sys/bus/platform/devices/aa00000.video-codec
+C=/sys/kernel/debug/clk
+echo "== at rest: runtime PM $(cat $D/power/runtime_status), clocks enabled: axi $(cat $C/gcc_video_axi0_clk/clk_enable_count)" \
+     "mvs0c $(cat $C/video_cc_mvs0c_clk/clk_enable_count) mvs0 $(cat $C/video_cc_mvs0_clk/clk_enable_count)," \
+     "GDSCs: $(awk '/^mvs0c?_gdsc/ {printf "%s %s ", $1, $2}' /sys/kernel/debug/pm_genpd/pm_genpd_summary)"
+echo "kernel: $(dmesg | grep -c qcom-iris) qcom-iris lines, $(dmesg | grep -c 'cut here') warnings this boot"
+dmesg | grep qcom-iris | tail -5
+EOF
+    ;;
+celluloid)
+    CLIP=${2:?usage: $0 celluloid CLIP [celluloid options]}
+    shift 2
+    duo2_session "pgrep -x celluloid >/dev/null && { echo 'Celluloid is open already (it would take the clip over): close it first' >&2; exit 1; }
+log=\$(mktemp /tmp/celluloid-XXXXXX.log)
+celluloid --new-window --mpv-log-file=\$log --mpv-loop-file=inf $* $DIR/$CLIP >/dev/null 2>&1 &
+pid=\$!
+sleep 1.5
+s0=\$(awk '{print \$14 + \$15}' /proc/\$pid/stat); t0=\$(date +%s%N)
+sleep 8
+s1=\$(awk '{print \$14 + \$15}' /proc/\$pid/stat); t1=\$(date +%s%N)
+kill \$pid; wait \$pid 2>/dev/null
+awk -v a=\$s0 -v b=\$s1 -v t0=\$t0 -v t1=\$t1 -v tk=\$(getconf CLK_TCK) -v c='$CLIP $*' \
+    'BEGIN { printf \"celluloid %s: CPU %.0f %% of a core\\n\", c, (b - a) / tk / ((t1 - t0) / 1e9) * 100 }'
+grep -h -E 'Using hardware decoding|duo2_hwdec\\] software|VO: \\[' \$log | cut -c1-120
+rm -f \$log"
+    ;;
+webclips)
+    # YouTube-like clip sets for video/web/mse.html, here: DASH segments of
+    # 2 s, two renditions (720p, 1080p) of the same 30 s, H.264 (fragmented
+    # MP4) and VP9 (WebM, with alternate reference frames, i.e. superframes
+    # with hidden frames, as YouTube's VP9 has).
+    W=$CLIPS/web
+    mkdir -p "$W"
+    src() { echo "testsrc2=size=$1:rate=30,noise=alls=12:allf=t+u,format=$2"; }
+    dash() { # set ext encoder-options...
+        local set=$1 ext=$2 rep n; shift 2
+        [ -f "$W/$set/1080/seg-00015.$ext" ] && return 0
+        rm -rf "${W:?}/$set" "$W/$set.tmp" && mkdir -p "$W/$set.tmp"
+        # shellcheck disable=SC2016
+        nice ffmpeg -hide_banner -loglevel error -y -f lavfi -i "$(src 1920x1080 yuv420p)" -t 30 -an \
+            -map 0:v -map 0:v -s:v:0 1280x720 -s:v:1 1920x1080 "$@" \
+            -f dash -seg_duration 2 -use_template 1 -use_timeline 0 \
+            -init_seg_name 'init-$RepresentationID$.$ext$' \
+            -media_seg_name 'seg-$RepresentationID$-$Number%05d$.$ext$' \
+            -adaptation_sets 'id=0,streams=v' "$W/$set.tmp/manifest.mpd"
+        for rep in 0:720 1:1080; do
+            mkdir -p "$W/$set/${rep#*:}"
+            mv "$W/$set.tmp/init-${rep%:*}".* "$W/$set/${rep#*:}/init.$ext"
+            for f in "$W/$set.tmp/seg-${rep%:*}-"*; do
+                n=${f##*-}; mv "$f" "$W/$set/${rep#*:}/seg-${n%%.*}.$ext"
+            done
+        done
+        rm -rf "$W/$set.tmp"
+    }
+    dash h264 m4s -c:v libx264 -profile:v high -preset medium -threads 8 -g 60 -keyint_min 60 \
+        -sc_threshold 0 -b:v:0 3M -maxrate:v:0 4M -bufsize:v:0 6M -b:v:1 6M -maxrate:v:1 8M -bufsize:v:1 12M
+    dash vp9 webm -c:v libvpx-vp9 -dash_segment_type webm -deadline good -cpu-used 4 -row-mt 1 \
+        -threads 8 -auto-alt-ref 1 -lag-in-frames 25 -g 60 -keyint_min 60 -b:v:0 2M -b:v:1 4M
+    python3 -I - "$W" <<'PY'
+import json, os, sys
+w = sys.argv[1]
+sets = {"h264": ('video/mp4; codecs="avc1.640028"', "m4s"),
+        "vp9": ('video/webm; codecs="vp09.00.40.08"', "webm")}
+out = {}
+for name, (mime, ext) in sets.items():
+    reps = sorted(os.listdir(os.path.join(w, name)), key=int)
+    segs = len([f for f in os.listdir(os.path.join(w, name, reps[-1])) if f.startswith("seg-")])
+    out[name] = {"mime": mime, "ext": ext, "segments": segs, "duration": segs * 2,
+                 "reps": {r: {} for r in reps}}
+json.dump(out, open(os.path.join(w, "manifest.json"), "w"), indent=1)
+print(json.dumps(out))
+PY
+    ;;
+push)
+    # The browser tests' files to the phone (into /var/tmp/duo2-video, next
+    # to the clips): the pages (video/web/mse.html, codecs.html and duo-wc's
+    # tools/video/test.html), the webclips sets, the measuring tool and the
+    # Chromium codec extension, also as an H.264-only variant
+    # (chromium-codecs-h264: VP9 and VP8 hidden too).
+    W=$CLIPS/web
+    [ -f "$W/manifest.json" ] || { echo "no $W/manifest.json: run $0 webclips first" >&2; exit 1; }
+    T=$(mktemp -d)
+    trap 'rm -rf "$T"' EXIT
+    mkdir -p "$T/web"
+    cp -a "$W"/. "$T/web/"
+    cp "$R/video/web/mse.html" "$R/video/web/codecs.html" "$R/compositor/duo-wc/tools/video/test.html" "$T/web/"
+    cp "$R/video/browser-video-measure" "$T/"
+    cp -a "$R/video/chromium-codecs" "$T/chromium-codecs"
+    cp -a "$R/video/chromium-codecs" "$T/chromium-codecs-h264"
+    sed -i "s/^    const HIDDEN = \['av01'\];/    const HIDDEN = ['av01', 'vp09', 'vp9', 'vp08', 'vp8'];/" "$T/chromium-codecs-h264/codecs.js"
+    grep -q "'vp09'" "$T/chromium-codecs-h264/codecs.js"
+    tar -C "$T" -cf - . | duo2_ssh "sudo install -d -m 755 $DIR && sudo tar -C $DIR --no-same-owner -xf - \
+        && sudo chmod -R a+rX,go-w $DIR && sudo chmod 755 $DIR/browser-video-measure && ls $DIR $DIR/web"
+    ;;
+install-rpi|remove-rpi)
+    # Raspberry Pi OS's FFmpeg libraries and Chromium (video/fetch-rpi-builds.sh,
+    # out/video-rpi/) into /opt on the phone, beside Debian's packages, which
+    # stay as they are; only programs started with LD_LIBRARY_PATH or the /opt
+    # Chromium use them. remove-rpi takes them out again.
+    if [ "$WHAT" = remove-rpi ]; then
+        duo2_ssh "sudo rm -rf /opt/duo2-ffmpeg-v4l2 /opt/duo2-chromium-rpi && echo removed"
+        exit 0
+    fi
+    V=$R/out/video-rpi
+    [ -f "$V/versions.txt" ] || { echo "no $V/versions.txt: run video/fetch-rpi-builds.sh first" >&2; exit 1; }
+    cat "$V/versions.txt"
+    tar -C "$V" -cf - ffmpeg-v4l2 chromium versions.txt | duo2_ssh "set -e
+T=\$(mktemp -d /var/tmp/duo2-rpi-XXXXXX); trap 'sudo rm -rf \$T' EXIT
+sudo tar -C \$T --no-same-owner -xf -
+sudo rm -rf /opt/duo2-ffmpeg-v4l2 /opt/duo2-chromium-rpi
+sudo mv \$T/ffmpeg-v4l2 /opt/duo2-ffmpeg-v4l2
+sudo mv \$T/chromium /opt/duo2-chromium-rpi
+sudo cp \$T/versions.txt /opt/duo2-chromium-rpi/duo2-versions.txt
+sudo chown -R root:root /opt/duo2-ffmpeg-v4l2 /opt/duo2-chromium-rpi
+sudo chmod -R go-w /opt/duo2-ffmpeg-v4l2 /opt/duo2-chromium-rpi
+ls /opt/duo2-ffmpeg-v4l2/lib; /opt/duo2-chromium-rpi/usr/lib/chromium/chromium --version"
+    ;;
+browser)
+    # One measured run of a browser on the panels (video/browser-video-measure):
+    #   browser NAME [PAGE] [SECS]
+    # NAME: chromium-sw     Debian's Chromium, hardware decoding off (the baseline)
+    #       chromium-v4l2   Debian's Chromium on the V4L2 decoder: the
+    #                       PreferV4L2VideoAcceleration feature (it has VA-API and
+    #                       V4L2, VA-API by default) and --disable-gpu-sandbox
+    #                       (its Linux GPU sandbox refuses /dev/videoN)
+    #       chromium-rpi    the Raspberry Pi OS build in /opt (install-rpi), V4L2
+    #                       only, GPU sandbox on
+    #       firefox-sw      Firefox ESR, hardware decoding off
+    #       firefox-hw      Firefox ESR with Debian's FFmpeg, hardware decoding
+    #                       forced on (its V4L2 path wants DRM-PRIME frames, which
+    #                       Debian's FFmpeg does not give: expected to stay software)
+    #       firefox-v4l2    Firefox ESR with Raspberry Pi's FFmpeg libraries (in
+    #                       /opt, install-rpi), hardware decoding forced on
+    #       angelfish-sw    KDE's Angelfish (Debian's QtWebEngine 6.8.2: no
+    #                       V4L2 and no VA-API built in, so software only; it
+    #                       also overwrites QTWEBENGINE_CHROMIUM_FLAGS, so no
+    #                       Chromium switch reaches it). Its own D-Bus session
+    #                       and a throwaway profile (XDG dirs in /tmp), so the
+    #                       user's running Angelfish and profile are untouched;
+    #                       its console goes to the log (QT_LOGGING_RULES)
+    # PAGE: mse:h264, mse:vp9 (the webclips sets, 1080p), mse:h264:switch,
+    #       mse:vp9:switch (720p <-> 1080p every 6 s); codecs (codecs.html:
+    #       what the browser tells YouTube about H.264 / VP9 / AV1 / HEVC,
+    #       a few seconds are enough); a clip file name in
+    #       /var/tmp/duo2-video (tools/video/test.html plays it, plain src=); or
+    #       an https:// address (with the codec extension in Chromium; EXT=h264
+    #       takes the H.264-only one). Default mse:h264, 20 s.
+    NAME=${2:?usage: $0 browser NAME [PAGE] [SECS]}
+    PAGE=${3:-mse:h264}
+    SECS=${4:-20}
+    SERVE=
+    EXTDIR=
+    case $PAGE in
+    mse:*)
+        IFS=: read -r _ codec sw <<<"$PAGE"
+        URL="http://127.0.0.1:8899/mse.html?codec=$codec${sw:+&switch=1}"
+        SERVE="--serve $DIR/web"
+        ;;
+    codecs) URL="http://127.0.0.1:8899/codecs.html"; SERVE="--serve $DIR/web" ;;
+    https://*|http://*) URL=$PAGE; EXTDIR=$DIR/chromium-codecs${EXT:+-$EXT} ;;
+    *) URL="file://$DIR/web/test.html?v=../$PAGE" ;;
+    esac
+    CF="--user-data-dir=/tmp/vt-chromium --no-first-run --no-default-browser-check --start-fullscreen"
+    CF="$CF --autoplay-policy=no-user-gesture-required --enable-logging=stderr --v=0"
+    CF="$CF --vmodule=*/media/gpu/*=2,*/media/mojo/*=1${EXTDIR:+ --load-extension=$EXTDIR}"
+    WL="--ozone-platform=wayland --enable-wayland-ime --wayland-text-input-version=3 --touch-events=enabled --password-store=basic"
+    FF="firefox-esr --new-instance --profile /tmp/vt-firefox --kiosk"
+    AF="env QT_QPA_PLATFORM=wayland QT_QPA_PLATFORMTHEME=kde QT_QUICK_CONTROLS_STYLE=org.kde.desktop"
+    AF="$AF QT_QUICK_CONTROLS_MOBILE=1 QT_LOGGING_RULES=js.info=true XDG_CONFIG_HOME=/tmp/vt-angelfish/config"
+    AF="$AF XDG_DATA_HOME=/tmp/vt-angelfish/data XDG_CACHE_HOME=/tmp/vt-angelfish/cache"
+    AF="$AF XDG_STATE_HOME=/tmp/vt-angelfish/state dbus-run-session -- angelfish"
+    case $NAME in
+    chromium-sw) CMD="chromium $CF --disable-accelerated-video-decode" ;;
+    chromium-v4l2) CMD="chromium $CF --enable-features=PreferV4L2VideoAcceleration --disable-gpu-sandbox" ;;
+    chromium-rpi) CMD="/opt/duo2-chromium-rpi/usr/lib/chromium/chromium $WL --use-angle=gles $CF" ;;
+    firefox-sw) CMD="$FF" ;;
+    firefox-hw) CMD="env MOZ_LOG=PlatformDecoderModule:4,FFmpegVideo:4 $FF" ;;
+    firefox-v4l2) CMD="env LD_LIBRARY_PATH=/opt/duo2-ffmpeg-v4l2/lib MOZ_LOG=PlatformDecoderModule:4,FFmpegVideo:4 $FF" ;;
+    angelfish-sw) CMD="$AF" ;;
+    *) echo "unknown browser $NAME" >&2; exit 2 ;;
+    esac
+    HW=false; case $NAME in firefox-hw|firefox-v4l2) HW=true ;; esac
+    # NIGHT=1 (the default): the panels at the lowest backlight level and the
+    # speakers muted while the run lights them; automatic brightness is held
+    # off meanwhile (it would take a level it did not write for the user's
+    # wish and learn it), and everything is put back afterwards; both panels
+    # are switched off at the end (a phone just booted has them on). NIGHT=0
+    # leaves the brightness, the sound and the panels alone.
+    duo2_ssh "sudo bash -s" <<EOF
+set -u
+gui=\$(systemctl show -p User --value duo-wc)
+uid=\$(id -u \$gui)
+wp() { sudo -u \$gui XDG_RUNTIME_DIR=/run/user/\$uid wpctl "\$@"; }
+if [ "${NIGHT:-1}" = 1 ]; then
+    conf=/etc/duo2/brightness.conf
+    back=\$(mktemp /run/duo2-video-night-XXXXXX)
+    cp -p \$conf \$back
+    levels=\$(for b in /sys/class/backlight/*; do echo "\$b \$(cat \$b/brightness)"; done)
+    dark=\$(duoctl get_outputs | python3 -c 'import json,sys
+print(" ".join(o["name"] for o in json.load(sys.stdin)["ok"]["outputs"] if o["power"] == "off"))')
+    muted=\$(wp get-volume @DEFAULT_AUDIO_SINK@ | grep -c MUTED || true)
+    restore() {
+        duoctl set_power all off >/dev/null
+        printf '%s\n' "\$levels" | while read -r b l; do echo \$l > \$b/brightness; done
+        [ "\$muted" = 0 ] && wp set-mute @DEFAULT_AUDIO_SINK@ 0
+        cp -p \$back \$conf && rm -f \$back
+        echo "night: restored (backlight \$(cat /sys/class/backlight/*/brightness | tr '\n' ' '), dark: \${dark:-none}, \$(wp get-volume @DEFAULT_AUDIO_SINK@), \$(grep '^auto' \$conf))"
+    }
+    trap restore EXIT
+    sed -i 's/^auto *=.*/auto = off/' \$conf
+    sleep 2
+    for b in /sys/class/backlight/*; do echo 1 > \$b/brightness; done
+    wp set-mute @DEFAULT_AUDIO_SINK@ 1
+fi
+for d in /tmp/vt-chromium /tmp/vt-firefox /tmp/vt-angelfish; do sudo -u \$gui rm -rf \$d; done
+sudo -u \$gui mkdir -m 700 /tmp/vt-firefox /tmp/vt-angelfish
+sudo -u \$gui tee /tmp/vt-firefox/user.js >/dev/null <<'JS'
+user_pref("media.autoplay.default", 0);
+user_pref("media.autoplay.blocking_policy", 0);
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("browser.aboutwelcome.enabled", false);
+user_pref("datareporting.policy.dataSubmissionEnabled", false);
+user_pref("datareporting.policy.firstRunURL", "");
+user_pref("browser.startup.homepage_override.mstone", "ignore");
+user_pref("startup.homepage_welcome_url", "");
+user_pref("startup.homepage_welcome_url.additional", "");
+user_pref("browser.tabs.warnOnClose", false);
+user_pref("media.av1.enabled", false);
+user_pref("media.hardware-video-decoding.enabled", $HW);
+user_pref("media.hardware-video-decoding.force-enabled", $HW);
+JS
+$DIR/browser-video-measure --secs $SECS $SERVE --log /tmp/browser-video-$NAME.log -- $CMD "$URL"
+for d in /tmp/vt-chromium /tmp/vt-firefox /tmp/vt-angelfish; do sudo -u \$gui rm -rf \$d; done
+EOF
+    ;;
+*)
+    echo "usage: $0 [clips|check|celluloid CLIP|webclips|push|install-rpi|remove-rpi|browser NAME [PAGE] [SECS]]" >&2
+    exit 2
+    ;;
+esac

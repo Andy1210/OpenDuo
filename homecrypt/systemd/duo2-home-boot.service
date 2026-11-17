@@ -1,0 +1,22 @@
+# The home's encryption at every start (homecrypt/README.md): an encryption
+# or decryption the user asked for in Settings > Lock screen is made now,
+# before anything of the user runs, with its progress on the boot splash (it
+# can take minutes: no time limit); then an encrypted home whose key is not
+# in the kernel gets an empty tmpfs over it until the first unlock, so that
+# calls, alarms and the lock screen work before it.
+[Unit]
+Description=Encrypted home: changes asked for, locked until the first unlock
+DefaultDependencies=no
+After=local-fs.target systemd-tmpfiles-setup.service plymouth-start.service
+Before=systemd-user-sessions.service duo-wc.service waydroid-container.service shutdown.target
+Conflicts=shutdown.target
+ConditionPathExists=/var/lib/duo2-lock/home.state
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/duo2-home-crypt boot
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target

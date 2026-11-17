@@ -1,0 +1,4 @@
+# The code was written to this width and keeps short blocks on one line;
+# rustfmt's defaults (100, "Default" heuristics) would rewrap twice as much.
+max_width = 110
+use_small_heuristics = "Max"

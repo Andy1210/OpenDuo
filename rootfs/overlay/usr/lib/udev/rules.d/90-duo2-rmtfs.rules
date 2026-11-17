@@ -1,0 +1,9 @@
+# Surface Duo 2: rmtfs (the modem's remote file system, started with -s so it
+# also starts the modem remoteproc) is started by the modem remoteproc itself.
+# Started from multi-user.target it often ran before qcom_q6v5_pas had
+# registered the modem ("Failed to get rprocfd", exit 1) and only came up on
+# systemd's restart; a slower boot would have run it into the start limit and
+# left the modem off. The remoteproc also gets a stable unit name,
+# sys-subsystem-remoteproc-modem.device (remoteprocN is numbered by probe order).
+ACTION=="add", SUBSYSTEM=="remoteproc", ATTR{name}=="modem", TAG+="systemd", \
+    ENV{SYSTEMD_ALIAS}+="/sys/subsystem/remoteproc/modem", ENV{SYSTEMD_WANTS}+="rmtfs.service"

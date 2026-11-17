@@ -1,0 +1,603 @@
+#!/usr/bin/python3 -I
+"""duo2-boot: the packaged kernels' boot entries, with boot counting and the
+way back (docs/UPDATES.md "The kernel and its way back"). Root.
+
+  duo2-boot add RELEASE [--retry]
+        put a packaged kernel on the ESP (/boot/efi/openduo/RELEASE/) and
+        write its entry with +3 tries, before the known-good kernels
+        (the kernel package's postinst). An entry that exists is left as it
+        is (a good one stays good); --retry gives a bad one its tries again.
+  duo2-boot remove RELEASE
+        its entry and ESP files go (the kernel package's prerm); never the
+        running kernel's.
+  duo2-boot status [--json]
+        the entries, which one runs, what is tried, the last health check.
+  duo2-boot health [--wait] [--timeout S] [--no-reboot]
+        on a boot from an entry still being tried: are the compositor, touch
+        and the network up (duo2maint/health.py)? exit 0 when they are (or
+        when there is nothing to check), 1 when not. A hard failure marks
+        the entry bad and restarts into the previous kernel (not with
+        --no-reboot). duo2-boot-health.service runs it before
+        boot-complete.target.
+  duo2-boot bless       the running entry becomes good (duo2-boot-bless.service,
+                        after boot-complete.target), then prune
+  duo2-boot bad [RELEASE]   no tries left: systemd-boot boots the previous one
+  duo2-boot prune       the ESP files of kernels no longer kept (the running
+                        one, those being tried, the newest 2 good ones, the
+                        newest bad one stay)
+  duo2-boot obsolete    the kernel packages that may be purged (nothing on the
+                        ESP needs them; duo2-updates purges them)
+
+Never touches duo2.conf (scripts/duo2-promote's known-good kernel, read for
+its options, initrd and DTB name), rescue.conf, the rescue initramfs or a
+duo2-try entry. /etc/duo2/boot.conf overrides what is read from duo2.conf.
+"""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+for _p in (HERE, "/usr/local/lib/duo2-maint"):
+    if os.path.isdir(os.path.join(_p, "duo2maint")):
+        sys.path.insert(0, _p)
+        break
+
+from duo2maint import bootentry as be  # noqa: E402
+from duo2maint import health  # noqa: E402
+
+ESP = os.environ.get("DUO2_ESP", "/boot/efi")
+ENTRIES = os.path.join(ESP, "loader", "entries")
+KERNELS = os.environ.get("DUO2_KERNELS", "/usr/lib/openduo/kernel")
+STATE_DIR = os.environ.get("DUO2_BOOT_STATE", "/var/lib/duo2-boot")
+SEQS = os.path.join(STATE_DIR, "kernels.json")
+HEALTH = os.path.join(STATE_DIR, "health.json")
+CONF = os.environ.get("DUO2_BOOT_CONF", "/etc/duo2/boot.conf")
+KNOWN_GOOD = "duo2.conf"
+ESP_TOOL = "/usr/local/sbin/duo2-esp"
+KERNEL_PKG = "openduo-kernel-surface-duo2-"
+
+
+def say(*a):
+    print(*a, flush=True)
+
+
+def read(path, default=""):
+    try:
+        with open(path) as f:
+            return f.read()
+    except OSError:
+        return default
+
+
+def conf():
+    """/etc/duo2/boot.conf: key = value; empty values mean "as duo2.conf"."""
+    out = {
+        "options": "",
+        "dtb": "",
+        "initrd": "",
+        "tries": "3",
+        "keep": "2",
+        "health_timeout": str(health.DEFAULT_TIMEOUT),
+        "reboot_on_failure": "yes",
+    }
+    for line in read(CONF).splitlines():
+        line = line.split("#", 1)[0].strip()
+        if "=" in line:
+            k, v = (x.strip() for x in line.split("=", 1))
+            if k in out:
+                out[k] = v
+    return out
+
+
+def load_seqs():
+    try:
+        data = json.loads(read(SEQS, "{}"))
+        return data if isinstance(data, dict) else {}
+    except ValueError:
+        return {}
+
+
+def save_json(path, data):
+    os.makedirs(os.path.dirname(path), mode=0o755, exist_ok=True)
+    with open(path + ".tmp", "w") as f:
+        json.dump(data, f, indent=1, sort_keys=True)
+    os.replace(path + ".tmp", path)
+
+
+def entry_files():
+    try:
+        return sorted(os.listdir(ENTRIES))
+    except OSError:
+        return []
+
+
+def cmdline():
+    # DUO2_BOOT_CMDLINE: the package test's stand-in for a boot from an entry
+    return (os.environ.get("DUO2_BOOT_CMDLINE") or read("/proc/cmdline")).strip()
+
+
+class EspWritable:
+    """The ESP is mounted read-only (rootfs/overlay/etc/fstab): read-write for
+    the writes, read-only again afterwards, also on an error. Where it is no
+    mount (an image build, a container) nothing is remounted."""
+
+    def __enter__(self):
+        self.remounted = False
+        mounted = subprocess.run(["findmnt", "-n", ESP], capture_output=True).returncode == 0
+        if mounted and os.path.exists(ESP_TOOL):
+            if subprocess.run([ESP_TOOL, "rw"]).returncode != 0:
+                raise SystemExit("duo2-boot: the ESP could not be made writable")
+            self.remounted = True
+        return self
+
+    def __exit__(self, *exc):
+        os.sync()
+        if self.remounted:
+            subprocess.run([ESP_TOOL, "ro"])
+        return False
+
+
+def known_good():
+    """duo2.conf's fields (the hand-managed known-good kernel)."""
+    return be.parse_entry(read(os.path.join(ENTRIES, KNOWN_GOOD)))
+
+
+def defaults(rel):
+    """The kernel package's own defaults (/usr/lib/openduo/kernel/REL/boot.env)."""
+    out = {}
+    for line in read(os.path.join(KERNELS, rel, "boot.env")).splitlines():
+        if "=" in line and not line.lstrip().startswith("#"):
+            k, v = line.split("=", 1)
+            out[k.strip()] = v.strip().strip('"')
+    return out
+
+
+def boot_params(rel):
+    """(options, initrd, dtb name) for a new entry: boot.conf, else duo2.conf,
+    else the package's defaults."""
+    c, kg, d = conf(), known_good(), defaults(rel)
+    options = c["options"] or kg.get("options", "") or d.get("OPTIONS", "")
+    initrd = c["initrd"] or kg.get("initrd", "") or d.get("INITRD", "")
+    dtb = c["dtb"] or os.path.basename(kg.get("devicetree", "")) or d.get("DTB", "")
+    return be.clean_options(options), initrd, dtb
+
+
+def dtb_path(rel, name):
+    for sub in ("dtbs/qcom", "dtbs"):
+        p = os.path.join(KERNELS, rel, sub, name)
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def copy_checked(src, dst):
+    tmp = dst + ".new"
+    shutil.copyfile(src, tmp)
+    with open(tmp, "rb") as a, open(src, "rb") as b:
+        if a.read() != b.read():
+            raise SystemExit("duo2-boot: %s did not copy correctly" % dst)
+    os.replace(tmp, dst)
+
+
+def os_version():
+    for line in read("/etc/duo2-release").splitlines():
+        if line.startswith("openduo="):
+            return line.split("=", 1)[1].strip()
+    return ""
+
+
+def cmd_add(args):
+    if not args:
+        raise SystemExit("usage: duo2-boot add RELEASE [--retry]")
+    rel = args[0]
+    eid = be.entry_id(rel)
+    if not os.path.isdir(ENTRIES):
+        say("duo2-boot: no ESP at %s (an image build or a container): %s not added" % (ESP, rel))
+        return 0
+    image = os.path.join(KERNELS, rel, "Image")
+    if not os.path.exists(image):
+        raise SystemExit("duo2-boot: no %s" % image)
+    options, initrd, dtb = boot_params(rel)
+    src_dtb = dtb_path(rel, dtb) if dtb else None
+    if not src_dtb:
+        raise SystemExit("duo2-boot: the kernel %s has no DTB %r" % (rel, dtb))
+    ours = be.our_entries(entry_files())
+    existing = ours.get(eid)
+    if existing and not ("--retry" in args and be.state(existing[1]) == "bad"):
+        say("duo2-boot: %s has an entry already (%s): left as it is" % (rel, existing[0]))
+        return 0
+    seqs = load_seqs()
+    seq = max([v for v in seqs.values() if isinstance(v, int)] + [0]) + 1
+    tries = int(conf()["tries"] or be.TRIES)
+    with EspWritable():
+        need = os.path.getsize(image) + os.path.getsize(src_dtb)
+        st = os.statvfs(ESP)
+        if st.f_bavail * st.f_frsize < need + (8 << 20):
+            prune(dry=False, writable=False)
+            st = os.statvfs(ESP)
+            if st.f_bavail * st.f_frsize < need + (8 << 20):
+                raise SystemExit("duo2-boot: not enough room on the ESP for %s" % rel)
+        d = os.path.join(ESP, be.ESP_DIR, rel)
+        os.makedirs(d, exist_ok=True)
+        copy_checked(image, os.path.join(d, "Image"))
+        copy_checked(src_dtb, os.path.join(d, dtb))
+        text = be.entry_text(rel, seq, options, initrd, dtb, os_version())
+        if existing:
+            os.remove(os.path.join(ENTRIES, existing[0]))
+        target = os.path.join(ENTRIES, be.file_name(eid, tries))
+        with open(target + ".tmp", "w") as f:
+            f.write(text)
+        os.replace(target + ".tmp", target)
+    seqs[eid] = seq
+    save_json(SEQS, seqs)
+    say(
+        "duo2-boot: %s added with %d tries (%s), first in the boot order"
+        % (rel, tries, os.path.basename(target))
+    )
+    return 0
+
+
+def running_id():
+    eid = be.booted_entry(cmdline())
+    return eid if eid and eid.startswith(be.PREFIX) else None
+
+
+def cmd_remove(args):
+    if not args:
+        raise SystemExit("usage: duo2-boot remove RELEASE")
+    rel = args[0]
+    eid = be.entry_id(rel)
+    # The running kernel's modules are this package's files too (whichever
+    # entry booted it): never while it runs.
+    if rel == os.uname().release or eid == running_id():
+        raise SystemExit("duo2-boot: %s is the running kernel: not removed" % rel)
+    ours = be.our_entries(entry_files())
+    d = os.path.join(ESP, be.ESP_DIR, rel)
+    if eid not in ours and not os.path.isdir(d):
+        return 0
+    with EspWritable():
+        if eid in ours:
+            os.remove(os.path.join(ENTRIES, ours[eid][0]))
+        shutil.rmtree(d, ignore_errors=True)
+    say("duo2-boot: %s removed from the ESP" % rel)
+    return 0
+
+
+def rename_entry(eid, new_name_fn, what):
+    ours = be.our_entries(entry_files())
+    if eid not in ours:
+        say("duo2-boot: no entry for %s" % eid)
+        return 1
+    old = ours[eid][0]
+    new = new_name_fn(old)
+    if new == old:
+        say("duo2-boot: %s is %s already" % (eid, what))
+        return 0
+    with EspWritable():
+        os.rename(os.path.join(ENTRIES, old), os.path.join(ENTRIES, new))
+    say("duo2-boot: %s -> %s (%s)" % (old, new, what))
+    return 0
+
+
+def cmd_bless(_args):
+    eid = running_id()
+    if not eid:
+        say("duo2-boot: not booted from a packaged kernel's entry: nothing to bless")
+        return 0
+    rc = rename_entry(eid, be.blessed_name, "good")
+    if rc == 0:
+        prune(dry=False)
+    return rc
+
+
+def cmd_bad(args):
+    eid = be.entry_id(args[0]) if args else running_id()
+    if not eid:
+        raise SystemExit("duo2-boot: which kernel? (not booted from a packaged entry)")
+    return rename_entry(eid, be.bad_name, "bad: the previous kernel boots next")
+
+
+def prune(dry=True, writable=True):
+    ours = be.our_entries(entry_files())
+    entries = {i: p for i, (_f, p) in ours.items()}
+    on_esp = set()
+    try:
+        on_esp = {
+            be.entry_id(r) for r in os.listdir(os.path.join(ESP, be.ESP_DIR)) if be.valid_release(r)
+        }
+    except OSError:
+        pass
+    seqs = load_seqs()
+    keep = be.keep_set(entries, seqs, running_id(), int(conf()["keep"] or 2))
+    gone = sorted((set(entries) | on_esp) - keep)
+    if dry or not gone:
+        return gone
+
+    def do():
+        for eid in gone:
+            if eid in ours:
+                os.remove(os.path.join(ENTRIES, ours[eid][0]))
+            shutil.rmtree(os.path.join(ESP, be.ESP_DIR, be.release_of(eid)), ignore_errors=True)
+            say("duo2-boot: %s pruned from the ESP" % eid)
+
+    if writable:
+        with EspWritable():
+            do()
+    else:
+        do()
+    return gone
+
+
+def cmd_prune(_args):
+    prune(dry=False)
+    return 0
+
+
+def installed_kernel_packages():
+    p = subprocess.run(
+        ["dpkg-query", "-W", "-f", "${Package} ${db:Status-Abbrev}\n", KERNEL_PKG + "*"],
+        capture_output=True,
+        text=True,
+    )
+    return [
+        line.split()[0]
+        for line in p.stdout.splitlines()
+        if len(line.split()) >= 2 and line.split()[1].startswith("i")
+    ]
+
+
+def wanted_kernel():
+    """The kernel package the metapackage asks for (never purged)."""
+    p = subprocess.run(
+        ["dpkg-query", "-W", "-f", "${Depends}", "openduo-kernel-surface-duo2"],
+        capture_output=True,
+        text=True,
+    )
+    for dep in p.stdout.split(","):
+        name = dep.strip().split(" ")[0]
+        if name.startswith(KERNEL_PKG):
+            return name
+    return None
+
+
+def cmd_obsolete(_args):
+    ours = be.our_entries(entry_files())
+    entries = {i: p for i, (_f, p) in ours.items()}
+    keep = be.keep_set(entries, load_seqs(), running_id(), int(conf()["keep"] or 2))
+    wanted = wanted_kernel()
+    for pkg in installed_kernel_packages():
+        rel = pkg[len(KERNEL_PKG) :]
+        if not be.valid_release(rel) or rel == os.uname().release or pkg == wanted:
+            continue
+        if be.entry_id(rel) not in keep:
+            print(pkg)
+    return 0
+
+
+def status():
+    files = entry_files()
+    ours = be.our_entries(files)
+    seqs = load_seqs()
+    order = be.boot_order(
+        [(f, be.parse_entry(read(os.path.join(ENTRIES, f)))) for f in files if f.endswith(".conf")]
+    )
+    run = running_id()
+    out = {
+        "running": {
+            "release": os.uname().release,
+            "entry": run,
+            "state": be.state(ours[run][1])
+            if run in ours
+            else ("known-good" if not run else "unknown"),
+        },
+        "boots_next": order[0][0] if order else None,
+        "kernels": [],
+        "health": None,
+    }
+    for eid, (f, p) in sorted(ours.items(), key=lambda kv: seqs.get(kv[0], 0), reverse=True):
+        out["kernels"].append(
+            {
+                "release": be.release_of(eid),
+                "entry": f,
+                "state": be.state(p),
+                "tries_left": p["left"],
+                "installed": seqs.get(eid),
+            }
+        )
+    try:
+        out["health"] = json.loads(read(HEALTH, "null"))
+    except ValueError:
+        pass
+    return out
+
+
+def cmd_status(args):
+    st = status()
+    if "--json" in args:
+        print(json.dumps(st, sort_keys=True))
+        return 0
+    r = st["running"]
+    say("running: %s (%s)" % (r["release"], r["entry"] or "duo2.conf / not packaged"))
+    say("boots next: %s" % st["boots_next"])
+    for k in st["kernels"]:
+        say(
+            "  %-36s %-6s %s"
+            % (
+                k["release"],
+                k["state"],
+                "" if k["tries_left"] is None else "%d tries left" % k["tries_left"],
+            )
+        )
+    if st["health"]:
+        h = st["health"]
+        say(
+            "last check: %s on %s: %s"
+            % (h.get("verdict"), h.get("entry"), "; ".join(h.get("reasons", [])))
+        )
+    return 0
+
+
+# -- the health check --------------------------------------------------------------------------
+
+
+def show(unit):
+    p = subprocess.run(
+        ["systemctl", "show", "--property=" + ",".join(health.SHOW_PROPERTIES), unit],
+        capture_output=True,
+        text=True,
+    )
+    return health.unit_state_of_show(p.stdout)
+
+
+def wifi_facts():
+    devs = (
+        [d for d in os.listdir("/sys/class/net") if d.startswith("wl")]
+        if os.path.isdir("/sys/class/net")
+        else []
+    )
+    connected = any(read("/sys/class/net/%s/operstate" % d).strip() == "up" for d in devs)
+    blocked = False
+    for r in os.listdir("/sys/class/rfkill") if os.path.isdir("/sys/class/rfkill") else []:
+        base = "/sys/class/rfkill/" + r
+        if read(base + "/type").strip() == "wlan" and "1" in (
+            read(base + "/soft").strip(),
+            read(base + "/hard").strip(),
+        ):
+            blocked = True
+    configured = "network={" in read("/etc/wpa_supplicant/wpa_supplicant-wlan0.conf").replace(
+        " ", ""
+    )
+    return {
+        "wifi_device": bool(devs),
+        "wifi_connected": connected,
+        "wifi_blocked": blocked,
+        "wifi_configured": configured,
+    }
+
+
+def modem_facts():
+    out = {"modem_present": False, "modem_registered": False, "modem_unusable": False}
+    if not shutil.which("mmcli"):
+        return out
+    p = subprocess.run(["mmcli", "-m", "any", "-K"], capture_output=True, text=True, timeout=20)
+    if p.returncode != 0:
+        return out
+    kv = {}
+    for line in p.stdout.splitlines():
+        k, _, v = line.partition(":")
+        kv[k.strip()] = v.strip()
+    st = kv.get("modem.generic.state", "")
+    out["modem_present"] = True
+    out["modem_registered"] = st in ("registered", "connected", "connecting", "disconnecting")
+    out["modem_unusable"] = st in ("failed", "disabled", "locked", "disabling")
+    return out
+
+
+def facts():
+    f = {"compositor": show("duo-wc.service"), "touch": show("duo2-touchd.service")}
+    f.update(wifi_facts())
+    try:
+        f.update(modem_facts())
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return f
+
+
+def notify(summary, body):
+    """A notification in the GUI user's session (the shell), best effort."""
+    try:
+        sys.path.insert(0, HERE)
+        from duo2maint import notify as nt
+
+        nt.send(summary, body, app="Updates", icon="software-update-urgent-symbolic")
+    except Exception:  # noqa: BLE001 - a missing session must not stop the check
+        pass
+
+
+def cmd_health(args):
+    eid = running_id()
+    ours = be.our_entries(entry_files())
+    if not eid or eid not in ours or be.state(ours[eid][1]) != "trying":
+        say(
+            "duo2-boot: nothing to check (%s)"
+            % ("a good entry" if eid in ours else "not a packaged kernel being tried")
+        )
+        return 0
+    c = conf()
+    timeout = int(c["health_timeout"] or health.DEFAULT_TIMEOUT)
+    if "--timeout" in args:
+        timeout = int(args[args.index("--timeout") + 1])
+    wait = "--wait" in args
+    while True:
+        f = facts()
+        elapsed = time.monotonic()  # awake time since the boot (CLOCK_MONOTONIC)
+        verdict, reasons = health.evaluate(f, elapsed, timeout)
+        save_json(
+            HEALTH,
+            {
+                "entry": eid,
+                "verdict": verdict,
+                "reasons": reasons,
+                "facts": f,
+                "elapsed": int(elapsed),
+                "time": int(time.time()),
+            },
+        )
+        if verdict != "wait" or not wait:
+            break
+        time.sleep(5)
+    say("duo2-boot: %s: %s (%s)" % (eid, verdict, "; ".join(reasons)))
+    if verdict == "pass":
+        return 0
+    if verdict == "fail-hard":
+        rename_entry(eid, be.bad_name, "bad: the previous kernel boots next")
+        notify(
+            "The new system kernel did not start properly",
+            "The phone restarts with the previous kernel.",
+        )
+        if "--no-reboot" not in args and c["reboot_on_failure"].lower() in (
+            "yes",
+            "on",
+            "true",
+            "1",
+        ):
+            time.sleep(10)
+            subprocess.run(["systemctl", "reboot"])
+        return 1
+    if verdict == "fail-soft":
+        notify(
+            "The new system kernel is not confirmed yet",
+            "It found no network. It is tried again at the next restart; "
+            "after %s tries the previous kernel comes back by itself." % c["tries"],
+        )
+    return 1
+
+
+COMMANDS = {
+    "add": cmd_add,
+    "remove": cmd_remove,
+    "status": cmd_status,
+    "health": cmd_health,
+    "bless": cmd_bless,
+    "bad": cmd_bad,
+    "prune": cmd_prune,
+    "obsolete": cmd_obsolete,
+}
+
+
+def main(argv):
+    if not argv or argv[0] not in COMMANDS:
+        print(__doc__.strip().split("\n\n")[1], file=sys.stderr)
+        return 2
+    if os.geteuid() != 0 and argv[0] not in ("status",):
+        print("duo2-boot: run as root", file=sys.stderr)
+        return 2
+    return COMMANDS[argv[0]](argv[1:])
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

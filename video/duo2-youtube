@@ -1,0 +1,36 @@
+#!/bin/sh
+# duo2-os: YouTube (or any page given) in Chromium with the video core
+# decoding (docs/hardware/video.md), as an app window with its
+# own profile, so the settings it needs stay out of the everyday Chromium:
+#
+#   duo2-youtube [URL]          default https://m.youtube.com/
+#
+# - The Raspberry Pi OS build of the same Chromium in /opt/duo2-chromium-rpi
+#   when it is there: V4L2 is its only hardware decoder and its GPU sandbox
+#   lets the decoder node through.
+# - Otherwise Debian's chromium with PreferV4L2VideoAcceleration (it has
+#   VA-API and V4L2, VA-API by default) and --disable-gpu-sandbox: Debian's
+#   Linux GPU sandbox refuses /dev/videoN, so the decoder cannot open with it
+#   on. That is why this runs in a profile of its own.
+# - The duo2-os codec extension tells YouTube that AV1 cannot be played (the
+#   video core has no AV1 decoder), so it serves VP9 or H.264. For now its
+#   variant that hides VP9 as well is the default (DUO2_VIDEO_CODECS=h264):
+#   stopping a VP9 session crashes the video firmware on the running kernel
+#   (docs/hardware/video.md). DUO2_VIDEO_CODECS= (empty) lets YouTube use VP9.
+set -eu
+url=${1:-https://m.youtube.com/}
+codecs=${DUO2_VIDEO_CODECS-h264}
+ext=/usr/local/share/duo2-os/chromium-codecs${codecs:+-$codecs}
+profile=${XDG_CONFIG_HOME:-$HOME/.config}/duo2-youtube
+common="--user-data-dir=$profile --no-first-run --no-default-browser-check --load-extension=$ext --app=$url"
+rpi=/opt/duo2-chromium-rpi/usr/lib/chromium/chromium
+if [ -x "$rpi" ]; then
+    # The /etc/chromium.d flags (duo-wc: Wayland, the on-screen keyboard,
+    # touch) come from Debian's /usr/bin/chromium wrapper, which this build
+    # is not started through.
+    # shellcheck disable=SC2086
+    exec "$rpi" --ozone-platform=wayland --enable-wayland-ime --wayland-text-input-version=3 \
+        --touch-events=enabled --password-store=basic --use-angle=gles $common
+fi
+# shellcheck disable=SC2086
+exec chromium --enable-features=PreferV4L2VideoAcceleration --disable-gpu-sandbox $common

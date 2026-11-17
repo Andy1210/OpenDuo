@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly check for new Waydroid Android images
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

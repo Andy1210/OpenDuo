@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Watch the Android apps' position bridge (duo2-android-location, docs/hardware/location.md)
+# while an Android app (Google Maps, OsmAnd, a GPS test app) asks for the
+# position on the phone: what Android asks, what runs on the host (geoclue's
+# level, the modem's GNSS engine), when the first fix came and how exact the
+# last one was. Never the position itself (the bridge stores none).
+#
+#   scripts/duo2-android-location-test [SECONDS [EVERY]]
+#
+#   SECONDS how long to watch (default 300), EVERY seconds between lines (5)
+#
+# Start the Android app on the phone first (outdoors for a satellite fix).
+set -euo pipefail
+. "$(dirname "$0")/lib/remote.sh"
+secs=${1:-300}
+every=${2:-5}
+case "$secs$every" in *[!0-9]*) echo "usage: $0 [SECONDS [EVERY]]" >&2; exit 2 ;; esac
+
+echo "== the bridge (the GUI user's unit, with the Android session)"
+duo2_user "systemctl --user is-active duo2-waydroid-session duo2-android-location 2>&1 | paste -sd ' '
+journalctl --user -u duo2-android-location -b --no-pager -o cat 2>/dev/null | tail -n 15"
+echo "== every $every s for $secs s: requests, geoclue level (8 = satellites, 5 = cell), modem sources, fixes"
+duo2_ssh "end=\$((\$(date +%s) + $secs))
+u=\$(id -u $DUO2_USER)
+while [ \$(date +%s) -lt \$end ]; do
+    s=/run/user/\$u/duo2-android-location.json
+    src=\$(sudo mmcli -m any --location-status 2>/dev/null | sed -n 's/.*enabled: //p')
+    if sudo test -e \$s; then
+        sudo python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1]));
+r=\",\".join(k for k,v in d[\"requests\"].items() if v) or \"-\";
+print(\"%s  asks=%-11s level=%d awake=%-5s fixes=%s first_fix=%s acc=%s %s%s\" % (sys.argv[2], r,
+  d[\"geoclue_level\"], d[\"keeping_awake\"], d[\"fixes_sent\"], d[\"first_fix_s\"], d[\"last_accuracy_m\"],
+  \"FROZEN \" if d[\"frozen\"] else \"\", (\"error: \" + d[\"error\"]) if d[\"error\"] else \"\"))' \$s \"\$(date +%T) modem=[\$src]\"
+    else
+        echo \"\$(date +%T) modem=[\$src]  no bridge status (Android not running?)\"
+    fi
+    sleep $every
+done"

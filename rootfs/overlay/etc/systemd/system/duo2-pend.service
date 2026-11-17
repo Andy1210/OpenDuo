@@ -1,0 +1,14 @@
+[Unit]
+Description=Surface pen over Bluetooth: address resolution, AutoBond state, haptics
+Documentation=file:/usr/local/sbin/duo2-pend
+After=bluetooth.service
+
+[Service]
+ExecStart=/usr/bin/python3 -I /usr/local/sbin/duo2-pend
+Restart=on-failure
+RestartSec=5
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

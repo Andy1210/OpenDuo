@@ -1,0 +1,82 @@
+From 1bcecf58fd46d1761f7206c2ccd00a67da9ef8d4 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 08:45:48 +0100
+Subject: [PATCH 040/137] drm/msm: Don't start the CP when hw_init failed
+
+msm_gpu_submit() ignores the result of msm_gpu_hw_init(). When the
+a6xx GMU does not answer the GPU_SET OOB, hw_init() returns before it
+programs anything, yet the submit is written to the ring and the WPTR
+is kicked. Once GX comes up the CP runs on reset-state registers;
+on a Surface Duo 2 (A660) this was the observed sequence: six
+"Timeout waiting for GMU OOB set GPU_SET: 0x0", then a hang interrupt
+with rptr 0 / wptr 1123 and a CP translation fault at iova 0, which
+stalled the SMMU in the middle of recovery.
+
+Keep the submit queued (so its fence and the replay still work) but
+do not touch the hardware; queue recovery instead, which forces the
+GMU off and cold-boots it. After recovery, replay only when the GPU
+was actually set up; otherwise the next submit tries again.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/gpu/drm/msm/msm_gpu.c | 27 ++++++++++++++++++++++-----
+ 1 file changed, 22 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/msm/msm_gpu.c b/drivers/gpu/drm/msm/msm_gpu.c
+index caa86279f561..bd4e20a609e4 100644
+--- a/drivers/gpu/drm/msm/msm_gpu.c
++++ b/drivers/gpu/drm/msm/msm_gpu.c
+@@ -564,9 +564,10 @@ static void recover_worker(struct kthread_work *work)
+ 
+ 	/*
+ 	 * Replay all remaining submits starting with highest priority
+-	 * ring
++	 * ring, unless the GPU still could not be set up: the next submit
++	 * tries hw_init again and recovers again if it still fails.
+ 	 */
+-	for (i = 0; i < gpu->nr_rings; i++) {
++	for (i = 0; !gpu->needs_hw_init && i < gpu->nr_rings; i++) {
+ 		struct msm_ringbuffer *ring = gpu->rb[i];
+ 		unsigned long flags;
+ 
+@@ -796,12 +797,13 @@ void msm_gpu_submit(struct msm_gpu *gpu, struct msm_gem_submit *submit)
+ {
+ 	struct msm_ringbuffer *ring = submit->ring;
+ 	unsigned long flags;
++	int ret;
+ 
+ 	WARN_ON(!mutex_is_locked(&gpu->lock));
+ 
+ 	pm_runtime_get_sync(&gpu->pdev->dev);
+ 
+-	msm_gpu_hw_init(gpu);
++	ret = msm_gpu_hw_init(gpu);
+ 
+ 	submit->seqno = submit->hw_fence->seqno;
+ 
+@@ -824,8 +826,23 @@ void msm_gpu_submit(struct msm_gpu *gpu, struct msm_gem_submit *submit)
+ 	gpu->active_submits++;
+ 	mutex_unlock(&gpu->active_lock);
+ 
+-	gpu->funcs->submit(gpu, submit);
+-	submit->ring->cur_ctx_seqno = submit->queue->ctx->seqno;
++	if (unlikely(ret)) {
++		/*
++		 * The GPU is not set up (the GMU did not answer the GPU_SET
++		 * OOB, for one). Writing the ring and the WPTR now would let
++		 * the CP run on reset-state registers (RB_BASE and
++		 * SQE_INSTR_BASE 0): a CP fault at iova 0 that stalls the SMMU.
++		 * Keep the submit queued and let recovery reset the GPU and
++		 * the GMU and replay it.
++		 */
++		DRM_DEV_ERROR_RATELIMITED(gpu->dev->dev,
++					  "%s: hw_init failed (%d), not starting the GPU, recovering\n",
++			gpu->name, ret);
++		kthread_queue_work(gpu->worker, &gpu->recover_work);
++	} else {
++		gpu->funcs->submit(gpu, submit);
++		submit->ring->cur_ctx_seqno = submit->queue->ctx->seqno;
++	}
+ 
+ 	pm_runtime_put(&gpu->pdev->dev);
+ 	hangcheck_timer_reset(gpu);

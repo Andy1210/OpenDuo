@@ -1,0 +1,70 @@
+From 7f7edb2474a53d561f11bfa8394bc5a009844467 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Mon, 9 Nov 2026 20:29:21 +0100
+Subject: [PATCH 09/16] media: iris: Give buffers back as QUEUED when
+ start_streaming() fails in the error state
+
+vb2_start_streaming() passes the buffers queued before VIDIOC_STREAMON
+to buf_queue() and only then calls start_streaming(). When the instance
+is already in the error state (the Gen1 decoder sets it from the
+sequence-changed event of a stream it cannot decode, e.g. 10-bit or
+interlaced content), iris_vb2_buf_queue() completed each of these
+buffers with VB2_BUF_STATE_ERROR, start_streaming() then failed with
+-EBUSY and found nothing on the m2m queue to give back, and vb2 warned
+about a done list that a queue which never started should not have
+(videobuf2-core: WARN_ON(!list_empty(&q->done_list))).
+
+Before start_streaming() has been called, keep such a buffer on the m2m
+queue instead, so that the error path of iris_vb2_start_streaming()
+returns it as VB2_BUF_STATE_QUEUED, as start_streaming() is documented
+to do. A buffer queued to a streaming queue in the error state still
+completes with an error.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/media/platform/qcom/iris/iris_vb2.c | 18 ++++++++++++++++--
+ 1 file changed, 16 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_vb2.c b/drivers/media/platform/qcom/iris/iris_vb2.c
+index 8faf709c26c1..5845915416b1 100644
+--- a/drivers/media/platform/qcom/iris/iris_vb2.c
++++ b/drivers/media/platform/qcom/iris/iris_vb2.c
+@@ -299,7 +299,22 @@ void iris_vb2_buf_queue(struct vb2_buffer *vb2)
+ 	inst = vb2_get_drv_priv(vb2->vb2_queue);
+ 
+ 	mutex_lock(&inst->lock);
++	m2m_ctx = inst->m2m_ctx;
++
+ 	if (inst->state == IRIS_INST_ERROR) {
++		/*
++		 * vb2 hands the buffers queued before VIDIOC_STREAMON over
++		 * right before it calls start_streaming(). That call fails in
++		 * this state, and its error path has to give each of these
++		 * buffers back as QUEUED: keep the buffer on the m2m queue for
++		 * iris_helper_buffers_done() instead of completing it with an
++		 * error here, which makes vb2 warn and leaves it on the done
++		 * list of a queue that never started.
++		 */
++		if (!vb2_start_streaming_called(vb2->vb2_queue)) {
++			v4l2_m2m_buf_queue(m2m_ctx, vbuf);
++			goto unlock;
++		}
+ 		ret = -EBUSY;
+ 		goto exit;
+ 	}
+@@ -307,8 +322,6 @@ void iris_vb2_buf_queue(struct vb2_buffer *vb2)
+ 	if (vbuf->field == V4L2_FIELD_ANY)
+ 		vbuf->field = V4L2_FIELD_NONE;
+ 
+-	m2m_ctx = inst->m2m_ctx;
+-
+ 	if (!vb2->planes[0].bytesused && V4L2_TYPE_IS_OUTPUT(vb2->type)) {
+ 		ret = -EINVAL;
+ 		goto exit;
+@@ -345,5 +358,6 @@ void iris_vb2_buf_queue(struct vb2_buffer *vb2)
+ 		iris_inst_change_state(inst, IRIS_INST_ERROR);
+ 		v4l2_m2m_buf_done(vbuf, VB2_BUF_STATE_ERROR);
+ 	}
++unlock:
+ 	mutex_unlock(&inst->lock);
+ }

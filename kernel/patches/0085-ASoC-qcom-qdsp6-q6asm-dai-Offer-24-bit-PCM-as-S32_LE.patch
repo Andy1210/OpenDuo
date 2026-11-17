@@ -1,0 +1,86 @@
+From de73687ab0dfb211ea6f8151522cd0c4e375e751 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 08:40:33 +0100
+Subject: [PATCH 085/137] ASoC: qcom: qdsp6: q6asm-dai: Offer 24-bit PCM as
+ S32_LE, not S24_LE
+
+The MultiMedia front ends offer S24_LE and pass it to the DSP as 24-bit
+ASM_MEDIA_FMT_MULTI_CHANNEL_PCM_V2. The DSP's interface definition for
+that format says 24-bit samples travel in 32-bit words, in their most
+significant 24 bits, both ways: on playback the client must place them
+there, on capture the DSP puts them there. ALSA's S24_LE is the other
+alignment, the sample in the least significant 24 bits.
+
+So a 24-bit stream plays 48 dB too quietly (the DSP reads the sample
+shifted down by 8 bits; the low 8 bits it ignores), and a 24-bit capture
+reads 48 dB too loud and wraps as soon as the signal is above -48 dBFS
+(the low byte of every word is zero, the sample's top byte is lost). A
+sound server that picks the widest format, as PipeWire does, plays
+nothing audible and records noise. Measured on SM8350 (Surface Duo 2,
+ADSP with the APR/Elite audio services): an S24_LE capture through
+MultiMedia2 has a zero low byte in every word.
+
+Offer S32_LE instead: that is exactly what the DSP sends and expects for
+24 bits, with the low byte dropped on playback and zero on capture.
+S24_LE goes, it never matched the DSP's format.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ sound/soc/qcom/qdsp6/q6asm-dai.c | 16 +++++++++++-----
+ 1 file changed, 11 insertions(+), 5 deletions(-)
+
+diff --git a/sound/soc/qcom/qdsp6/q6asm-dai.c b/sound/soc/qcom/qdsp6/q6asm-dai.c
+index e3742663c13e..a4a1a320b295 100644
+--- a/sound/soc/qcom/qdsp6/q6asm-dai.c
++++ b/sound/soc/qcom/qdsp6/q6asm-dai.c
+@@ -90,7 +90,7 @@ static const struct snd_pcm_hardware q6asm_dai_hardware_capture = {
+ 				SNDRV_PCM_INFO_INTERLEAVED |
+ 				SNDRV_PCM_INFO_PAUSE | SNDRV_PCM_INFO_RESUME),
+ 	.formats =              (SNDRV_PCM_FMTBIT_S16_LE |
+-				SNDRV_PCM_FMTBIT_S24_LE),
++				SNDRV_PCM_FMTBIT_S32_LE),
+ 	.rates =                SNDRV_PCM_RATE_8000_48000,
+ 	.rate_min =             8000,
+ 	.rate_max =             48000,
+@@ -113,7 +113,7 @@ static const struct snd_pcm_hardware q6asm_dai_hardware_playback = {
+ 				SNDRV_PCM_INFO_INTERLEAVED |
+ 				SNDRV_PCM_INFO_PAUSE | SNDRV_PCM_INFO_RESUME),
+ 	.formats =              (SNDRV_PCM_FMTBIT_S16_LE |
+-				SNDRV_PCM_FMTBIT_S24_LE),
++				SNDRV_PCM_FMTBIT_S32_LE),
+ 	.rates =                SNDRV_PCM_RATE_8000_192000,
+ 	.rate_min =             8000,
+ 	.rate_max =             192000,
+@@ -139,7 +139,7 @@ static const struct snd_pcm_hardware q6asm_dai_hardware_playback = {
+ 				  SNDRV_PCM_RATE_176400 |		\
+ 				  SNDRV_PCM_RATE_192000),		\
+ 			.formats = (SNDRV_PCM_FMTBIT_S16_LE |		\
+-					SNDRV_PCM_FMTBIT_S24_LE),	\
++					SNDRV_PCM_FMTBIT_S32_LE),	\
+ 			.channels_min = 1,				\
+ 			.channels_max = 8,				\
+ 			.rate_min =     8000,				\
+@@ -151,7 +151,7 @@ static const struct snd_pcm_hardware q6asm_dai_hardware_playback = {
+ 				  SNDRV_PCM_RATE_12000 |		\
+ 				  SNDRV_PCM_RATE_24000),		\
+ 			.formats = (SNDRV_PCM_FMTBIT_S16_LE |		\
+-				    SNDRV_PCM_FMTBIT_S24_LE),		\
++				    SNDRV_PCM_FMTBIT_S32_LE),		\
+ 			.channels_min = 1,				\
+ 			.channels_max = 4,				\
+ 			.rate_min =     8000,				\
+@@ -505,7 +505,13 @@ static int q6asm_dai_hw_params(struct snd_soc_component *component,
+ 	case SNDRV_PCM_FORMAT_S16_LE:
+ 		prtd->bits_per_sample = 16;
+ 		break;
+-	case SNDRV_PCM_FORMAT_S24_LE:
++	case SNDRV_PCM_FORMAT_S32_LE:
++		/*
++		 * 24-bit linear PCM (ASM_MEDIA_FMT_MULTI_CHANNEL_PCM_V2) is
++		 * carried in 32-bit words, in their most significant 24 bits,
++		 * both ways: the DSP drops the low byte on playback and sends
++		 * it as zero on capture. That is S32_LE, not S24_LE.
++		 */
+ 		prtd->bits_per_sample = 24;
+ 		break;
+ 	}

@@ -1,0 +1,57 @@
+From ad75e05cc9b9183df11c87e86c425fbd341c831d Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Fri, 6 Nov 2026 20:32:54 +0100
+Subject: [PATCH 024/137] BRING-UP: arm64: dts: qcom:
+ sm8350-microsoft-surface-duo2: Clock the high-speed-only USB PIPE from UTMI
+
+The bring-up DTBs run the primary USB controller high speed only (no
+USB3 PHY). Its PIPE interface is then clocked by nothing: the QMP PHY
+that would drive it is never powered. While clk_ignore_unused kept the
+firmware's clocks on this went unnoticed; since unused clocks are
+switched off, enabling ep0 fails ('failed to enable ep0out') and the
+gadget never attaches. qcom,select-utmi-as-pipe-clk is the glue's switch
+for exactly this case.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../qcom/sm8350-microsoft-surface-duo2-bringup-j.dts   | 10 ++++++++++
+ .../dts/qcom/sm8350-microsoft-surface-duo2-bringup.dts |  5 +++++
+ 2 files changed, 15 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup-j.dts b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup-j.dts
+index 88cda4197381..f9075897f99e 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup-j.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup-j.dts
+@@ -37,6 +37,16 @@ &vreg_l13c_3p0 {
+ 	regulator-always-on;
+ };
+ 
++&usb_1 {
++	/*
++	 * High speed only (no USB3 PHY, below): clock the PIPE interface from
++	 * UTMI. Otherwise its clock comes from the QMP PHY, which nothing powers
++	 * here; once unused clocks are switched off, ep0 can no longer be enabled
++	 * and the gadget never attaches.
++	 */
++	qcom,select-utmi-as-pipe-clk;
++};
++
+ &usb_1_dwc3 {
+ 	maximum-speed = "high-speed";
+ 	phys = <&usb_1_hsphy>;
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup.dts b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup.dts
+index 7a7285a9e03f..0be9a71b582d 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup.dts
+@@ -40,6 +40,11 @@ &vreg_l13c_3p0 {
+ 	regulator-always-on;
+ };
+ 
++&usb_1 {
++	/* high speed only: PIPE clocked from UTMI (see the -j variant) */
++	qcom,select-utmi-as-pipe-clk;
++};
++
+ &usb_1_dwc3 {
+ 	maximum-speed = "high-speed";
+ 	phys = <&usb_1_hsphy>;

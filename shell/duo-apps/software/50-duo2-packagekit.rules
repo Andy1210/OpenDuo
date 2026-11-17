@@ -1,0 +1,36 @@
+// duo2-os: the desktop user may install packages and refresh the package
+// lists through PackageKit (GNOME Software) without a password prompt.
+// duo-wc's session has no logind session and no polkit agent, so
+// PackageKit's defaults (an admin password for an active local session)
+// could never be met. Narrow on purpose: no untrusted packages, no
+// repository or signing-key changes, no offline updates or upgrades.
+//
+// REMOVING packages needs the user's yes in the shell (2026-11-07,
+// docs/hardware/security.md): every app runs as that same user, so any
+// app could ask PackageKit to remove packages; polkit runs
+// duo2-polkit-confirm, which asks duo-wc (polkitd may only `confirm` there)
+// to show the question; it answers within 9 s (no answer = no).
+// @USER@ is replaced at install.
+polkit.addRule(function(action, subject) {
+    if (subject.user != "@USER@") {
+        return polkit.Result.NOT_HANDLED;
+    }
+    if (action.id == "org.freedesktop.packagekit.package-install" ||
+        action.id == "org.freedesktop.packagekit.system-sources-refresh") {
+        return polkit.Result.YES;
+    }
+    if (action.id == "org.freedesktop.packagekit.package-remove") {
+        var what = action.lookup("package_ids") || action.lookup("package-ids") || "";
+        try {
+            var answer = polkit.spawn(["/usr/local/lib/duo2/duo2-polkit-confirm",
+                                       "remove-packages", String(subject.pid), String(what)]);
+            if (answer.trim() == "yes") {
+                return polkit.Result.YES;
+            }
+        } catch (error) {
+            polkit.log("duo2: removing packages not confirmed: " + error);
+        }
+        return polkit.Result.NO;
+    }
+    return polkit.Result.NOT_HANDLED;
+});

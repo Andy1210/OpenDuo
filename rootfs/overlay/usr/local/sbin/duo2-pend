@@ -1,0 +1,1614 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+"""duo2-pend: the Bluetooth side of the Surface pen.
+
+1. Address resolution for bonded LE devices with an IRK. BlueZ 5.82 sets the
+   kernel's ADDRESS_RESOLUTION device flag only for a device whose stored
+   address is itself private (an RPA); a device bonded under its identity
+   address with an IRK (the Surface Slim Pen 2: a static address and an
+   IRK) never gets it. Without the flag the kernel does not put the IRK into
+   the controller's resolving list, and the background scan, which lets only
+   the accept list through, drops the pen's reconnection adverts (it sends
+   them from RPAs): the pen pairs, works, drops the idle link after a minute
+   and never comes back. BlueZ fixed this upstream ("device: Fix privacy",
+   e3a16c28e479, 2025-10); until the distribution's BlueZ has it, this sets
+   the flag over mgmt whenever BlueZ hands such a device to the kernel
+   (Device Added) or its flags change without it. With a fixed BlueZ it
+   finds the flag set and does nothing.
+
+2. The AutoBond host state for the digitizer, as the stock touch-pen HAL
+   kept it: /run/duo2-pen/autobond (root only: it holds the adapter's
+   address) says the host's LE address, whether Bluetooth is on and whether
+   a Surface pen is connected; duo2-touchd turns it into the digitizer's
+   reports 0x56 and 0x38 (and 0x70) whenever the digitizer is on.
+
+3. The pen's haptics (its Simple Haptic Controller, report 0x41, over
+   Bluetooth): a click when the top button is pressed (`button_click` = on |
+   off), and the writing feel (Duo Settings > Pen: /etc/duo2/pen.conf
+   `writing_feel` = off | ink | pencil | marker | chisel | brush,
+   `feel_strength` = 1..100) DRIVEN FROM HERE: the pen's own inking
+   waveforms (its Auto Trigger on the tip switch, or a continuous waveform
+   as a Manual Trigger, Windows' way) never play on the Duo 2 (measured
+   2026-11-16), its discrete ones do. So while the tip is down (the pen's
+   tablet devices of duo2-touchd, read alongside duo-wc: the tip, where it
+   is, the pressure, each frame's time) short ticks go to the pen as Manual
+   Triggers. The pen plays one short fixed tick per report: held in the air
+   (2026-11-17), the waveform's cutoff (20 / 50 / 200 ms), RepeatCount and
+   RetriggerPeriod (5 clicks 40 ms apart, 10 hovers 25 ms apart), the
+   intensity (60 against 200) and HOVER / CLICK / PRESS all felt alike;
+   with the tip on the glass the waveform and the spacing are a little
+   noticeable. So the feel is made by WHEN the ticks come, and a little by
+   which of two waveforms each is (`WritingFeel`, `TEXTURES`): one at the
+   touch (the feel's firmer waveform), then a grain (the feel's own
+   waveform) at distances of travel drawn at random around the feel's
+   spacing, thinner when the pen crawls, a little denser for a harder
+   press, and an accent (the firmer one) on every turn sharper than the
+   feel's; none at the lift, nothing more for a dot. The ticks keep each
+   waveform's gap and are never queued: a fast stroke saturates the pen's
+   link (~20 reports a second) unevenly rather than late. A long straight
+   line is an even, light grain; a scribble dense and uneven; no stroke
+   repeats a pattern (touch/tools/pen-feel-sim.py prints the ticks of a few
+   strokes, offline). The pen's Auto Trigger is kept at NONE. Nothing is
+   written to the pen while pen-fw.py updates its firmware
+   (/run/duo2-pen/fw-update). The pen drops its link each time it
+   comes near the screen and is back ~140 ms later with a new HID device:
+   the pulses follow it (the newest device, a 50 ms look for 8 s after each
+   connection), hold back for its first LINK_SETTLE s, and never wait on a
+   request to the pen: whatever may block (feature reports, pen-fw.py) runs
+   on a thread of its own (`Chores`), once per run, after a connection has
+   settled and while the pen is not writing. Each connection that had
+   pulses to send ends with one log line: how many went (how many of them
+   accents), how many were held back or dropped and why.
+
+4. The pen's firmware versions, read once per run and again after an update
+   (pen-fw.py version --json: one GET_FEATURE, read only) into
+   /var/lib/duo2-pen/firmware.json for Duo Settings > Pen > Firmware.
+
+5. Pulses for apps (games: a bite, a cut): a datagram `pulse <waveform>
+   <intensity 1-255>` on /run/duo2-pen/haptics (root's, mode 0660, its group
+   the GUI user's: that of duo-wc's runtime directory, or pen.conf's
+   `app_haptics_group`; the directory itself 0711). Only the pen's discrete
+   waveforms (click, press, release, hover, success, error), one every
+   APP_GAP s at most and APP_RATE a second over any longer while (a budget
+   of APP_BURST; the rest are dropped, never queued: a late buzz is no
+   feel, and an app cannot keep the pen's motor running), the same
+   manual-trigger output report as the writing feel and nothing else. A
+   flood of datagrams is not read for APP_FLOOD_PAUSE s at a time (the
+   socket's small buffer drops the rest). `app_haptics = off` in pen.conf
+   closes the socket.
+
+Runs as root (mgmt control channel, BlueZ's storage, the pen's hidraw and
+input nodes). Logs no addresses.
+"""
+
+import collections
+import ctypes
+import errno
+import fcntl
+import glob
+import grp
+import json
+import math
+import os
+import queue
+import select
+import socket
+import struct
+import subprocess
+import sys
+import threading
+import time
+
+AF_BLUETOOTH, BTPROTO_HCI, HCI_CHANNEL_CONTROL, HCI_DEV_NONE = 31, 1, 3, 0xFFFF
+SOCK_RAW, SOCK_CLOEXEC = 3, 0o2000000
+INDEX_NONE = 0xFFFF
+
+OP_READ_INDEX_LIST, OP_READ_INFO = 0x0003, 0x0004
+OP_GET_DEVICE_FLAGS, OP_SET_DEVICE_FLAGS = 0x004F, 0x0050
+EV_CMD_COMPLETE, EV_CMD_STATUS = 0x0001, 0x0002
+EV_INDEX_ADDED, EV_INDEX_REMOVED, EV_NEW_SETTINGS = 0x0004, 0x0005, 0x0006
+EV_DEVICE_CONNECTED, EV_DEVICE_DISCONNECTED = 0x000B, 0x000C
+EV_NEW_IRK, EV_DEVICE_ADDED, EV_DEVICE_UNPAIRED = 0x0018, 0x001A, 0x0016
+EV_DEVICE_FLAGS_CHANGED = 0x002A
+
+SETTING_POWERED = 0x01
+FLAG_ADDRESS_RESOLUTION = 0x04
+BDADDR_LE_PUBLIC, BDADDR_LE_RANDOM = 1, 2
+
+STORAGE = "/var/lib/bluetooth"
+STATE_DIR = "/run/duo2-pen"
+STATE_FILE = STATE_DIR + "/autobond"
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def read_text(path):
+    with open(path) as f:
+        return f.read()
+
+
+# --- BlueZ's storage ------------------------------------------------------------------------
+
+
+def parse_info(text):
+    """A BlueZ device 'info' file: (name, address type, has an IRK)."""
+    name, atype, irk, sect = "", "", False, None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            sect = line.strip("[]")
+        elif sect == "General" and line.startswith("Name="):
+            name = line[5:]
+        elif sect == "General" and line.startswith("AddressType="):
+            atype = line[12:]
+        elif sect == "IdentityResolvingKey" and line.startswith("Key=") and len(line) > 4:
+            irk = True
+    return name, atype, irk
+
+
+def is_surface_pen(name):
+    return "Surface" in name and "Pen" in name
+
+
+def addr_from_str(s):
+    """'AA:BB:CC:DD:EE:FF' -> 6 bytes as mgmt carries them (LSB first)."""
+    return bytes(int(x, 16) for x in s.split(":"))[::-1]
+
+
+def scan_storage(adapter_addr_le):
+    """{(addr_le, mgmt type): (name, has_irk)} for the adapter's LE devices."""
+    out = {}
+    adir = os.path.join(STORAGE, ":".join("%02X" % b for b in adapter_addr_le[::-1]))
+    for info in glob.glob(os.path.join(adir, "*", "info")):
+        try:
+            name, atype, irk = parse_info(read_text(info))
+        except OSError:
+            continue
+        dev = os.path.basename(os.path.dirname(info))
+        if len(dev) != 17:
+            continue
+        if atype not in ("public", "static"):
+            continue  # BR/EDR only (no AddressType) or a private address
+        out[(addr_from_str(dev), BDADDR_LE_PUBLIC if atype == "public" else BDADDR_LE_RANDOM)] = (
+            name,
+            irk,
+        )
+    return out
+
+
+def flags_with_resolution(supported, current):
+    """The flags to set, or None when nothing is to be done."""
+    if not supported & FLAG_ADDRESS_RESOLUTION or current & FLAG_ADDRESS_RESOLUTION:
+        return None
+    return current | FLAG_ADDRESS_RESOLUTION
+
+
+def autobond_text(host_le, powered, pen_link):
+    lines = ["# duo2-pend -> duo2-touchd: the AutoBond host state (the stock touch-pen HAL's)"]
+    if host_le:
+        lines.append("host %s public" % host_le[::-1].hex())
+    lines.append("adapter %s" % ("on" if powered else "off"))
+    lines.append("pen-link %s" % ("up" if pen_link else "down"))
+    return "\n".join(lines) + "\n"
+
+
+# --- the pen's haptics ---------------------------------------------------------------------
+
+PEN_CONF = "/etc/duo2/pen.conf"
+FW_MARK = STATE_DIR + "/fw-update"
+PEN_HID_GLOB = "/sys/bus/hid/devices/0005:045E:0C0F.*"
+REPORT_HAPTIC, REPORT_WAVEFORMS = 0x41, 0x42
+# The HID Simple Haptic Controller's waveforms (HUT page 0x0E) and the pen's
+# own list (feature 0x42: ordinal 3 on, after NONE 1 and STOP 2).
+WAVE_NONE, WAVE_CLICK = 0x1001, 0x1003
+WAVE_PRESS, WAVE_HOVER = 0x1006, 0x1008
+FEELS = {"ink": 0x100B, "pencil": 0x100C, "marker": 0x100D, "chisel": 0x100E, "brush": 0x100F}
+# The pulses' waveforms, lightest first (their lengths on the pen, feature 0x42: 35, 45 and
+# 60 ms), and the least time from one to the next: the length and a margin (a pulse cuts the
+# one playing), never under the pen's connection interval (45 ms: one report an event).
+WAVE_GAPS = {WAVE_HOVER: 0.045, WAVE_CLICK: 0.055, WAVE_PRESS: 0.070}
+LINK_SETTLE = 1.0  # s after the pen's HID device appears: BlueZ is still reading the pen's
+# GATT table, an output report waits ~0.5 s in its queue (a late pulse is no feel)
+CHORE_AFTER = 3.0  # s into a connection before the reads that may wait on the pen (Chores) ...
+CHORE_QUIET = 1.0  # ... and this long after the last pulse (never while the pen writes)
+FEATURE_SLOW = 4.0  # s: a feature request this slow was not answered (uhid gives up at 5 s)
+SLOW_BACKOFF = 600  # s: after one, no more of them for this long (the pulses never wait on them)
+PEN_TABLETS = ("Surface Duo 2 Pen Left", "Surface Duo 2 Pen Right")  # duo2-touchd's devices
+BTN_TOUCH, ABS_X, ABS_Y, ABS_PRESSURE = 0x14A, 0x00, 0x01, 0x18
+EV_SYN, EV_KEY, EV_ABS = 0, 1, 3
+CLOCK_MONOTONIC = 1  # the tablet devices' event times on time.monotonic()'s clock
+# The list the Slim Pen 2 reports (firmware 5.148 / haptic 5.117), for when it cannot be read.
+DEFAULT_WAVEFORMS = [
+    0x1003,
+    0x1006,
+    0x1007,
+    0x1008,
+    0x1009,
+    0x100A,
+    0x100B,
+    0x100C,
+    0x100D,
+    0x100E,
+    0x100F,
+    0x1010,
+    0x1011,
+]
+DEFAULT_STRENGTH = 50
+KEY_F18, KEY_F20 = 188, 190  # the top button: Super + F20 / F19 / F18
+PEN_FW = "/usr/local/lib/duo2-touch-tools/pen-fw.py"
+FW_CACHE = "/var/lib/duo2-pen/firmware.json"  # for Duo Settings > Pen > Firmware
+
+
+def haptic_conf(text):
+    """(writing feel, strength 1..100, button click) from pen.conf's text: the
+    last valid line of each wins, the defaults (off, 50, off) otherwise. Pure."""
+    feel, strength, click = "off", DEFAULT_STRENGTH, False
+    for line in (text or "").splitlines():
+        line = line.split("#", 1)[0]
+        if "=" not in line:
+            continue
+        key, value = (part.strip() for part in line.split("=", 1))
+        if key == "writing_feel" and (value == "off" or value in FEELS):
+            feel = value
+        elif key == "feel_strength" and value.isdigit() and 1 <= int(value) <= 100:
+            strength = int(value)
+        elif key == "button_click" and value in ("on", "off"):
+            click = value == "on"
+    return feel, strength, click
+
+
+APP_SOCKET = STATE_DIR + "/haptics"
+SESSION_DIR = "/run/duo-wc"  # duo-wc's runtime directory: owned by the GUI user and its group
+# What apps may play: the pen's discrete waveforms (its continuous ones never play on the Duo 2).
+APP_WAVES = {
+    "click": WAVE_CLICK,
+    "press": WAVE_PRESS,
+    "release": 0x1007,
+    "hover": WAVE_HOVER,
+    "success": 0x1009,
+    "error": 0x100A,
+}
+APP_GAP = 0.040  # s between two app pulses at least (closer ones are dropped)
+APP_RATE = 4.0  # app pulses a second over any longer while ...
+APP_BURST = 6.0  # ... with this many in a row at most (a token bucket)
+APP_REQUEST_MAX = 64  # bytes: a longer datagram is not a request
+APP_READ_MAX = 32  # datagrams read at a time; a full read is a flood ...
+APP_FLOOD_PAUSE = 0.25  # s the socket is then not read (the kernel drops what does not fit)
+APP_RCVBUF = 8192  # bytes of the socket's receive buffer (a dozen requests)
+
+
+def app_conf(text):
+    """(app pulses on, the socket's group name or None for the session's) from
+    pen.conf's text: `app_haptics` = on | off (default on), `app_haptics_group`. Pure."""
+    on, group = True, None
+    for line in (text or "").splitlines():
+        line = line.split("#", 1)[0]
+        if "=" not in line:
+            continue
+        key, value = (part.strip() for part in line.split("=", 1))
+        if key == "app_haptics" and value in ("on", "off"):
+            on = value == "on"
+        elif key == "app_haptics_group":
+            group = value or None
+    return on, group
+
+
+def app_request(data):
+    """One datagram from an app -> (waveform id, intensity 1..255), or None:
+    exactly `pulse <waveform> <intensity>`, ASCII, a waveform of APP_WAVES. Pure."""
+    if not data or len(data) > APP_REQUEST_MAX:
+        return None
+    try:
+        parts = data.decode("ascii").split()
+    except UnicodeDecodeError:
+        return None
+    if len(parts) != 3 or parts[0] != "pulse" or not parts[2].isdigit():
+        return None
+    wave = APP_WAVES.get(parts[1])
+    level = int(parts[2])
+    if wave is None or not 1 <= level <= 255:
+        return None
+    return wave, level
+
+
+def intensity(strength):
+    """1..100 % -> the report's Intensity, 1..255. Pure."""
+    return max(1, min(255, round(int(strength) * 255 / 100)))
+
+
+def waveform_list(report):
+    """Feature 0x42 (id, the associated control u32, 20 durations u16, 20
+    waveforms u16) -> the waveform ids by ordinal from 3, NONE entries cut. The
+    pen's answer over BlueZ is one byte short (84 of 85: the ATT MTU): the whole
+    entries that came are taken. Pure."""
+    if len(report) < 47 or report[0] != REPORT_WAVEFORMS:
+        return None
+    n = min(20, (len(report) - 45) // 2)
+    waves = list(struct.unpack("<%dH" % n, report[45 : 45 + 2 * n]))
+    while waves and waves[-1] == WAVE_NONE:
+        waves.pop()
+    return waves or None
+
+
+def ordinal(waves, wave_id):
+    """The Manual / Auto Trigger value of a waveform: its ordinal (NONE = 1,
+    the list from 3), or None when the pen has no such waveform. Pure."""
+    if wave_id == WAVE_NONE:
+        return 1
+    try:
+        return 3 + waves.index(wave_id)
+    except ValueError:
+        return None
+
+
+def auto_trigger_report(trigger, level):
+    """Feature 0x41: RepeatCount 0, Intensity, AutoTrigger, RetriggerPeriod 0. Pure."""
+    return bytes([REPORT_HAPTIC, 0x00, level, trigger, 0x00, 0x00])
+
+
+def manual_report(trigger, level):
+    """Output 0x41: RepeatCount 0, Intensity, ManualTrigger, WaveformCutoff 200 ms,
+    RetriggerPeriod 0. Pure."""
+    return bytes([REPORT_HAPTIC, 0x00, level, trigger, 20, 0x00, 0x00])
+
+
+# --- the writing feel: when the pen ticks ----------------------------------------------------
+#
+# The pen plays one short tick per report, much the same whatever the report asks: what is
+# left to shape is WHEN the ticks come and, a little (with the tip on the glass), which
+# waveform each one is (the docstring, 3.).
+#
+# A feel: the grain's waveform (each feel keeps the one it had); the firmer waveform of the
+# touch and of the accents on turns; the grain's mean spacing, mm of travel per tick (at
+# FEEL_SLOW_SPEED and faster, at FEEL_PRESSURE_REF); its irregularity, 0..1 (how much the
+# distance from one tick to the next spreads around the spacing: 0 even, 1 as random as
+# raindrops); the sharpest turn that is still no accent, degrees within FEEL_TURN_SPAN mm of
+# travel (None: no accents).
+Feel = collections.namedtuple("Feel", "grain accent spacing irregularity turn")
+TEXTURES = {
+    "ink": Feel(WAVE_HOVER, WAVE_CLICK, 3.0, 0.25, 75),  # smooth: sparser, little jitter
+    "pencil": Feel(WAVE_HOVER, WAVE_CLICK, 1.5, 0.70, 60),  # fine, dense, the most uneven
+    "marker": Feel(WAVE_CLICK, WAVE_PRESS, 5.0, 0.40, 50),  # medium, the tip catches on turns
+    "chisel": Feel(WAVE_CLICK, WAVE_PRESS, 3.5, 0.45, 45),  # the edge catches on every turn
+    "brush": Feel(WAVE_PRESS, WAVE_PRESS, 7.0, 0.50, 110),  # sparse, soft: sharp turns only
+}
+FEEL_STROKE_MIN = 1.0  # mm: a shorter stroke (a tap, a dot) ticks only at the touch
+FEEL_JITTER = 0.1  # mm: travel counts in steps at least this long (the digitizer's own noise)
+FEEL_GRAIN_MAX = 3.0  # a grain distance is at most this many spacings (no long silences)
+FEEL_SLOW_SPEED = 8.0  # mm/s: slower, the grain thins out (its spacing x this / the speed) ...
+FEEL_SLOW_FLOOR = 0.5  # mm/s: ... down to this speed (16 x the spacing)
+FEEL_SPEED_TAU = 0.05  # s: the pen's speed, a running mean of two stages this long each
+FEEL_TURN_STEP = 0.5  # mm of travel from one heading sample to the next
+FEEL_TURN_SPAN = 2.5  # mm: a turn counts when it is made within this much travel
+FEEL_HOLD = 0.025  # s: a grain tick due inside the gap waits this long at most (then dropped) ...
+FEEL_ACCENT_HOLD = 0.05  # s: ... an accent this long (a turn is felt late anyway: the link)
+FEEL_REST_JITTER = 0.5  # each tick's gap (WAVE_GAPS) is longer by up to this much, at random
+FEEL_PRESSURE_REF = 0.35  # the pressure (of its range) of the feel's own spacing; harder ...
+FEEL_PRESSURE_GAIN = 0.4  # ... is denser by this much per range, the spacing x within:
+FEEL_PRESSURE_SCALE = (0.8, 1.2)
+FEEL_STALE = 0.03  # s: a tick of a frame older than this is dropped (a late tick is no feel)
+TOUCH, GRAIN, ACCENT = "touch", "grain", "accent"
+
+
+def mix32(x):
+    """A seed spread over all 32 bits (murmur3's finalizer): xorshift32 starts slowly from a
+    small state (1, 2, ...). Pure."""
+    x &= 0xFFFFFFFF
+    x = ((x ^ (x >> 16)) * 0x85EBCA6B) & 0xFFFFFFFF
+    x = ((x ^ (x >> 13)) * 0xC2B2AE35) & 0xFFFFFFFF
+    return x ^ (x >> 16)
+
+
+def xorshift32(x):
+    """The next state of a 32-bit xorshift generator (Marsaglia's 13 / 17 / 5); a state
+    that is not 0 never becomes 0. Pure."""
+    x ^= (x << 13) & 0xFFFFFFFF
+    x ^= x >> 17
+    x ^= (x << 5) & 0xFFFFFFFF
+    return x
+
+
+def grain_scale(speed, pressure):
+    """The grain's spacing as a multiple of the feel's: wider below FEEL_SLOW_SPEED (mm/s),
+    a little narrower for a harder press (pressure 0..1 of its range; None: not known). Pure."""
+    scale = FEEL_SLOW_SPEED / max(speed, FEEL_SLOW_FLOOR) if speed < FEEL_SLOW_SPEED else 1.0
+    if pressure is not None:
+        lo, hi = FEEL_PRESSURE_SCALE
+        scale *= min(hi, max(lo, 1.0 + FEEL_PRESSURE_GAIN * (FEEL_PRESSURE_REF - pressure)))
+    return scale
+
+
+class WritingFeel:
+    """The writing feel's timing, one frame of the pen's tablet device at a time: does the
+    pen tick now, and which tick. No I/O and no clock (every frame carries its time): the
+    same frames and the same seed give the same ticks.
+
+    - The touch: one tick (TOUCH, the feel's firmer waveform). None at the lift; a stroke
+      shorter than FEEL_STROKE_MIN has only that one.
+    - The grain (GRAIN, the feel's own waveform): a tick per a distance of travel drawn
+      anew each time around the feel's spacing (a floor and an exponential tail; the
+      irregularity is its relative spread), so the ticks follow the pen's speed and never
+      fall into a pattern. Wider apart below FEEL_SLOW_SPEED, a little closer for a
+      harder press.
+    - The accents (ACCENT, the firmer waveform): a turn sharper than the feel's within
+      FEEL_TURN_SPAN mm ticks at once, and the grain starts afresh from it. Scribbling,
+      all turns, comes out dense and uneven; a long straight line an even, light grain.
+    - The gaps: after a tick, its waveform's WAVE_GAPS, longer at random by up to
+      FEEL_REST_JITTER. A tick due inside one waits FEEL_HOLD s at most (an accent
+      FEEL_ACCENT_HOLD) and is dropped then; nothing is queued (one tick waits at most,
+      an accent before a grain tick). A fast stroke saturates the link unevenly (the
+      gaps' own spread), never late and never in step."""
+
+    def __init__(self, seed=1):
+        self.rng = mix32(seed) or 1
+        self.down = False
+        self.rest_until = -1e9  # no tick before this: the last tick's gap
+        self.start(None, 0.0)
+
+    def start(self, pos, t):
+        self.anchor = pos  # where the travel was last counted from
+        self.head_at = pos  # where the last heading sample was taken
+        self.headings = ()  # the last headings (unit vectors), newest last
+        self.travel = 0.0  # mm: the stroke's length so far
+        self.progress = 0.0  # the grain's way to its next tick, in spacings ...
+        self.target = 1.0  # ... and the way there
+        self.speed = 0.0  # mm/s: a running mean (two stages: no jump at a step of travel) ...
+        self.speed1 = 0.0  # ... its first stage
+        self.speed_t = t
+        self.speed_d = 0.0  # mm counted since speed_t
+        self.pending = None  # (kind, since): a tick due inside the gap, waiting
+
+    def rand(self):
+        """[0, 1) from the seeded generator."""
+        self.rng = xorshift32(self.rng)
+        return self.rng / 4294967296.0
+
+    def distance(self, feel):
+        """The next grain distance in spacings: a mean of ~1, at least 1 - irregularity."""
+        a = feel.irregularity
+        return min(FEEL_GRAIN_MAX, 1.0 - a - a * math.log(1.0 - self.rand()))
+
+    def fire(self, feel, kind, t):
+        wave = feel.grain if kind == GRAIN else feel.accent
+        self.rest_until = t + WAVE_GAPS[wave] * (1.0 + FEEL_REST_JITTER * self.rand())
+        return kind
+
+    def lift(self):
+        self.down = False
+
+    def turned(self, feel, pos):
+        """A heading sample every FEEL_TURN_STEP mm: True when it turned past the feel's
+        angle from one of the samples of the FEEL_TURN_SPAN mm before (they start anew)."""
+        dx, dy = pos[0] - self.head_at[0], pos[1] - self.head_at[1]
+        d = math.hypot(dx, dy)
+        if d < FEEL_TURN_STEP:
+            return False
+        h = (dx / d, dy / d)
+        self.head_at = pos
+        if feel.turn is not None:
+            limit = math.cos(math.radians(feel.turn))
+            if any(h[0] * o[0] + h[1] * o[1] < limit for o in self.headings):
+                self.headings = (h,)
+                return True
+        self.headings = (self.headings + (h,))[-round(FEEL_TURN_SPAN / FEEL_TURN_STEP) :]
+        return False
+
+    def step(self, feel, t, tip, pos, pressure=None):
+        """One frame: t s, the tip down, pos (x, y) mm (None: out of range), the pressure
+        0..1 of its range (None: not known). -> TOUCH, GRAIN, ACCENT, or None."""
+        if not tip or pos is None:
+            self.down = False
+            return None
+        if not self.down:
+            self.down = True
+            self.start(pos, t)
+            self.target = self.distance(feel)
+            return self.fire(feel, TOUCH, t) if t >= self.rest_until else None
+        moved = math.hypot(pos[0] - self.anchor[0], pos[1] - self.anchor[1])
+        if moved < FEEL_JITTER:
+            moved = 0.0
+        else:
+            self.anchor = pos
+            self.travel += moved
+        self.speed_d += moved
+        if t > self.speed_t:
+            dt = t - self.speed_t
+            k = min(1.0, dt / FEEL_SPEED_TAU)
+            self.speed1 += (self.speed_d / dt - self.speed1) * k
+            self.speed += (self.speed1 - self.speed) * k
+            self.speed_t, self.speed_d = t, 0.0
+        if moved:
+            self.progress += moved / (feel.spacing * grain_scale(self.speed, pressure))
+            if self.turned(feel, pos) and self.travel >= FEEL_STROKE_MIN:
+                self.pending = (ACCENT, t)  # it takes a grain tick's place
+                self.progress, self.target = 0.0, self.distance(feel)
+        if self.progress >= self.target:
+            self.progress -= self.target
+            self.target = self.distance(feel)
+            if self.progress >= self.target:
+                self.progress = 0.0  # a jump: afresh
+            if self.travel >= FEEL_STROKE_MIN and self.pending is None:
+                self.pending = (GRAIN, t)  # (one already waiting: this one is dropped)
+        if self.pending is None:
+            return None
+        kind, since = self.pending
+        if t - since > (FEEL_ACCENT_HOLD if kind == ACCENT else FEEL_HOLD):
+            self.pending = None  # the gap did not open in time: dropped, not late
+            return None
+        if t < self.rest_until:
+            return None
+        self.pending = None
+        return self.fire(feel, kind, t)
+
+
+def eviocgabs(code):
+    return (2 << 30) | (24 << 16) | (ord("E") << 8) | (0x40 + code)
+
+
+EVIOCSCLOCKID = (1 << 30) | (4 << 16) | (ord("E") << 8) | 0xA0
+
+
+def tablet_device(name, fd):
+    """A tablet device's state: its axes (EVIOCGABS: X / Y resolution, units per mm;
+    the pressure's maximum) and its events' clock set to CLOCK_MONOTONIC (otherwise each
+    frame is timed when it is read). The clock is this open file's own: libinput's (duo-wc)
+    is not touched."""
+
+    def absinfo(code):
+        buf = bytearray(24)
+        try:
+            fcntl.ioctl(fd, eviocgabs(code), buf, True)
+            return struct.unpack("<6i", buf)  # value, min, max, fuzz, flat, resolution
+        except OSError:
+            return None
+
+    scales = []
+    for code in (ABS_X, ABS_Y):
+        info = absinfo(code)
+        res = info[5] if info else 0
+        scales.append(1.0 / res if res > 0 else 0.07)  # ~ the panel's pixel pitch
+    info = absinfo(ABS_PRESSURE)
+    try:
+        fcntl.ioctl(fd, EVIOCSCLOCKID, struct.pack("i", CLOCK_MONOTONIC))
+        clock = True
+    except OSError:
+        clock = False
+    return {
+        "name": name,
+        "scale": scales,
+        "x": 0,
+        "y": 0,
+        "tip": False,
+        "pressure": 0,
+        "pressure_max": info[2] if info and info[2] > 0 else None,
+        "clock": clock,
+    }
+
+
+class PenTablets:
+    """duo2-touchd's pen devices (read only, never grabbed): the tip, where it is in
+    millimetres (the axes' resolution, units per mm), the pressure, and when."""
+
+    def __init__(self):
+        self.fds = {}  # fd -> tablet_device()
+        self.next_scan = 0.0
+        self.missing_logged = False
+
+    def scan(self, now):
+        if now < self.next_scan:
+            return
+        self.next_scan = now + 5.0
+        have = {v["name"] for v in self.fds.values()}
+        for ev in glob.glob("/sys/class/input/event*"):
+            try:
+                name = read_text(os.path.join(ev, "device", "name")).strip()
+            except OSError:
+                continue
+            if name not in PEN_TABLETS or name in have:
+                continue
+            try:
+                fd = os.open(
+                    "/dev/input/" + os.path.basename(ev), os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC
+                )
+            except OSError:
+                continue
+            dev = self.fds[fd] = tablet_device(name, fd)
+            log(
+                "haptics: writing feel follows %s (%s, %s)"
+                % (
+                    name,
+                    "pressure" if dev["pressure_max"] else "no pressure",
+                    "frames timed by the kernel" if dev["clock"] else "frames timed when read",
+                )
+            )
+        if not self.fds and not self.missing_logged:
+            self.missing_logged = True
+            log(
+                "haptics: no pen tablet device of duo2-touchd yet (%s): looking every 5 s"
+                % " / ".join(PEN_TABLETS)
+            )
+        elif self.fds:
+            self.missing_logged = False
+
+    def close(self):
+        for fd in self.fds:
+            os.close(fd)
+        self.fds = {}
+        self.next_scan = 0.0
+
+    def read(self, fd, now=None):
+        """-> [(time s, tip, (x mm, y mm), pressure 0..1 or None)] for each input frame
+        (SYN_REPORT) read: the kernel's time of the frame on time.monotonic()'s clock,
+        or `now` when the device keeps another clock."""
+        dev = self.fds.get(fd)
+        if dev is None:
+            return []
+        try:
+            data = os.read(fd, 24 * 128)
+        except BlockingIOError:
+            return []
+        except OSError as e:  # duo2-touchd restarted (its devices made anew)
+            log("haptics: %s gone (%s): looking for it again" % (dev["name"], e.strerror or e))
+            os.close(fd)
+            del self.fds[fd]
+            self.next_scan = 0.0
+            return []
+        if now is None:
+            now = time.monotonic()
+        sx, sy = dev["scale"]
+        pmax = dev["pressure_max"]
+        frames = []
+        for off in range(0, len(data) - 23, 24):
+            sec, usec, typ, code, value = struct.unpack("<qqHHi", data[off : off + 24])
+            if typ == EV_KEY and code == BTN_TOUCH:
+                dev["tip"] = bool(value)
+            elif typ == EV_ABS and code == ABS_X:
+                dev["x"] = value
+            elif typ == EV_ABS and code == ABS_Y:
+                dev["y"] = value
+            elif typ == EV_ABS and code == ABS_PRESSURE:
+                dev["pressure"] = value
+            elif typ == EV_SYN and code == 0:
+                frames.append(
+                    (
+                        sec + usec / 1e6 if dev["clock"] else now,
+                        dev["tip"],
+                        (dev["x"] * sx, dev["y"] * sy),
+                        min(1.0, max(0.0, dev["pressure"] / pmax)) if pmax else None,
+                    )
+                )
+        return frames
+
+
+def hidiocsfeature(n):
+    return (3 << 30) | (n << 16) | (ord("H") << 8) | 0x06
+
+
+def hidiocgfeature(n):
+    return (3 << 30) | (n << 16) | (ord("H") << 8) | 0x07
+
+
+def fw_update_running(mark=None):
+    """pen-fw.py's mark: its PID, while it updates the pen."""
+    mark = FW_MARK if mark is None else mark
+    try:
+        pid = int(read_text(mark).split()[0])
+    except (OSError, ValueError, IndexError):
+        return False
+    return os.path.exists("/proc/%d" % pid)
+
+
+def feature_request(node, data, size=None):
+    """One HIDIOCGFEATURE (size: the buffer, data[0] the report id) or
+    HIDIOCSFEATURE (size None) on the pen's hidraw node. Blocks: uhid waits up
+    to 5 s for BlueZ's answer, then EIO. -> (the report read or True,
+    seconds it took, None) or (None, seconds, the error). Writes only the
+    haptic report: never the pen's firmware (CFU 0x2a-0x2f) or vendor reports."""
+    t0 = time.monotonic()
+    if size is None and data[0] != REPORT_HAPTIC:
+        return None, 0.0, OSError(errno.EPERM, "report %#04x is not ours to write" % data[0])
+    try:
+        fd = os.open(node, os.O_RDWR | os.O_CLOEXEC)
+    except OSError as e:
+        return None, time.monotonic() - t0, e
+    try:
+        if size is None:
+            fcntl.ioctl(fd, hidiocsfeature(len(data)), bytearray(data), True)
+            return True, time.monotonic() - t0, None
+        buf = bytearray(size)
+        buf[0] = data[0]
+        n = fcntl.ioctl(fd, hidiocgfeature(size), buf, True)
+        return bytes(buf[:n]), time.monotonic() - t0, None
+    except OSError as e:
+        return None, time.monotonic() - t0, e
+    finally:
+        os.close(fd)
+
+
+class Chores:
+    """One thread for the pen requests that may block: a feature report the
+    pen does not answer waits 5 s in uhid (then EIO), pen-fw.py up to 30 s.
+    The select loop that sends the writing feel's pulses never waits on them.
+    (It did, until 2026-11-16: from 15:25 on no feature request of any
+    connection got an answer, and each tick sat 10-15 s in them while the
+    pulses and the tablet frames waited: the writing feel stopped after a few
+    seconds and never came back.) `threaded=False` runs a chore at once (the
+    tests)."""
+
+    def __init__(self, threaded=True):
+        self.lock = threading.Lock()
+        self.pending = set()
+        self.jobs = queue.Queue() if threaded else None
+        if threaded:
+            threading.Thread(target=self.run, name="pen-chores", daemon=True).start()
+
+    def submit(self, name, fn):
+        """Queue `fn` unless a chore of that name is waiting or running."""
+        with self.lock:
+            if name in self.pending:
+                return False
+            self.pending.add(name)
+        if self.jobs is None:
+            self.do(name, fn)
+        else:
+            self.jobs.put((name, fn))
+        return True
+
+    def do(self, name, fn):
+        try:
+            fn()
+        except Exception as e:  # noqa: BLE001 - a chore never takes the daemon down
+            log("haptics: %s: %s" % (name, e))
+        finally:
+            with self.lock:
+                self.pending.discard(name)
+
+    def run(self):
+        while True:
+            self.do(*self.jobs.get())
+
+
+class LinkStats:
+    """What the writing feel did on one connection of the pen, or in a gap
+    between two (`linked` False), for the log."""
+
+    def __init__(self, since, linked=True):
+        self.since = since
+        self.linked = linked
+        self.sent = 0
+        self.accents = 0  # of them: the touch and the turns (the firmer waveform)
+        self.late = 0  # a frame read too late (FEEL_STALE)
+        self.close = 0  # too close to another pulse (an app's)
+        self.settling = 0  # in the first LINK_SETTLE s of the connection
+        self.no_link = 0  # the pen's HID device was gone (the link down)
+        self.updating = 0  # pen-fw.py had the pen
+        self.failed = 0
+        self.error = None
+        self.app = {}  # the apps' pulses: what happened to them, counted
+
+    def summary(self, now):
+        """One log line, or None when nothing was to be done. Pure."""
+        parts = []
+        for n, what in (
+            (self.sent, "sent" + (" (%d of them accents)" % self.accents if self.accents else "")),
+            (self.late, "dropped as late"),
+            (self.close, "too close to another"),
+            (self.settling, "held back while the link settled"),
+            (self.no_link, "with no link"),
+            (self.updating, "during a firmware update"),
+            (self.failed, "failed"),
+        ):
+            if n:
+                parts.append("%d %s" % (n, what))
+        apps = [
+            "%d %s" % (self.app[k], k)
+            for k in (
+                "sent",
+                "too close together",
+                "held back while the link settled",
+                "with no link",
+                "during a firmware update",
+                "failed",
+                "not understood",
+            )
+            if self.app.get(k)
+        ]
+        if not parts and not apps:
+            return None
+        line = "haptics: %s %.1f s" % (
+            "pen link" if self.linked else "no pen link for",
+            now - self.since,
+        )
+        if parts:
+            line += ", writing-feel pulses: " + ", ".join(parts)
+        if apps:
+            line += ", app pulses: " + ", ".join(apps)
+        if (self.failed or self.app.get("failed")) and self.error:
+            line += " (last error: %s)" % self.error
+        return line
+
+    def count_app(self, what):
+        self.app[what] = self.app.get(what, 0) + 1
+
+
+class AppSocket:
+    """The apps' way to the pen's haptics: a datagram socket (APP_SOCKET),
+    root's, mode 0660, its group the GUI user's (that of duo-wc's runtime
+    directory, or pen.conf's `app_haptics_group`), looked after every few
+    seconds (made, regrouped when the session changes, closed when off).
+    The directory becomes 0711: others can reach a name in it, not list it
+    (autobond stays 0600, root's)."""
+
+    def __init__(self, path=APP_SOCKET, session_dir=SESSION_DIR, owner=0):
+        self.path = path
+        self.session_dir = session_dir
+        self.owner = owner
+        self.sock = None
+        self.gid = None
+        self.next_check = 0.0
+        self.said = None
+        self.quiet_until = 0.0  # a flood: not read until then
+        self.floods = 0
+
+    def say(self, line):
+        if line != self.said:
+            self.said = line
+            log(line)
+
+    def wanted_gid(self, group):
+        if group:
+            try:
+                return grp.getgrnam(group).gr_gid
+            except KeyError:
+                return None
+        try:
+            return os.stat(self.session_dir).st_gid
+        except OSError:
+            return None
+
+    def look(self, now, on, group):
+        """Every few seconds: the socket there with the right group, or closed."""
+        if now < self.next_check:
+            return
+        self.next_check = now + 5.0
+        if not on:
+            if self.sock is not None:
+                self.close()
+                self.say("haptics: app pulses off (pen.conf)")
+            return
+        gid = self.wanted_gid(group)
+        if gid is None:
+            self.close()
+            self.say(
+                "haptics: app pulses wait for %s"
+                % ("the group " + group if group else "a session (%s)" % self.session_dir)
+            )
+            return
+        try:
+            st = os.stat(self.path)
+            there = st.st_gid == gid and st.st_mode & 0o777 == 0o660
+        except OSError:
+            there = False
+        if self.sock is not None and self.gid == gid and there:
+            return
+        self.close()
+        try:
+            d = os.path.dirname(self.path)
+            os.makedirs(d, mode=0o711, exist_ok=True)
+            os.chmod(d, 0o711)
+            sock = socket.socket(
+                socket.AF_UNIX, socket.SOCK_DGRAM | socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC
+            )
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, APP_RCVBUF)
+            try:
+                os.unlink(self.path)
+            except FileNotFoundError:
+                pass
+            old = os.umask(0o177)  # never reachable by anyone before its group is set
+            try:
+                sock.bind(self.path)
+            finally:
+                os.umask(old)
+            os.chown(self.path, self.owner, gid)
+            os.chmod(self.path, 0o660)
+        except OSError as e:
+            self.say("haptics: no app socket %s: %s" % (self.path, e))
+            return
+        self.sock, self.gid = sock, gid
+        self.say("haptics: app pulses on %s (group %d)" % (self.path, gid))
+
+    def fileno(self, now=None):
+        """The socket to wait on; None while there is none or a flood is held off."""
+        if self.sock is None:
+            return None
+        if now is not None and now < self.quiet_until:
+            return None
+        return self.sock.fileno()
+
+    def requests(self, now=None):
+        """The datagrams waiting (at most APP_READ_MAX a call): app_request's
+        results, None for junk. A full read holds the socket off for
+        APP_FLOOD_PAUSE s."""
+        out = []
+        while self.sock is not None and len(out) < APP_READ_MAX:
+            try:
+                data = self.sock.recv(APP_REQUEST_MAX + 1)
+            except (BlockingIOError, InterruptedError):
+                break
+            except OSError:
+                break
+            out.append(app_request(data))
+        if len(out) >= APP_READ_MAX:
+            self.quiet_until = (time.monotonic() if now is None else now) + APP_FLOOD_PAUSE
+            self.floods += 1
+            if self.floods in (1, 10, 100, 1000):
+                log("haptics: app pulse requests flood the socket (%d times)" % self.floods)
+        return out
+
+    def close(self):
+        if self.sock is not None:
+            self.sock.close()
+            self.sock = None
+            try:
+                os.unlink(self.path)
+            except OSError:
+                pass
+        self.gid = None
+
+
+def newest_hid(paths):
+    """The newest of the pen's HID devices (each connection makes a new one:
+    0005:045E:0C0F.0064, .0065, ...), by the hex sequence number. Pure."""
+
+    def seq(p):
+        try:
+            return int(p.rsplit(".", 1)[1], 16)
+        except (IndexError, ValueError):
+            return -1
+
+    return max(paths, key=seq) if paths else None
+
+
+class Haptics:
+    """The pen's haptics while it is connected: the writing feel's pulses from
+    the tablet devices' frames, a click on the top button's keys (its keyboard
+    input device, read alongside duo-wc), and once per run the reads that
+    may block (the waveform list, the Auto Trigger, the firmware versions:
+    [`Chores`]). Nothing here waits on the pen: the pulses and the click are
+    output reports, which uhid passes to BlueZ at once."""
+
+    def __init__(self, chores=None, seed=None):
+        self.hid = None  # the sysfs HID device of the connected pen
+        self.hid_since = 0.0  # when it appeared (monotonic)
+        self.link_up = True  # mgmt: no Surface pen went away since one connected (unknown at
+        # the start: the HID device says)
+        self.raw = None  # (node, fd): the hidraw node open for the output reports
+        self.waves = None  # the pen's waveform list (feature 0x42), read once per run
+        self.auto_checked = False  # its Auto Trigger seen at NONE (once per run)
+        self.fw_wanted = True  # read the firmware versions: once per run, again after an update
+        self.chores_asked = False  # this connection's chores were queued (or not needed)
+        self.slow_until = 0.0  # the pen left a feature request unanswered: no more until then
+        self.chores = chores if chores is not None else Chores()
+        self.conf_stamp = None
+        self.conf = ("off", DEFAULT_STRENGTH, False)
+        self.feel_logged = None
+        self.keys = None  # the keyboard input device (fd)
+        self.last_click = 0.0
+        self.fw_busy = False  # pen-fw.py was updating the pen at the last tick
+        self.tablets = PenTablets()
+        if seed is None:
+            seed = int.from_bytes(os.urandom(4), "little")
+        self.writing = WritingFeel(seed)  # the writing feel's timing
+        self.last_pulse = -1e9
+        self.stats = LinkStats(0.0)
+        self.apps = AppSocket()
+        self.app_conf = (True, None)
+        self.last_app = -1e9
+        self.app_budget = (APP_BURST, -1e9)  # (pulses left, when counted)
+
+    def read_conf(self):
+        try:
+            st = os.stat(PEN_CONF)
+            stamp = (st.st_ino, st.st_mtime_ns)
+        except OSError:
+            stamp = None
+        if stamp == self.conf_stamp:
+            return False
+        self.conf_stamp = stamp
+        try:
+            text = read_text(PEN_CONF)
+        except OSError:
+            text = ""
+        conf = haptic_conf(text)
+        app = app_conf(text)
+        if app != self.app_conf:
+            self.app_conf = app
+            self.apps.next_check = 0.0  # at once
+        changed = conf != self.conf
+        self.conf = conf
+        feel, strength, _click = conf
+        if (feel, strength) != self.feel_logged:
+            self.feel_logged = (feel, strength)
+            log(
+                "haptics: writing feel %s%s"
+                % (feel, " at %d %%" % strength if feel != "off" else "")
+            )
+        return changed
+
+    def hidraw(self):
+        nodes = glob.glob(os.path.join(self.hid, "hidraw", "hidraw*")) if self.hid else []
+        return "/dev/" + os.path.basename(nodes[0]) if nodes else None
+
+    def keys_node(self):
+        for ev in sorted(glob.glob(os.path.join(self.hid, "input", "input*", "event*"))):
+            try:
+                caps = read_text(os.path.join(os.path.dirname(ev), "capabilities", "key")).split()
+            except OSError:
+                continue
+            bits = int("".join("%016x" % int(w, 16) for w in caps), 16) if caps else 0
+            if any(bits >> k & 1 for k in range(KEY_F18, KEY_F20 + 1)):
+                return "/dev/input/" + os.path.basename(ev)
+        return None
+
+    def link_changed(self, up):
+        """mgmt: a Surface pen connected or went away."""
+        self.link_up = up
+
+    def follow_hid(self, now):
+        """The pen's HID device now; a new one (a new connection) starts afresh.
+        -> True when it changed."""
+        hid = newest_hid(glob.glob(PEN_HID_GLOB))
+        if hid == self.hid:
+            return False
+        line = self.stats.summary(now) if self.hid else None
+        if line:
+            log(line)
+        self.close_keys()
+        self.close_raw()
+        self.hid, self.hid_since = hid, now
+        self.stats = LinkStats(now, hid is not None)
+        self.chores_asked = False
+        return True
+
+    def close_raw(self):
+        if self.raw is not None:
+            try:
+                os.close(self.raw[1])
+            except OSError:
+                pass
+            self.raw = None
+
+    def send(self, data):
+        """An output report to the pen (no wait: uhid hands it to BlueZ). -> None, or the error.
+        The haptic report only (never the pen's firmware or vendor reports)."""
+        if data[0] != REPORT_HAPTIC:
+            return "report %#04x is not ours to write" % data[0]
+        node = self.hidraw()
+        if not node:
+            self.close_raw()
+            return "no hidraw node"
+        try:
+            if self.raw is None or self.raw[0] != node:
+                self.close_raw()
+                self.raw = (node, os.open(node, os.O_RDWR | os.O_NONBLOCK | os.O_CLOEXEC))
+            os.write(self.raw[1], data)
+            return None
+        except OSError as e:
+            self.close_raw()
+            return e.strerror or str(e)
+
+    def pulse(self, wave, now, accent=False):
+        """One writing-feel pulse, or the reason it is skipped (counted for the log)."""
+        st = self.stats
+        if self.hid is None or not self.link_up:
+            st.no_link += 1
+            return
+        if now - self.hid_since < LINK_SETTLE:
+            st.settling += 1
+            return
+        if self.fw_busy or fw_update_running():
+            st.updating += 1
+            return
+        if now - self.last_pulse < APP_GAP:  # an app's just now: one pulse at a time
+            st.close += 1
+            return
+        trigger = ordinal(self.waves or DEFAULT_WAVEFORMS, wave)
+        if not trigger:
+            return
+        err = self.send(manual_report(trigger, intensity(self.conf[1])))
+        if err is None:
+            st.sent += 1
+            st.accents += accent
+            self.last_pulse = now
+            if st.sent == 1:
+                log("haptics: writing feel pulses (%s) to the pen" % self.conf[0])
+            return
+        st.failed += 1
+        st.error = err
+        self.follow_hid(now)  # a new connection's device, if there is one
+
+    def app_pulse(self, wave, level, now):
+        """An app's pulse (AppSocket), or the reason it is dropped (counted for the log)."""
+        st = self.stats
+        if now - self.last_app < APP_GAP or now - self.last_pulse < APP_GAP:
+            st.count_app("too close together")
+            return
+        left, then = self.app_budget
+        left = min(APP_BURST, left + max(0.0, now - then) * APP_RATE)
+        self.app_budget = (left, now)
+        if left < 1.0:
+            st.count_app("over the budget")
+            return
+        if self.hid is None or not self.link_up:
+            st.count_app("with no link")
+            return
+        if now - self.hid_since < LINK_SETTLE:
+            st.count_app("held back while the link settled")
+            return
+        if self.fw_busy or fw_update_running():
+            st.count_app("during a firmware update")
+            return
+        trigger = ordinal(self.waves or DEFAULT_WAVEFORMS, wave)
+        if not trigger:
+            return
+        err = self.send(manual_report(trigger, level))
+        if err is None:
+            self.last_app = now
+            self.last_pulse = now
+            self.app_budget = (self.app_budget[0] - 1.0, now)
+            st.count_app("sent")
+            return
+        st.count_app("failed")
+        st.error = err
+        self.follow_hid(now)
+
+    def app_requests(self, now):
+        for req in self.apps.requests(now):
+            if req is None:
+                self.stats.count_app("not understood")
+            else:
+                self.app_pulse(req[0], req[1], now)
+
+    def pen_frames(self, fd, now):
+        """The tablet devices' input frames -> the writing feel's pulses (WritingFeel)."""
+        self.feel_frames(self.tablets.read(fd, now), now)
+
+    def feel_frames(self, frames, now):
+        feel = TEXTURES.get(self.conf[0])
+        for t, tip, pos, pressure in frames:
+            if feel is None:
+                self.writing.lift()
+                continue
+            kind = self.writing.step(feel, t, tip, pos, pressure)
+            if kind is None:
+                continue
+            if now - t > FEEL_STALE:
+                self.stats.late += 1
+            elif kind == GRAIN:
+                self.pulse(feel.grain, now)
+            else:
+                self.pulse(feel.accent, now, accent=True)
+
+    def click(self):
+        now = time.monotonic()
+        if now - self.last_click < 0.3 or fw_update_running():
+            return
+        self.last_click = now
+        trigger = ordinal(self.waves or DEFAULT_WAVEFORMS, WAVE_CLICK)
+        if not trigger:
+            return
+        err = self.send(manual_report(trigger, intensity(self.conf[1])))
+        if err is None:
+            log("haptics: top button click")
+        else:
+            log("haptics: top button click: %s" % err)
+
+    def close_keys(self):
+        if self.keys is not None:
+            os.close(self.keys)
+            self.keys = None
+
+    def chore(self, node):
+        """The reads that may block (the chores thread): the waveform list and
+        the Auto Trigger once per run, the firmware versions once per run and
+        after an update. A request the pen leaves unanswered (uhid: EIO after
+        5 s) ends the round and holds the next for SLOW_BACKOFF s."""
+
+        def slow(what, took, err):
+            if err is None or took < FEATURE_SLOW:
+                return False
+            self.slow_until = time.monotonic() + SLOW_BACKOFF
+            log(
+                "haptics: the pen did not answer %s in %.1f s (%s): the setup waits %d s"
+                % (what, took, err, SLOW_BACKOFF)
+            )
+            return True
+
+        if self.waves is None:
+            data, took, err = feature_request(node, bytes([REPORT_WAVEFORMS]), 128)
+            waves = waveform_list(data or b"")
+            if waves:
+                self.waves = waves
+            elif slow("feature 0x42 (the waveform list)", took, err):
+                return
+        if not os.path.exists(node):
+            return  # that connection is over: the next one goes on
+        if not self.auto_checked:
+            cur, took, err = feature_request(node, bytes([REPORT_HAPTIC]), 16)
+            if cur is not None and len(cur) >= 4:
+                if cur[3] in (0, 1):
+                    self.auto_checked = True
+                elif not fw_update_running():
+                    ok, took, err = feature_request(
+                        node, auto_trigger_report(1, intensity(self.conf[1]))
+                    )
+                    if ok:
+                        self.auto_checked = True
+                        log("haptics: the pen's Auto Trigger was %d: set to NONE" % cur[3])
+                    elif slow("feature 0x41 (set)", took, err):
+                        return
+            elif slow("feature 0x41", took, err):
+                return
+        if not os.path.exists(node):
+            return
+        if self.fw_wanted and not fw_update_running():
+            if cache_firmware_versions():
+                self.fw_wanted = False
+
+    def ask_chores(self, now):
+        """Once per connection, when it has settled and the pen is not writing."""
+        if self.chores_asked or self.fw_busy or now < self.slow_until:
+            return
+        if (
+            now - self.hid_since < CHORE_AFTER
+            or now - self.last_pulse < CHORE_QUIET
+            or self.writing.down
+        ):
+            return
+        self.chores_asked = True
+        if self.waves is not None and self.auto_checked and not self.fw_wanted:
+            return
+        node = self.hidraw()
+        if node:
+            self.chores.submit("pen setup", lambda: self.chore(node))
+
+    def tick(self):
+        """Once a second (every 50 ms just after a pen connected, and after a
+        key event): follow the pen's HID device and the settings."""
+        now = time.monotonic()
+        self.read_conf()
+        self.apps.look(now, *self.app_conf)
+        busy = fw_update_running()
+        if self.fw_busy and not busy:
+            self.fw_wanted = True  # an update just ended: read what the pen has now
+        self.fw_busy = busy
+        if self.conf[0] in TEXTURES:
+            self.tablets.scan(now)
+        else:
+            self.tablets.close()  # no writing feel: nothing to follow
+        self.follow_hid(now)
+        if not self.hid or not self.hidraw():
+            return
+        # The keys first: the press that brought the pen back comes ~1 s after
+        # the HID device, and an input device hears only what comes after its open.
+        if self.conf[2] and self.keys is None:
+            node = self.keys_node()
+            if node:
+                try:
+                    self.keys = os.open(node, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+                except OSError:
+                    self.keys = None
+        elif not self.conf[2]:
+            self.close_keys()
+        self.ask_chores(now)
+
+    def key_events(self):
+        """Read the keyboard device: a press of F18..F20 -> a click."""
+        try:
+            data = os.read(self.keys, 24 * 64)
+        except BlockingIOError:
+            return
+        except OSError:
+            self.close_keys()
+            return
+        for off in range(0, len(data) - 23, 24):
+            _sec, _usec, typ, code, value = struct.unpack("<qqHHi", data[off : off + 24])
+            if typ == 1 and KEY_F18 <= code <= KEY_F20 and value == 1:
+                self.click()
+
+
+def cache_firmware_versions(tool=PEN_FW, cache=FW_CACHE):
+    """The pen's firmware versions (pen-fw.py version --json: one GET_FEATURE, read only)
+    into the cache Duo Settings shows. -> True when read."""
+    if not os.path.exists(tool) or fw_update_running():
+        return False
+    try:
+        r = subprocess.run(
+            [sys.executable, "-I", tool, "version", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    try:
+        data = json.loads(r.stdout) if r.returncode == 0 else None
+    except ValueError:
+        data = None
+    if not isinstance(data, dict) or not data.get("components"):
+        return False
+    os.makedirs(os.path.dirname(cache), mode=0o755, exist_ok=True)
+    tmp = cache + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o644)
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, cache)
+    log(
+        "firmware versions read: "
+        + ", ".join("%s %s" % (c.get("name"), c.get("version")) for c in data["components"])
+    )
+    return True
+
+
+def write_state(text):
+    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+    try:
+        if read_text(STATE_FILE) == text:
+            return False
+    except OSError:
+        pass
+    tmp = STATE_FILE + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.rename(tmp, STATE_FILE)
+    return True
+
+
+# --- mgmt -------------------------------------------------------------------------------------
+
+
+class Mgmt:
+    def __init__(self):
+        libc = ctypes.CDLL(None, use_errno=True)
+
+        class SockaddrHci(ctypes.Structure):
+            _fields_ = [
+                ("family", ctypes.c_ushort),
+                ("dev", ctypes.c_ushort),
+                ("channel", ctypes.c_ushort),
+            ]
+
+        fd = libc.socket(AF_BLUETOOTH, SOCK_RAW | SOCK_CLOEXEC, BTPROTO_HCI)
+        if fd < 0:
+            raise OSError(ctypes.get_errno(), "mgmt socket")
+        sa = SockaddrHci(AF_BLUETOOTH, HCI_DEV_NONE, HCI_CHANNEL_CONTROL)
+        if libc.bind(fd, ctypes.byref(sa), ctypes.sizeof(sa)) < 0:
+            err = ctypes.get_errno()
+            os.close(fd)
+            raise OSError(err, "mgmt bind")
+        self.fd = fd
+        self.backlog = []
+
+    def close(self):
+        os.close(self.fd)
+
+    def read_event(self, timeout):
+        r, _, _ = select.select([self.fd], [], [], timeout)
+        if not r:
+            return None
+        pkt = os.read(self.fd, 4096)
+        if len(pkt) < 6:
+            return None
+        ev, index, ln = struct.unpack("<HHH", pkt[:6])
+        return ev, index, pkt[6 : 6 + ln]
+
+    def command(self, op, index, params=b"", timeout=3.0):
+        """(status, return parameters); other events meanwhile go to the backlog."""
+        os.write(self.fd, struct.pack("<HHH", op, index, len(params)) + params)
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            e = self.read_event(max(0.0, end - time.monotonic()))
+            if e is None:
+                continue
+            ev, idx, data = e
+            if (
+                ev in (EV_CMD_COMPLETE, EV_CMD_STATUS)
+                and len(data) >= 3
+                and struct.unpack("<H", data[:2])[0] == op
+                and idx == index
+            ):
+                return data[2], data[3:]
+            self.backlog.append(e)
+        return None, b""
+
+
+class Pend:
+    def __init__(self, mgmt):
+        self.m = mgmt
+        self.adapters = {}  # index -> {"addr": bytes LE, "powered": bool}
+        self.devices = {}  # index -> {(addr, type): (name, irk)}
+        self.irks = set()  # (index, addr, type) learned from New IRK
+        self.pens_up = set()  # (index, addr)
+        self.done = set()  # (index, addr, type) already given the flag (for the log)
+        self.fast_until = 0.0  # a pen just connected: the haptics look every 50 ms
+        self.haptics = None
+
+    def refresh_adapter(self, index):
+        st, rp = self.m.command(OP_READ_INFO, index)
+        if st != 0 or len(rp) < 17:
+            self.adapters.pop(index, None)
+            return
+        # bdaddr(6) version(1) manufacturer(2) supported(4) current(4) ...
+        addr = rp[:6]
+        current = struct.unpack("<I", rp[13:17])[0]
+        self.adapters[index] = {"addr": addr, "powered": bool(current & SETTING_POWERED)}
+        self.devices[index] = scan_storage(addr)
+
+    def label(self, index, key):
+        name, _ = self.devices.get(index, {}).get(key, ("", False))
+        return "the Surface pen" if is_surface_pen(name) else "a bonded LE device"
+
+    def has_irk(self, index, key):
+        if (index,) + key in self.irks:
+            return True
+        info = self.devices.get(index, {}).get(key)
+        if info is None and index in self.adapters:
+            self.devices[index] = scan_storage(self.adapters[index]["addr"])  # bonded since
+            info = self.devices[index].get(key)
+        return bool(info and info[1])
+
+    def ensure_resolution(self, index, key, supported=None, current=None):
+        if not self.has_irk(index, key):
+            return
+        if supported is None:
+            st, rp = self.m.command(OP_GET_DEVICE_FLAGS, index, key[0] + bytes([key[1]]))
+            if st != 0 or len(rp) < 15:
+                return  # not in the kernel's device list (yet): Device Added comes later
+            supported, current = struct.unpack("<II", rp[7:15])
+        new = flags_with_resolution(supported, current)
+        if new is None:
+            return
+        st, _ = self.m.command(
+            OP_SET_DEVICE_FLAGS, index, key[0] + bytes([key[1]]) + struct.pack("<I", new)
+        )
+        what = self.label(index, key)
+        if st == 0:
+            if (index,) + key not in self.done:
+                log(
+                    "address resolution on for %s (flags %#x -> %#x): its IRK goes into the "
+                    "controller's resolving list" % (what, current, new)
+                )
+            self.done.add((index,) + key)
+        else:
+            log("setting address resolution for %s failed: mgmt status %#x" % (what, st))
+
+    def ensure_all(self, index):
+        for key in list(self.devices.get(index, {})):
+            self.ensure_resolution(index, key)
+
+    def publish(self):
+        a = self.adapters.get(0) or (next(iter(self.adapters.values())) if self.adapters else None)
+        text = autobond_text(a["addr"] if a else None, bool(a and a["powered"]), bool(self.pens_up))
+        if write_state(text):
+            log(
+                "AutoBond state: Bluetooth %s, pen link %s"
+                % ("on" if a and a["powered"] else "off", "up" if self.pens_up else "down")
+            )
+
+    def start(self):
+        st, rp = self.m.command(OP_READ_INDEX_LIST, INDEX_NONE)
+        if st == 0 and len(rp) >= 2:
+            n = struct.unpack("<H", rp[:2])[0]
+            for i in range(n):
+                idx = struct.unpack("<H", rp[2 + 2 * i : 4 + 2 * i])[0]
+                self.refresh_adapter(idx)
+                self.ensure_all(idx)
+        self.publish()
+
+    def handle(self, ev, index, data):
+        if ev in (EV_INDEX_ADDED, EV_NEW_SETTINGS):
+            self.refresh_adapter(index)
+            if self.adapters.get(index, {}).get("powered"):
+                self.ensure_all(index)
+            else:
+                self.pens_up = {p for p in self.pens_up if p[0] != index}
+            self.publish()
+        elif ev == EV_INDEX_REMOVED:
+            self.adapters.pop(index, None)
+            self.pens_up = {p for p in self.pens_up if p[0] != index}
+            self.publish()
+        elif ev == EV_NEW_IRK and len(data) >= 14:
+            key = (data[7:13], data[13])
+            self.irks.add((index,) + key)
+            self.ensure_resolution(index, key)
+        elif ev == EV_DEVICE_ADDED and len(data) >= 7:
+            self.ensure_resolution(index, (data[:6], data[6]))
+        elif ev == EV_DEVICE_FLAGS_CHANGED and len(data) >= 15:
+            supported, current = struct.unpack("<II", data[7:15])
+            self.ensure_resolution(index, (data[:6], data[6]), supported, current)
+        elif ev in (EV_DEVICE_CONNECTED, EV_DEVICE_DISCONNECTED) and len(data) >= 7:
+            key = (data[:6], data[6])
+            name, _ = self.devices.get(index, {}).get(key, ("", False))
+            if not name and index in self.adapters:
+                self.devices[index] = scan_storage(self.adapters[index]["addr"])
+                name, _ = self.devices[index].get(key, ("", False))
+            if is_surface_pen(name):
+                if ev == EV_DEVICE_CONNECTED:
+                    self.fast_until = time.monotonic() + 8  # look for its HID device often
+                    self.pens_up.add((index, key[0]))
+                else:
+                    self.pens_up.discard((index, key[0]))
+                if self.haptics is not None:
+                    self.haptics.link_changed(bool(self.pens_up))
+                self.publish()
+        elif ev == EV_DEVICE_UNPAIRED and len(data) >= 7:
+            self.irks.discard((index, data[:6], data[6]))
+            self.done.discard((index, data[:6], data[6]))
+
+    def run(self, haptics):
+        self.haptics = haptics
+        self.start()
+        last_tick = 0.0
+        while True:
+            while self.m.backlog:
+                self.handle(*self.m.backlog.pop(0))
+            app_fd = haptics.apps.fileno(time.monotonic())
+            fds = (
+                [self.m.fd]
+                + ([haptics.keys] if haptics.keys is not None else [])
+                + list(haptics.tablets.fds)
+                + ([app_fd] if app_fd is not None else [])
+            )
+            # Fast for 8 s after a connection: its HID device is found within
+            # 50 ms (the pen reconnects each time it comes near the screen).
+            fast = time.monotonic() < self.fast_until
+            r, _, _ = select.select(fds, [], [], 0.05 if fast else 1.0)
+            if haptics.keys is not None and haptics.keys in r:
+                haptics.key_events()
+            if app_fd is not None and app_fd in r:
+                haptics.app_requests(time.monotonic())
+            pen_only = bool(r) and all(f in haptics.tablets.fds or f == app_fd for f in r)
+            for fd in [f for f in r if f in haptics.tablets.fds]:
+                try:
+                    haptics.pen_frames(fd, time.monotonic())
+                except OSError as e:  # never the loop's end: the next frame tries again
+                    log("haptics: %s" % e)
+            if self.m.fd in r:
+                e = self.m.read_event(0)
+                if e:
+                    self.handle(*e)
+            now = time.monotonic()
+            if pen_only and now - last_tick < (0.05 if fast else 1.0):
+                continue  # writing (100-200 frames a second): the tick keeps its pace
+            last_tick = now
+            try:
+                haptics.tick()
+            except OSError as e:  # the pen went away mid-way: again at the next tick
+                log("haptics: %s" % e)
+                haptics.close_keys()
+
+
+def main():
+    haptics = Haptics()  # across mgmt reopenings (its thread, its devices)
+    while True:
+        try:
+            m = Mgmt()
+        except OSError as e:
+            log("mgmt: %s; again in 10 s" % e)
+            time.sleep(10)
+            continue
+        try:
+            Pend(m).run(haptics)
+        except OSError as e:
+            log("mgmt: %s; reopening" % e)
+            time.sleep(2)
+        finally:
+            m.close()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

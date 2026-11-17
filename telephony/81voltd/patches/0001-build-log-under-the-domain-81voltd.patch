@@ -1,0 +1,26 @@
+From e3019c366b685e469f6543a8888e2d5033899ed2 Mon Sep 17 00:00:00 2001
+From: duo2-os <duo2-os@localhost>
+Date: Thu, 12 Nov 2026 16:18:48 +0100
+Subject: [PATCH 1/5] build: log under the domain 81voltd
+
+G_MESSAGES_DEBUG=81voltd then shows this program's info and debug
+messages without those of GLib, GIO and libmm-glib, which
+G_MESSAGES_DEBUG=all would add (NULL-domain messages need 'all').
+---
+ meson.build | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/meson.build b/meson.build
+index 4000c6f..e3dd384 100644
+--- a/meson.build
++++ b/meson.build
+@@ -1,5 +1,9 @@
+ project('81voltd', 'c', version : '1.2.0')
+ 
++# Our own log domain: G_MESSAGES_DEBUG=81voltd enables this program's
++# messages and no library's.
++add_project_arguments('-DG_LOG_DOMAIN="81voltd"', language : 'c')
++
+ libmm = dependency('mm-glib')
+ libqmi = dependency('qmi-glib')
+ libqrtr = dependency('qrtr')

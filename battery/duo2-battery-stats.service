@@ -1,0 +1,52 @@
+# Battery usage statistics for Duo Settings (battery/). Root, because three of its sources are root's: the DSPs'
+# sleep counters (debugfs qcom_stats), the GPU time of duo-wc and the shell,
+# which make themselves non-dumpable (their /proc/PID/fdinfo needs
+# CAP_SYS_PTRACE), and the windows on screen (duo-wc's admin socket answers
+# root). Nothing else: CAP_SYS_PTRACE is the only capability left, and the
+# ptrace system calls themselves are filtered out; the system is read-only,
+# /home is not there, no IP. The store (/var/lib/duo2-battery) and the
+# report (/run/duo2-battery) are group duo2-battery: the GUI user reads them.
+[Unit]
+Description=Battery usage statistics
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/lib/duo2-battery/duo2-battery-stats run
+Environment=PYTHONDONTWRITEBYTECODE=1
+User=root
+Group=duo2-battery
+UMask=0027
+StateDirectory=duo2-battery
+StateDirectoryMode=0750
+RuntimeDirectory=duo2-battery
+RuntimeDirectoryMode=0750
+Nice=10
+IOSchedulingClass=idle
+CapabilityBoundingSet=CAP_SYS_PTRACE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_BLUETOOTH
+IPAddressDeny=any
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~ptrace process_vm_readv process_vm_writev
+MemoryMax=128M
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

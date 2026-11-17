@@ -1,0 +1,626 @@
+#!/usr/bin/env python3
+"""Talk to duo-wc's control socket.
+
+    duoctl get_outputs
+    duoctl get_state
+    duoctl set_hinge_gap on|off
+    duoctl place_window span|DSI-1|DSI-2 [window-id]
+    duoctl set_power DSI-1|DSI-2|all on|off
+    duoctl set_proximity [DSI-1] [DSI-2] [ttl MS]    (hold panels dark for the proximity
+                                       sensor during a call; none = the hold ends; it ends by
+                                       itself after ttl, default 30 s)
+    duoctl set_ring loud|silent|off [ttl MS]   (an incoming call rings: loud = the first
+                                       power-key press silences it; it ends by itself after
+                                       ttl, default 30 s; the shell sends it during a call)
+    duoctl set_pose dual | single DSI-1|DSI-2 | span      (also: duoctl pose ...)
+    duoctl set_rotation DSI-1|DSI-2 0|90|180|270
+    duoctl set_idle_timeout SECONDS                       (0 = never)
+    duoctl set_idle_inhibit on|off     (off: idle inhibitors, a video, and the shell's idle
+                                       hold do not keep the screen on)
+    duoctl set_idle_hold [APP[:PID]]... [ttl MS]   (what the shell sends for
+                                       org.freedesktop.ScreenSaver's inhibitors: APP keeps
+                                       the screen on while its PID's window is seen, without
+                                       PID while any app window is; none = the hold ends; it
+                                       ends by itself after ttl, default 30 s)
+    duoctl set_touch_wake on|off
+    duoctl set_full_redraw on|off      (diagnostics: draw every frame whole)
+    duoctl set_scanout on|off          (diagnostics: no plane scan-out)
+    duoctl set_atomic_wake on|off      (on: non-blocking wake commits; off: one modeset each)
+    duoctl set_atomic_off on|off       (panels go off in one non-blocking commit)
+    duoctl set_session_lock on|off     (lock clients may lock the phone; off by default)
+    duoctl unlock                      (end a lock whatever the lock client does)
+    duoctl screenshot DSI-1 [/tmp/duo-wc-DSI-1.png]
+    duoctl set_edge_swipe on|off       (a swipe up from a bottom edge is the shell's)
+    duoctl set_trackpad DSI-1|DSI-2|off   (a panel as the external display's touchpad)
+    duoctl set_display [<output>] desk|mirror   (a connected display: a desk, or the phone's mirror)
+    duoctl set_external on_connect ask|desk|mirror   (what a display plugged in is used as; kept)
+    duoctl set_external mirror active|both|DSI-1|DSI-2  (what a mirror shows; kept)
+    duoctl set_laptop on|off|toggle [auto on|off] [keys DSI-1|DSI-2]
+    duoctl set_pen [button right_click|off] [dot on|off]   (the pen's barrel button for apps
+                                       without tablets, its hover dot; until restart)
+                                       (laptop mode: one panel a desk, the other a keyboard
+                                        and touchpad; auto: the laptop posture turns it on;
+                                        keys: the keyboard panel when the posture does not say)
+    duoctl set_keyboard layouts hu,us [variants ,nodeadkeys]   (the keyboard layouts: the shell
+                                       sends the system's list; a plugged keyboard, laptop mode)
+    duoctl set_keyboard active next|<n>|<layout>   (the layout in force)
+    duoctl set_keyboard add de [variant nodeadkeys]   (in force, added to the list if missing)
+    duoctl expect_window DSI-1|DSI-2 [ms]   (the next new window opens there)
+    duoctl focus_output DSI-1|DSI-2         (that panel active, its front window gets the keyboard)
+    duoctl set_posture <posture>            (what duo-posed sends: closed, peek_left, open_dpm, ...)
+    duoctl ambient peek|glance|glance-ruler|off  (the closed phone's screens, by hand; the
+                                            ruler: numbered bands from DSI-2's hinge edge, 30 s)
+    duoctl activate_window <window-id>|<app-id>
+    duoctl close_window <window-id>|<app-id>    (asks it to close, like the overview's X)
+    duoctl minimize_window <window-id>|<app-id> (set aside: not shown, still running)
+    duoctl overview [open|close|toggle]          (the task overview, on every lit panel)
+    duoctl snap <window-id>|<app-id> left|right|top|bottom [with <window-id>] [on <output>]
+                                       (two windows share a panel; the other one: with, else
+                                        the panel's front window or the split partner)
+    duoctl unsplit DSI-1|DSI-2         (both windows fill the panel again)
+    duoctl split_ratio DSI-1|DSI-2 0.2..0.8    (the left / top window's share)
+    duoctl home [DSI-1|DSI-2]          (the panel's windows go aside: the home screen)
+    duoctl toggle_span [<window-id>|<app-id>]    (one panel <-> both panels)
+    duoctl move_window <window-id>|<app-id> DSI-1 | DSI-2 [left|right|top|bottom] | span
+                                       (as if carried there by its top)
+    duoctl force_close_window <window-id>        (kill its app: SIGTERM, SIGKILL after 3 s)
+    duoctl set_back_swipe both|outer|off         (which side edges swipe back)
+    duoctl set_stitch [edge PX] [ms MS] [offset PX]   (dragging across the hinge)
+    duoctl set_snap [hinge_band PX] [half_share 0..0.5] [pad_from 0..1] [pad_to 0..1]
+    duoctl set_animations on|off
+    duoctl set_rotate_anim MS [ahead on|off]
+                                       (a turn takes this long; 0 = it jumps; ahead: its
+                                        frames rendered one ahead, on by default)
+    duoctl confirm restart-display     (ask the user in the shell first; the shell answers)
+    duoctl confirm_answer ID yes|no    (the shell's answer to a confirm_request)
+    duoctl subscribe                   (print the event stream until Ctrl+C)
+    duoctl exec-trusted [--wayland|--capture] [--keep-trust|--keep-capture] -- COMMAND [ARGS...]
+                                       (run COMMAND trusted: --wayland gives it a Wayland
+                                        connection that sees the guarded globals (virtual
+                                        keyboard, input method, lock, toplevel list, layer
+                                        shell, screen capture) as WAYLAND_SOCKET; --keep-trust
+                                        passes the trust factory on (DUO_WC_TRUST_FD) so it can
+                                        make trusted connections itself. --capture: a Wayland
+                                        connection that may capture the screen and nothing
+                                        else guarded (the screen-cast portal, grim);
+                                        --keep-capture: a factory of only those, for its
+                                        children)
+
+Which socket (docs/hardware/security.md):
+  - inside the session (DUO_WC_TRUST_FD set: the shell, the lock, the session
+    hooks): a trusted connection from the trust factory, every request allowed;
+  - as root or as any user but duo-wc's own (duo2admin over ssh, duo-posed):
+    the admin socket /run/duo-wc/admin.sock ($DUO_WC_ADMIN_SOCKET), answered by
+    the caller's credentials (root and admin_users: everything; sensor_users:
+    posture, pose, rotation, power);
+  - as duo-wc's user (an app, an ssh shell of the GUI user): $DUO_WC_SOCKET,
+    else /run/duo-wc/duo-wc.sock: the state, the event stream and
+    expect_window only; everything else is refused ("not allowed").
+"""
+
+import json
+import os
+import socket
+import sys
+
+RUN = "/run/duo-wc"
+TRUST_ENV = "DUO_WC_TRUST_FD"
+
+
+def socket_path():
+    if os.environ.get("DUO_WC_SOCKET"):
+        return os.environ["DUO_WC_SOCKET"]
+    if os.path.exists(RUN + "/duo-wc.sock"):
+        return RUN + "/duo-wc.sock"
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or "/run/user/%d" % os.getuid()
+    return os.path.join(runtime, "duo-wc.sock")
+
+
+def admin_socket_path():
+    if os.environ.get("DUO_WC_ADMIN_SOCKET"):
+        return os.environ["DUO_WC_ADMIN_SOCKET"]
+    return os.path.join(os.path.dirname(socket_path()), "admin.sock")
+
+
+def is_wc_user():
+    """Whether this process runs as duo-wc's own user (the GUI user)."""
+    try:
+        return os.stat(RUN).st_uid == os.geteuid() and os.geteuid() != 0
+    except OSError:
+        return True
+
+
+def trust_fd():
+    value = os.environ.get(TRUST_ENV, "")
+    if not value.isdigit():
+        return None
+    fd = int(value)
+    try:
+        os.fstat(fd)
+    except OSError:
+        return None
+    return fd
+
+
+def factory_ask(fd, kind, timeout=5.0):
+    """Ask a trust factory (SOCK_SEQPACKET) for a trusted connection: kind
+    'wayland' or 'control'. Returns the new descriptor."""
+    sock = socket.socket(fileno=os.dup(fd))
+    try:
+        sock.settimeout(timeout)
+        sock.send(kind.encode())
+        msg, fds, _flags, _addr = socket.recv_fds(sock, 256, 1)
+    finally:
+        sock.close()
+    if msg != b"ok" or not fds:
+        for extra in fds:
+            os.close(extra)
+        raise RuntimeError("trust factory: %s" % (msg.decode(errors="replace") or "gone"))
+    return fds[0]
+
+
+def connect(timeout=5.0):
+    """A control connection, the most trusted this process can have."""
+    fd = trust_fd()
+    if fd is not None:
+        sock = socket.socket(fileno=factory_ask(fd, "control", timeout))
+        sock.settimeout(timeout)
+        return sock
+    sock = socket.socket(socket.AF_UNIX)
+    sock.settimeout(timeout)
+    sock.connect(socket_path() if is_wc_user() else admin_socket_path())
+    return sock
+
+
+def trusted_socket(kind, timeout=5.0):
+    """A trusted descriptor (kind 'wayland', 'factory', 'capture' or
+    'capture-factory') over the admin socket or our own factory (a capture
+    factory answers only the capture kinds)."""
+    fd = trust_fd()
+    if fd is not None:
+        if kind == "factory":
+            return os.dup(fd)
+        return factory_ask(fd, kind, timeout)
+    sock = connect(timeout)
+    try:
+        sock.sendall(
+            (json.dumps({"id": 1, "request": "trusted_socket", "kind": kind}) + "\n").encode()
+        )
+        msg, fds, _flags, _addr = socket.recv_fds(sock, 65536, 1)
+        buffer = msg
+        while b"\n" not in buffer:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            buffer += chunk
+    finally:
+        sock.close()
+    reply = json.loads(buffer.split(b"\n")[0] or b"{}")
+    if "error" in reply or not fds:
+        for extra in fds:
+            os.close(extra)
+        raise RuntimeError(reply.get("error") or "no descriptor came")
+    return fds[0]
+
+
+def exec_trusted(args):
+    wayland = None
+    keep = None
+    while args and args[0].startswith("--"):
+        flag = args.pop(0)
+        if flag == "--":
+            break
+        if flag == "--wayland":
+            wayland = "wayland"
+        elif flag == "--capture":
+            wayland = "capture"
+        elif flag == "--keep-trust":
+            keep = "factory"
+        elif flag == "--keep-capture":
+            keep = "capture-factory"
+        else:
+            print("duoctl exec-trusted: unknown %s" % flag, file=sys.stderr)
+            return 2
+    if not args:
+        print(
+            "usage: duoctl exec-trusted [--wayland|--capture] [--keep-trust|--keep-capture]"
+            " -- COMMAND [ARGS...]",
+            file=sys.stderr,
+        )
+        return 2
+    env = dict(os.environ)
+    try:
+        if wayland:
+            fd = trusted_socket(wayland)
+            os.set_inheritable(fd, True)
+            env["WAYLAND_SOCKET"] = str(fd)
+        own = trust_fd()
+        if keep == "factory":
+            factory = own if own is not None else trusted_socket("factory")
+            os.set_inheritable(factory, True)
+            env[TRUST_ENV] = str(factory)
+        elif keep == "capture-factory":
+            # A narrower factory of its own; ours (maybe a full one) is
+            # never passed on.
+            factory = trusted_socket("capture-factory")
+            os.set_inheritable(factory, True)
+            env[TRUST_ENV] = str(factory)
+            if own is not None:
+                os.close(own)
+        else:
+            env.pop(TRUST_ENV, None)
+            if own is not None:
+                os.close(own)
+    except (OSError, RuntimeError, ValueError) as e:
+        print("duoctl exec-trusted: %s" % e, file=sys.stderr)
+        return 1
+    try:
+        os.execvpe(args[0], args, env)
+    except OSError as e:
+        print("duoctl exec-trusted: %s: %s" % (args[0], e), file=sys.stderr)
+        return 127
+
+
+def request(payload, timeout=5.0):
+    sock = connect(timeout)
+    sock.sendall((json.dumps(payload) + "\n").encode())
+    buffer = b""
+    while b"\n" not in buffer:
+        chunk = sock.recv(65536)
+        if not chunk:
+            break
+        buffer += chunk
+    sock.close()
+    return json.loads(buffer.split(b"\n")[0])
+
+
+def subscribe():
+    """Print duo-wc's event lines as they come (Ctrl+C ends)."""
+    sock = connect()
+    sock.settimeout(None)
+    sock.sendall(b'{"id":1,"request":"subscribe"}\n')
+    buffer = b""
+    try:
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                return 1
+            buffer += chunk
+            while b"\n" in buffer:
+                line, buffer = buffer.split(b"\n", 1)
+                print(line.decode(errors="replace"), flush=True)
+    except KeyboardInterrupt:
+        return 0
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 2
+
+    command = args[0]
+    if command == "exec-trusted":
+        return exec_trusted(args[1:])
+    payload = {"id": 1, "request": command}
+    if command == "set_hinge_gap":
+        if len(args) != 2 or args[1] not in ("on", "off"):
+            print("usage: duoctl set_hinge_gap on|off")
+            return 2
+        payload["gap"] = args[1]
+    elif command == "place_window":
+        if len(args) < 2:
+            print("usage: duoctl place_window span|<output> [window-id]")
+            return 2
+        payload["output"] = args[1]
+        if len(args) > 2:
+            payload["window"] = int(args[2])
+    elif command == "set_power":
+        if len(args) != 3 or args[2] not in ("on", "off"):
+            print("usage: duoctl set_power DSI-1|DSI-2|all on|off")
+            return 2
+        payload["output"] = args[1]
+        payload["power"] = args[2]
+    elif command == "set_proximity":
+        panels, rest = [], args[1:]
+        while rest:
+            if rest[0] == "ttl" and len(rest) > 1 and rest[1].isdigit():
+                payload["ttl_ms"] = int(rest[1])
+                rest = rest[2:]
+            else:
+                panels.append(rest.pop(0))
+        payload["panels"] = panels
+    elif command == "set_ring":
+        if (
+            len(args) not in (2, 4)
+            or args[1] not in ("loud", "silent", "off")
+            or (len(args) == 4 and (args[2] != "ttl" or not args[3].isdigit()))
+        ):
+            print("usage: duoctl set_ring loud|silent|off [ttl MS]")
+            return 2
+        payload["ring"] = args[1]
+        if len(args) == 4:
+            payload["ttl_ms"] = int(args[3])
+    elif command in ("set_pose", "pose"):
+        payload["request"] = "set_pose"
+        if len(args) < 2 or args[1] not in ("dual", "single", "span"):
+            print("usage: duoctl set_pose dual | single DSI-1|DSI-2 | span")
+            return 2
+        payload["pose"] = args[1]
+        if len(args) > 2:
+            payload["output"] = args[2]
+    elif command == "set_rotation":
+        if len(args) != 3 or not args[2].lstrip("-").isdigit():
+            print("usage: duoctl set_rotation DSI-1|DSI-2 0|90|180|270")
+            return 2
+        payload["output"] = args[1]
+        payload["rotation"] = int(args[2])
+    elif command == "set_idle_timeout":
+        if len(args) != 2 or not args[1].isdigit():
+            print("usage: duoctl set_idle_timeout SECONDS   (0 = never)")
+            return 2
+        payload["seconds"] = int(args[1])
+    elif command == "set_touch_wake":
+        if len(args) != 2 or args[1] not in ("on", "off"):
+            print("usage: duoctl set_touch_wake on|off")
+            return 2
+        payload["touch_wake"] = args[1]
+    elif command == "set_idle_hold":
+        holds, rest = [], args[1:]
+        while rest:
+            if rest[0] == "ttl" and len(rest) > 1 and rest[1].isdigit():
+                payload["ttl_ms"] = int(rest[1])
+                rest = rest[2:]
+                continue
+            word = rest.pop(0)
+            app, sep, pid = word.rpartition(":")
+            if not sep or not pid.isdigit():
+                app, pid = word, ""
+            hold = {"app": app or "duoctl"}
+            if pid:
+                hold["pid"] = int(pid)
+            holds.append(hold)
+        payload["holds"] = holds
+    elif command in (
+        "set_full_redraw",
+        "set_scanout",
+        "set_atomic_wake",
+        "set_atomic_off",
+        "set_session_lock",
+        "set_idle_inhibit",
+    ):
+        if len(args) != 2 or args[1] not in ("on", "off"):
+            print("usage: duoctl %s on|off" % command)
+            return 2
+        payload[command[len("set_") :]] = args[1]
+    elif command == "set_laptop":
+        rest = list(args[1:])
+        if rest and rest[0] in ("on", "off", "toggle"):
+            payload["laptop"] = rest.pop(0)
+        while rest:
+            if len(rest) < 2 or rest[0] not in ("auto", "keys"):
+                print("usage: duoctl set_laptop on|off|toggle [auto on|off] [keys DSI-1|DSI-2]")
+                return 2
+            payload[rest[0]] = rest[1]
+            rest = rest[2:]
+        if len(payload) <= 2:
+            print("usage: duoctl set_laptop on|off|toggle [auto on|off] [keys DSI-1|DSI-2]")
+            return 2
+    elif command == "set_pen":
+        rest = list(args[1:])
+        usage = "usage: duoctl set_pen [button right_click|off] [dot on|off]"
+        if not rest or len(rest) % 2:
+            print(usage)
+            return 2
+        while rest:
+            if rest[0] not in ("button", "dot"):
+                print(usage)
+                return 2
+            payload[rest[0]] = rest[1]
+            rest = rest[2:]
+    elif command == "set_keyboard":
+        rest = list(args[1:])
+        usage = "usage: duoctl set_keyboard [layouts hu,us] [variants ,] [active next|<n>|<layout>] [add de] [variant v]"
+        if not rest or len(rest) % 2:
+            print(usage)
+            return 2
+        while rest:
+            if rest[0] not in ("layouts", "variants", "active", "add", "variant"):
+                print(usage)
+                return 2
+            payload[rest[0]] = rest[1]
+            rest = rest[2:]
+    elif command == "set_trackpad":
+        if len(args) != 2:
+            print("usage: duoctl set_trackpad DSI-1|DSI-2|off")
+            return 2
+        payload["trackpad"] = args[1]
+    elif command == "set_display":
+        if len(args) not in (2, 3) or args[-1] not in ("desk", "mirror"):
+            print("usage: duoctl set_display [<output>] desk|mirror")
+            return 2
+        payload["mode"] = args[-1]
+        if len(args) == 3:
+            payload["output"] = args[1]
+    elif command == "set_external":
+        if len(args) != 3 or args[1] not in ("on_connect", "mirror"):
+            print(
+                "usage: duoctl set_external on_connect ask|desk|mirror | mirror active|both|DSI-1|DSI-2"
+            )
+            return 2
+        payload[args[1]] = args[2]
+    elif command == "set_edge_swipe":
+        if len(args) != 2 or args[1] not in ("on", "off"):
+            print("usage: duoctl set_edge_swipe on|off")
+            return 2
+        payload["edge_swipe"] = args[1]
+    elif command == "set_posture":
+        if len(args) != 2:
+            print("usage: duoctl set_posture <posture>   (closed, peek_left, open_dpm, ...)")
+            return 2
+        payload["posture"] = args[1]
+    elif command == "ambient":
+        if len(args) != 2 or args[1] not in ("peek", "glance", "glance-ruler", "off"):
+            print("usage: duoctl ambient peek|glance|glance-ruler|off")
+            return 2
+        payload["action"] = args[1]
+    elif command == "focus_output":
+        if len(args) != 2:
+            print("usage: duoctl focus_output <output>")
+            return 2
+        payload["output"] = args[1]
+    elif command == "expect_window":
+        if len(args) < 2:
+            print("usage: duoctl expect_window <output> [timeout-ms]")
+            return 2
+        payload["output"] = args[1]
+        if len(args) > 2:
+            payload["timeout_ms"] = int(args[2])
+    elif command == "overview":
+        if len(args) > 2 or (len(args) == 2 and args[1] not in ("open", "close", "toggle")):
+            print("usage: duoctl overview [open|close|toggle]")
+            return 2
+        if len(args) == 2:
+            payload["action"] = args[1]
+    elif command in ("activate_window", "close_window", "minimize_window"):
+        if len(args) != 2:
+            print("usage: duoctl %s <window-id>|<app-id>" % command)
+            return 2
+        if args[1].isdigit():
+            payload["window"] = int(args[1])
+        else:
+            payload["app_id"] = args[1]
+    elif command == "snap":
+        payload["request"] = "snap_window"
+        rest = args[1:]
+        if len(rest) < 2:
+            print(
+                "usage: duoctl snap <window-id>|<app-id> left|right|top|bottom "
+                "[with <window-id>] [on <output>]"
+            )
+            return 2
+        if rest[0].isdigit():
+            payload["window"] = int(rest[0])
+        else:
+            payload["app_id"] = rest[0]
+        payload["side"] = rest[1]
+        extra = rest[2:]
+        while len(extra) >= 2:
+            key, value = extra[0], extra[1]
+            if key == "with" and value.isdigit():
+                payload["with"] = int(value)
+            elif key == "on":
+                payload["output"] = value
+            else:
+                print("duoctl snap: unknown %s %s" % (key, value))
+                return 2
+            extra = extra[2:]
+    elif command == "unsplit":
+        if len(args) != 2:
+            print("usage: duoctl unsplit <output>")
+            return 2
+        payload["output"] = args[1]
+    elif command in ("split_ratio", "set_split_ratio"):
+        payload["request"] = "set_split_ratio"
+        if len(args) != 3:
+            print("usage: duoctl split_ratio <output> 0.2..0.8")
+            return 2
+        payload["output"] = args[1]
+        payload["ratio"] = float(args[2])
+    elif command == "home":
+        if len(args) > 2:
+            print("usage: duoctl home [<output>]")
+            return 2
+        if len(args) == 2:
+            payload["output"] = args[1]
+    elif command == "toggle_span":
+        if len(args) == 2:
+            if args[1].isdigit():
+                payload["window"] = int(args[1])
+            else:
+                payload["app_id"] = args[1]
+    elif command == "move_window":
+        if len(args) < 3:
+            print("usage: duoctl move_window <window-id>|<app-id> <output> [side] | span")
+            return 2
+        if args[1].isdigit():
+            payload["window"] = int(args[1])
+        else:
+            payload["app_id"] = args[1]
+        payload["target"] = " ".join(args[2:])
+    elif command == "force_close_window":
+        if len(args) != 2 or not args[1].isdigit():
+            print("usage: duoctl force_close_window <window-id>")
+            return 2
+        payload["window"] = int(args[1])
+    elif command == "set_back_swipe":
+        if len(args) != 2 or args[1] not in ("both", "outer", "off"):
+            print("usage: duoctl set_back_swipe both|outer|off")
+            return 2
+        payload["back_swipe"] = args[1]
+    elif command in ("set_stitch", "set_snap"):
+        keys = {
+            "set_stitch": {"edge": float, "ms": int, "offset": float},
+            "set_snap": {
+                "hinge_band": float,
+                "half_share": float,
+                "pad_from": float,
+                "pad_to": float,
+            },
+        }[command]
+        rest = args[1:]
+        if len(rest) % 2:
+            print("usage: duoctl %s %s" % (command, " ".join("[%s N]" % k for k in keys)))
+            return 2
+        for key, value in zip(rest[::2], rest[1::2]):
+            if key not in keys:
+                print("duoctl %s: unknown %s" % (command, key))
+                return 2
+            payload[key] = keys[key](value)
+    elif command == "set_animations":
+        if len(args) != 2 or args[1] not in ("on", "off"):
+            print("usage: duoctl set_animations on|off")
+            return 2
+        payload["animations"] = args[1]
+    elif command == "set_rotate_anim":
+        if (
+            not (
+                len(args) == 2
+                or (len(args) == 4 and args[2] == "ahead" and args[3] in ("on", "off"))
+            )
+            or not args[1].isdigit()
+        ):
+            print("usage: duoctl set_rotate_anim MS [ahead on|off]")
+            return 2
+        payload["ms"] = int(args[1])
+        if len(args) == 4:
+            payload["ahead"] = args[3]
+    elif command == "confirm":
+        if len(args) != 2:
+            print("usage: duoctl confirm restart-display")
+            return 2
+        payload["action"] = args[1]
+    elif command == "confirm_answer":
+        if len(args) != 3 or not args[1].isdigit() or args[2] not in ("yes", "no"):
+            print("usage: duoctl confirm_answer ID yes|no")
+            return 2
+        payload["confirm"] = int(args[1])
+        payload["yes"] = args[2] == "yes"
+    elif command == "subscribe":
+        return subscribe()
+    elif command == "screenshot":
+        if len(args) < 2:
+            print("usage: duoctl screenshot <output> [path]")
+            return 2
+        payload["output"] = args[1]
+        payload["path"] = args[2] if len(args) > 2 else "/tmp/duo-wc-%s.png" % args[1]
+
+    # A screenshot is read back on duo-wc's loop (a few ms) and PNG-encoded
+    # in a thread of its own (~1-4 s): duo-wc goes on meanwhile.
+    reply = request(payload, timeout=30.0 if command == "screenshot" else 5.0)
+    print(json.dumps(reply, indent=2))
+    return 0 if "error" not in reply else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

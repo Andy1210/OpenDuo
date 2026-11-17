@@ -1,0 +1,37 @@
+From 7fa7ec74a0cae26e130955e5260fe1db1d7492d9 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 21:56:39 +0100
+Subject: [PATCH 114/137] rtc: interface: Release the wakeup source when
+ reading the time fails
+
+rtc_set_time(), rtc_update_irq() and rtc_timer_enqueue() take the RTC's
+wakeup source with pm_stay_awake() and hand over to rtc_timer_do_work(),
+which releases it at its end. When reading the time fails there, it
+returns early and the wakeup source stays active forever.
+
+On a Surface Duo 2 the EFI RTC (rtc0) cannot be read (the firmware
+returns an error): rtc-efi.0 was active from boot on, counting about 27
+events a second. An active wakeup source makes every read of
+/sys/power/wakeup_count block, so a user space suspend daemon could not
+use it.
+
+Release the wakeup source on that path too.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/rtc/interface.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/rtc/interface.c b/drivers/rtc/interface.c
+index 96626f8068f9..59fbbafb076c 100644
+--- a/drivers/rtc/interface.c
++++ b/drivers/rtc/interface.c
+@@ -980,6 +980,8 @@ void rtc_timer_do_work(struct work_struct *work)
+ again:
+ 	err = __rtc_read_time(rtc, &tm);
+ 	if (err) {
++		/* the callers' pm_stay_awake() must not be left active */
++		pm_relax(rtc->dev.parent);
+ 		mutex_unlock(&rtc->ops_lock);
+ 		return;
+ 	}

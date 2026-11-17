@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- Nibfair: a fair booth's awning over a gold pen nib. Drawn for duo2-os. -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#241b52"/>
+      <stop offset="1" stop-color="#8a3a78"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffe08a"/>
+      <stop offset="1" stop-color="#e9a42c"/>
+    </linearGradient>
+    <clipPath id="tile"><rect x="8" y="8" width="112" height="112" rx="26"/></clipPath>
+  </defs>
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#sky)"/>
+  <g clip-path="url(#tile)">
+    <circle cx="64" cy="132" r="54" fill="#ff9a5a" opacity="0.35"/>
+    <g>
+      <rect x="8" y="8" width="16" height="22" fill="#ec4f5c"/>
+      <rect x="24" y="8" width="16" height="22" fill="#fff6ea"/>
+      <rect x="40" y="8" width="16" height="22" fill="#ec4f5c"/>
+      <rect x="56" y="8" width="16" height="22" fill="#fff6ea"/>
+      <rect x="72" y="8" width="16" height="22" fill="#ec4f5c"/>
+      <rect x="88" y="8" width="16" height="22" fill="#fff6ea"/>
+      <rect x="104" y="8" width="16" height="22" fill="#ec4f5c"/>
+      <circle cx="16" cy="30" r="8" fill="#ec4f5c"/>
+      <circle cx="32" cy="30" r="8" fill="#fff6ea"/>
+      <circle cx="48" cy="30" r="8" fill="#ec4f5c"/>
+      <circle cx="64" cy="30" r="8" fill="#fff6ea"/>
+      <circle cx="80" cy="30" r="8" fill="#ec4f5c"/>
+      <circle cx="96" cy="30" r="8" fill="#fff6ea"/>
+      <circle cx="112" cy="30" r="8" fill="#ec4f5c"/>
+    </g>
+    <circle cx="26" cy="58" r="2" fill="#fff4c8"/>
+    <circle cx="100" cy="66" r="2.4" fill="#fff4c8"/>
+    <circle cx="92" cy="98" r="1.6" fill="#fff4c8"/>
+  </g>
+  <g transform="translate(64 82) rotate(28)">
+    <circle r="34" fill="#ffd27a" opacity="0.18"/>
+    <path d="M0 40 L-21 -2 L-16 -27 L16 -27 L21 -2 Z" fill="#9c6418"/>
+    <path d="M0 35 L-17 -2 L-12.5 -24 L12.5 -24 L17 -2 Z" fill="url(#gold)"/>
+    <path d="M0 33 L0 1" stroke="#8a5512" stroke-width="2.4" stroke-linecap="round"/>
+    <circle cx="0" cy="-1" r="4.6" fill="#8a5512"/>
+    <rect x="-16" y="-38" width="32" height="11" rx="3" fill="#3c2860"/>
+  </g>
+</svg>

@@ -1,0 +1,63 @@
+From a6ade066776f8c58234c373735f87d4de96f8c2e Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 05:54:25 +0100
+Subject: [PATCH 056/137] arm64: dts: qcom: sm8350: Add the QUP SE18 I2C
+ controller
+
+The comment above spi18 says that QUP no. 18 is SPI/UART-only, but the
+protocol of a serial engine is set by the QUP firmware the boot chain
+loads, per board. The Microsoft Surface Duo 2 runs SE18 as I2C: the
+vendor device tree has an I2C controller at 0x890000 (GIC SPI 586,
+gpio68/69, pulled up) with the two PM8008 camera PMICs on it.
+
+Add i2c18 next to spi18 and uart18, disabled, and drop the comment.
+
+A board enables it only where its QUP firmware runs SE18 as I2C; on the
+Surface Duo 2 the camera PMICs answer on it.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ arch/arm64/boot/dts/qcom/sm8350.dtsi | 23 ++++++++++++++++++++++-
+ 1 file changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350.dtsi b/arch/arm64/boot/dts/qcom/sm8350.dtsi
+index 1b3ef745d36d..b4ebe535d728 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8350.dtsi
+@@ -889,7 +889,21 @@ spi17: spi@88c000 {
+ 				status = "disabled";
+ 			};
+ 
+-			/* QUP no. 18 seems to be strictly SPI/UART-only */
++			i2c18: i2c@890000 {
++				compatible = "qcom,geni-i2c";
++				reg = <0 0x00890000 0 0x4000>;
++				clock-names = "se";
++				clocks = <&gcc GCC_QUPV3_WRAP2_S4_CLK>;
++				pinctrl-names = "default";
++				pinctrl-0 = <&qup_i2c18_default>;
++				interrupts = <GIC_SPI 586 IRQ_TYPE_LEVEL_HIGH>;
++				dmas = <&gpi_dma2 0 4 QCOM_GPI_I2C>,
++				       <&gpi_dma2 1 4 QCOM_GPI_I2C>;
++				dma-names = "tx", "rx";
++				#address-cells = <1>;
++				#size-cells = <0>;
++				status = "disabled";
++			};
+ 
+ 			spi18: spi@890000 {
+ 				compatible = "qcom,geni-spi";
+@@ -3752,6 +3766,13 @@ qup_i2c17_default: qup-i2c17-default-state {
+ 				bias-disable;
+ 			};
+ 
++			qup_i2c18_default: qup-i2c18-default-state {
++				pins = "gpio68", "gpio69";
++				function = "qup18";
++				drive-strength = <2>;
++				bias-pull-up;
++			};
++
+ 			qup_i2c19_default: qup-i2c19-default-state {
+ 				pins = "gpio76", "gpio77";
+ 				function = "qup19";

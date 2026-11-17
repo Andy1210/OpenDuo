@@ -1,0 +1,540 @@
+From 59067651ec71e074be62efc389af62ed663d8f71 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 16:57:15 +0100
+Subject: [PATCH 048/137] Input: qcom-spmi-haptics: Add the PM8350B (HAP520)
+ haptics
+
+HAP520, the haptics module of the PM8350B, is programmed like HAP530_HV
+for DIRECT_PLAY and FIFO plays, with these differences (taken from the
+downstream qcom-hv-haptics driver, which handles HAP_CFG/HAP_PTN
+revision 2, what a PM8350B reports):
+
+ - the FIFO is a fixed 640 samples: no MMAP_FIFO partitioning and no
+   MEM_OP_ACCESS flush; toggling HAPTICS_EN gives a FIFO play a clean
+   start instead;
+ - the FIFO-empty threshold counts in steps of 40 samples (280 is used);
+ - every FIFO write must be a 4-byte FIFO_DIN burst: a 1-byte write
+   that meets the hardware reading the FIFO makes it drop three of every
+   four samples, so the end of an effect is padded with silence;
+ - TLRA_OL is counted by the RC clock, which is auto-calibrated: a
+   period is programmed as 1.024 times its length;
+ - the module is powered by its own boost (HAP_HBST), which follows it
+   in hardware: Vmax is limited to 5 V when the boost is clamped, and a
+   play waits (up to 20 ms) for the boost to be idle after the previous
+   one;
+ - the auto-resonance settings of HAP530 (duty cycles, zero-cross
+   window, RAMP_DN_CFG2) do not apply; the hardware defaults are kept,
+   as downstream does;
+ - FAULT_CLR has no ZX_TO bit.
+
+Boot firmware or a previous OS may leave the SoundWire pattern input
+enabled (the downstream audio stack plays haptics as PCM from the LPASS
+RX macro), the FIFO sample format other than two's complement, the drive
+not waiting for the boost (FORCE_VREG_RDY) and the module enabled: set
+all of them at probe.
+
+Move the HAP530 specifics behind a variant description, selected by
+compatible.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/input/misc/Kconfig             |   7 +-
+ drivers/input/misc/qcom-spmi-haptics.c | 294 ++++++++++++++++++++++---
+ 2 files changed, 273 insertions(+), 28 deletions(-)
+
+diff --git a/drivers/input/misc/Kconfig b/drivers/input/misc/Kconfig
+index 33f85c526d19..da8f628be808 100644
+--- a/drivers/input/misc/Kconfig
++++ b/drivers/input/misc/Kconfig
+@@ -240,9 +240,10 @@ config INPUT_QCOM_SPMI_HAPTICS
+ 	tristate "Qualcomm SPMI PMIC haptics support"
+ 	depends on MFD_SPMI_PMIC
+ 	help
+-	  Say Y to enable support for the Qualcomm PMIH0108 SPMI PMIC haptics
+-	  module. Supports DIRECT_PLAY, FIFO streaming play modes via the
+-	  Linux input force-feedback framework.
++	  Say Y to enable support for the haptics module of the Qualcomm
++	  PMIH0108 (HAP530_HV) and PM8350B (HAP520) SPMI PMICs. Supports
++	  DIRECT_PLAY, FIFO streaming play modes via the Linux input
++	  force-feedback framework.
+ 
+ 	  To compile this driver as a module, choose M here: the module will
+ 	  be called qcom-spmi-haptics.
+diff --git a/drivers/input/misc/qcom-spmi-haptics.c b/drivers/input/misc/qcom-spmi-haptics.c
+index 2e2dd9d84e0d..20ebfdfe660f 100644
+--- a/drivers/input/misc/qcom-spmi-haptics.c
++++ b/drivers/input/misc/qcom-spmi-haptics.c
+@@ -5,6 +5,7 @@
+ 
+ #include <linux/bitfield.h>
+ #include <linux/bits.h>
++#include <linux/delay.h>
+ #include <linux/device.h>
+ #include <linux/input.h>
+ #include <linux/interrupt.h>
+@@ -16,6 +17,7 @@
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_runtime.h>
++#include <linux/property.h>
+ #include <linux/regmap.h>
+ #include <linux/slab.h>
+ #include <linux/spinlock.h>
+@@ -67,13 +69,29 @@
+ #define HAP_CFG_RAMP_DN_CFG2_REG	0x86
+ #define  AUTORES_PRE_HIZ_DLY_10US	1
+ 
++/* HAP_CFG registers used on HAP520 (PM8350B) only */
++#define HAP_CFG_DRV_WF_SEL_REG		0x49
++#define  DRV_WF_FMT_BIT			BIT(4)
++#define  DRV_WF_SEL_MASK		GENMASK(1, 0)
++#define   DRV_WF_SINE			1
++#define HAP_CFG_SWR_ACCESS_REG		0x4E
++#define  SWR_PAT_CFG_EN_BIT		BIT(7)
++#define  SWR_PAT_INPUT_EN_BIT		BIT(6)
++#define  SWR_PAT_RES_N_BIT		BIT(5)
++#define HAP_CFG_VSET_CFG_REG		0x68
++#define  FORCE_VREG_RDY_BIT		BIT(0)
++#define HAP_CFG_CAL_EN_REG		0x72
++#define  CAL_RC_CLK_MASK		GENMASK(3, 2)
++#define   CAL_RC_CLK_AUTO		1
++#define HAP520_FAULT_CLR_ALL	(SC_CLR_BIT | AUTO_RES_ERR_CLR_BIT | \
++				 HPWR_RDY_FAULT_CLR_BIT)
++
+ /* HAP_PTN register offsets, bit fields, value constants */
+ #define HAP_PTN_FIFO_DIN_0_REG		0x20
+ #define HAP_PTN_FIFO_PLAY_RATE_REG	0x24
+ #define  FIFO_PLAY_RATE_MASK		GENMASK(3, 0)
+ #define HAP_PTN_DIRECT_PLAY_REG		0x26
+ #define HAP_PTN_FIFO_EMPTY_CFG_REG	0x2A
+-#define  FIFO_THRESH_LSB		64
+ #define HAP_PTN_FIFO_DIN_1B_REG		0x2C
+ #define HAP_PTN_MEM_OP_ACCESS_REG	0x2D
+ #define  MEM_FLUSH_RELOAD_BIT		BIT(0)
+@@ -81,9 +99,35 @@
+ #define  MMAP_FIFO_EXIST_BIT		BIT(7)
+ #define  MMAP_FIFO_LEN_MASK		GENMASK(6, 0)
+ 
++/* HAP_HBST registers: the boost that powers HAP520 (PM8350B) */
++#define HAP_HBST_REVISION1_REG		0x00
++#define  HBST_REV_V0P0			0x0000
++#define HAP_HBST_STATUS4_REG		0x0B
++#define  BOOST_DTEST1_STATUS_BIT	BIT(0)
++#define HAP_HBST_VREG_EN_REG		0x46
++#define  VREG_EN_BIT			BIT(7)
++#define HAP_HBST_V0P0_CLAMP_REG		0xF1
++#define HAP_HBST_V0P1_CLAMP_REG		0x70
++#define  CLAMP_5V_BIT			BIT(0)
++#define HBST_CLAMPED_VMAX_MV		5000
++#define HBST_IDLE_POLL_US		200
++#define HBST_IDLE_TIMEOUT_US		20000
++
+ #define HAP530_MEM_TOTAL_BYTES		8192
+-#define FIFO_EMPTY_THRESH		256
+-#define FIFO_INIT_FILL			320
++#define HAP530_FIFO_THRESH_LSB		64
++#define HAP530_FIFO_EMPTY_THRESH	256
++#define HAP530_FIFO_INIT_FILL		320
++
++#define HAP520_FIFO_BYTES		640
++#define HAP520_FIFO_THRESH_LSB		40
++#define HAP520_FIFO_EMPTY_THRESH	280
++
++/*
++ * TLRA_OL is counted by the RC clock; while that clock is auto-calibrated
++ * (HAP520), a period of N us has to be programmed as N * 1.024 us.
++ */
++#define HAP520_TLRA_SCALE_NUM		1024
++#define HAP520_TLRA_SCALE_DEN		1000
+ 
+ #define HAPTICS_AUTOSUSPEND_MS		1000
+ 
+@@ -158,13 +202,45 @@ struct haptics_play_req {
+ 	bool play;
+ };
+ 
++struct qcom_haptics;
++
++/**
++ * struct qcom_haptics_variant - Differences between the haptics modules
++ * @fault_clr:         the FAULT_CLR bits the module has
++ * @fifo_thresh_lsb:   FIFO samples per step of the FIFO_EMPTY_CFG threshold
++ * @fifo_empty_thresh: FIFO occupancy below which the FIFO-empty IRQ fires
++ * @fifo_init_fill:    samples written before a FIFO play is triggered
++ * @fifo_4byte_writes: every FIFO write must be a 4-byte FIFO_DIN burst: a
++ *                     1-byte write that meets the hardware reading the FIFO
++ *                     makes it drop three of every four samples (HAP520)
++ * @needs_hbst:        the module is powered by the HBST boost, whose
++ *                     registers are the third "reg" entry
++ * @tlra_scale:        scale TLRA_OL for the auto-calibrated RC clock
++ * @init:              one-time module configuration at probe
++ * @fifo_reset:        empty the FIFO before a FIFO play
++ */
++struct qcom_haptics_variant {
++	u32 fault_clr;
++	u32 fifo_thresh_lsb;
++	u32 fifo_empty_thresh;
++	u32 fifo_init_fill;
++	bool fifo_4byte_writes;
++	bool needs_hbst;
++	bool tlra_scale;
++	int (*init)(struct qcom_haptics *h);
++	int (*fifo_reset)(struct qcom_haptics *h);
++};
++
+ /**
+  * struct qcom_haptics
+  * @dev:          underlying SPMI device
++ * @variant:      description of the haptics module
+  * @regmap:       regmap for SPMI register access
+  * @input:        input device exposing the FF interface
+  * @cfg_base:     base address of the CFG peripheral
+  * @ptn_base:     base address of the PTN peripheral
++ * @hbst_base:    base address of the HBST (boost) peripheral, 0 if none
++ * @hbst_clamp_5v: the boost output is clamped to 5 V, so is Vmax
+  * @t_lra_us:     LRA resonance period in microseconds
+  * @vmax_mv:      maximum actuator drive voltage in millivolts
+  * @fifo_len:     programmed HW FIFO depth in bytes
+@@ -189,11 +265,14 @@ struct haptics_play_req {
+  */
+ struct qcom_haptics {
+ 	struct device *dev;
++	const struct qcom_haptics_variant *variant;
+ 	struct regmap *regmap;
+ 	struct input_dev *input;
+ 
+ 	u32 cfg_base;
+ 	u32 ptn_base;
++	u32 hbst_base;
++	bool hbst_clamp_5v;
+ 	u32 t_lra_us;
+ 	u32 vmax_mv;
+ 	u32 fifo_len;
+@@ -251,19 +330,29 @@ static int ptn_bulk_write(struct qcom_haptics *h, u32 off,
+ 
+ static int haptics_clear_faults(struct qcom_haptics *h)
+ {
+-	return cfg_write(h, HAP_CFG_FAULT_CLR_REG, FAULT_CLR_ALL);
++	return cfg_write(h, HAP_CFG_FAULT_CLR_REG, h->variant->fault_clr);
+ }
+ 
+ static int haptics_set_vmax(struct qcom_haptics *h, u32 vmax_mv)
+ {
++	if (h->hbst_clamp_5v)
++		vmax_mv = min_t(u32, vmax_mv, HBST_CLAMPED_VMAX_MV);
++
+ 	return cfg_write(h, HAP_CFG_VMAX_REG, vmax_mv / VMAX_STEP_MV);
+ }
+ 
+ static int haptics_config_lra_period(struct qcom_haptics *h)
+ {
+-	u32 tmp = h->t_lra_us / TLRA_STEP_US;
++	u32 t_lra_us = h->t_lra_us;
++	u32 tmp;
+ 	int err;
+ 
++	if (h->variant->tlra_scale)
++		t_lra_us = mult_frac(t_lra_us, HAP520_TLRA_SCALE_NUM,
++				     HAP520_TLRA_SCALE_DEN);
++
++	tmp = min_t(u32, t_lra_us, TLRA_US_MAX) / TLRA_STEP_US;
++
+ 	err = cfg_write(h, HAP_CFG_TLRA_OL_HIGH_REG, (tmp >> 8) & TLRA_OL_MSB_MASK);
+ 	if (err)
+ 		return err;
+@@ -335,6 +424,17 @@ static int haptics_write_fifo_chunk(struct qcom_haptics *h,
+ 			return err;
+ 	}
+ 
++	/*
++	 * Where 1-byte writes are unsafe, pad the remainder (only ever the end
++	 * of an effect) with silent samples into one more 4-byte write.
++	 */
++	if (h->variant->fifo_4byte_writes && i < len) {
++		s8 tail[4] = { };
++
++		memcpy(tail, &data[i], len - i);
++		return ptn_bulk_write(h, HAP_PTN_FIFO_DIN_0_REG, tail, 4);
++	}
++
+ 	for (; i < len; i++) {
+ 		err = ptn_write(h, HAP_PTN_FIFO_DIN_1B_REG, (u8)data[i]);
+ 		if (err)
+@@ -359,6 +459,126 @@ static int haptics_configure_fifo_mmap(struct qcom_haptics *h)
+ 			 FIELD_PREP(MMAP_FIFO_LEN_MASK, fifo_units - 1));
+ }
+ 
++static int hap530_init(struct qcom_haptics *h)
++{
++	int err;
++
++	err = haptics_configure_autores(h);
++	if (err)
++		return err;
++
++	return haptics_configure_fifo_mmap(h);
++}
++
++static int hap530_fifo_reset(struct qcom_haptics *h)
++{
++	int err;
++
++	err = ptn_write(h, HAP_PTN_MEM_OP_ACCESS_REG, MEM_FLUSH_RELOAD_BIT);
++	if (err)
++		return err;
++
++	return ptn_write(h, HAP_PTN_MEM_OP_ACCESS_REG, 0);
++}
++
++static int hap520_init(struct qcom_haptics *h)
++{
++	u8 rev[2];
++	u32 val;
++	int err;
++
++	h->fifo_len = HAP520_FIFO_BYTES;
++
++	/*
++	 * Whatever ran before (the boot firmware, another OS) may have left
++	 * the SoundWire pattern input on: the haptics would then also follow
++	 * PCM from the LPASS RX macro. Only SPMI-triggered plays are used here.
++	 */
++	err = cfg_write(h, HAP_CFG_SWR_ACCESS_REG, 0);
++	if (err)
++		return err;
++
++	/* Sine drive waveform, FIFO samples in two's complement */
++	err = cfg_update_bits(h, HAP_CFG_DRV_WF_SEL_REG,
++			      DRV_WF_FMT_BIT | DRV_WF_SEL_MASK,
++			      FIELD_PREP(DRV_WF_SEL_MASK, DRV_WF_SINE));
++	if (err)
++		return err;
++
++	/* Drive only once the boost reports ready (no open-loop forcing) */
++	err = cfg_update_bits(h, HAP_CFG_VSET_CFG_REG, FORCE_VREG_RDY_BIT, 0);
++	if (err)
++		return err;
++
++	/* RC clock auto-calibration: what the TLRA_OL scaling assumes */
++	err = cfg_update_bits(h, HAP_CFG_CAL_EN_REG, CAL_RC_CLK_MASK,
++			      FIELD_PREP(CAL_RC_CLK_MASK, CAL_RC_CLK_AUTO));
++	if (err)
++		return err;
++
++	err = regmap_bulk_read(h->regmap, h->hbst_base + HAP_HBST_REVISION1_REG,
++			       rev, 2);
++	if (err)
++		return err;
++
++	err = regmap_read(h->regmap, h->hbst_base +
++			  ((rev[1] << 8 | rev[0]) == HBST_REV_V0P0 ?
++			   HAP_HBST_V0P0_CLAMP_REG : HAP_HBST_V0P1_CLAMP_REG),
++			  &val);
++	if (err)
++		return err;
++
++	h->hbst_clamp_5v = val & CLAMP_5V_BIT;
++
++	/* Left enabled by the boot firmware: off until the first play */
++	return haptics_enable_module(h, false);
++}
++
++static int hap520_fifo_reset(struct qcom_haptics *h)
++{
++	int err;
++
++	/*
++	 * HAP520 has no FIFO flush: toggling HAPTICS_EN gives a FIFO play a
++	 * clean start. HAPTICS_EN votes for the boost, which needs ~100 us
++	 * around each change to follow.
++	 */
++	usleep_range(100, 200);
++	err = haptics_enable_module(h, false);
++	if (err)
++		return err;
++
++	usleep_range(100, 200);
++	return haptics_enable_module(h, true);
++}
++
++/*
++ * The boost follows the haptics module in hardware. A play triggered while
++ * it is still ramping down after the previous one may find it not ready:
++ * wait until it is idle (as the downstream driver does).
++ */
++static void haptics_wait_hbst_idle(struct qcom_haptics *h)
++{
++	u32 en, sts;
++	int i;
++
++	if (!h->hbst_base)
++		return;
++
++	for (i = 0; i < HBST_IDLE_TIMEOUT_US / HBST_IDLE_POLL_US; i++) {
++		if (regmap_read(h->regmap, h->hbst_base + HAP_HBST_VREG_EN_REG, &en) ||
++		    regmap_read(h->regmap, h->hbst_base + HAP_HBST_STATUS4_REG, &sts))
++			return;
++
++		if (!(en & VREG_EN_BIT) && !(sts & BOOST_DTEST1_STATUS_BIT))
++			return;
++
++		usleep_range(HBST_IDLE_POLL_US, HBST_IDLE_POLL_US + 50);
++	}
++
++	dev_warn_ratelimited(h->dev, "boost still busy, playing anyway\n");
++}
++
+ static u32 haptics_gain_scaled_vmax(struct qcom_haptics *h, u32 vmax_mv)
+ {
+ 	u16 gain = atomic_read(&h->gain);
+@@ -490,6 +710,11 @@ static int haptics_start_fifo(struct qcom_haptics *h, int effect_id)
+ 	if (!eff->fifo_data || !eff->data_len)
+ 		return -EINVAL;
+ 
++	/* Empty the FIFO before loading new data */
++	err = h->variant->fifo_reset(h);
++	if (err)
++		return err;
++
+ 	err = haptics_clear_faults(h);
+ 	if (err)
+ 		return err;
+@@ -509,18 +734,10 @@ static int haptics_start_fifo(struct qcom_haptics *h, int effect_id)
+ 	if (err)
+ 		return err;
+ 
+-	/* Flush FIFO before loading new data */
+-	err = ptn_write(h, HAP_PTN_MEM_OP_ACCESS_REG, MEM_FLUSH_RELOAD_BIT);
+-	if (err)
+-		return err;
+-	err = ptn_write(h, HAP_PTN_MEM_OP_ACCESS_REG, 0);
+-	if (err)
+-		return err;
+-
+ 	guard(mutex)(&h->fifo_lock);
+ 
+ 	/* Write the initial chunk and initialise streaming state */
+-	init_len = min_t(u32, eff->data_len, FIFO_INIT_FILL);
++	init_len = min_t(u32, eff->data_len, h->variant->fifo_init_fill);
+ 	err = haptics_write_fifo_chunk(h, eff->fifo_data, init_len);
+ 	if (err)
+ 		return err;
+@@ -537,7 +754,8 @@ static int haptics_start_fifo(struct qcom_haptics *h, int effect_id)
+ 	data_done = (h->data_written >= h->data_len);
+ 	if (!data_done) {
+ 		err = ptn_write(h, HAP_PTN_FIFO_EMPTY_CFG_REG,
+-				FIFO_EMPTY_THRESH / FIFO_THRESH_LSB);
++				h->variant->fifo_empty_thresh /
++				h->variant->fifo_thresh_lsb);
+ 		if (err) {
+ 			dev_err(h->dev, "set FIFO empty threshold failed, err=%d\n", err);
+ 			h->fifo_data = NULL;
+@@ -588,7 +806,7 @@ static irqreturn_t haptics_fifo_empty_irq(int irq, void *dev_id)
+ 
+ 	/* Refill: write the next chunk */
+ 	to_write = min_t(u32, h->data_len - h->data_written,
+-			 h->fifo_len - FIFO_EMPTY_THRESH);
++			 h->fifo_len - h->variant->fifo_empty_thresh);
+ 	err = haptics_write_fifo_chunk(h, &h->fifo_data[h->data_written], to_write);
+ 	if (err) {
+ 		dev_err(h->dev, "refill FIFO samples failed, err=%d\n", err);
+@@ -693,6 +911,8 @@ static int haptics_start(struct qcom_haptics *h, int effect_id)
+ 		h->pm_ref_held = true;
+ 	}
+ 
++	haptics_wait_hbst_idle(h);
++
+ 	switch (h->effects[effect_id].mode) {
+ 	case HAPTICS_DIRECT_PLAY:
+ 		ret = haptics_start_direct_play(h, effect_id);
+@@ -1059,7 +1279,7 @@ static int qcom_haptics_probe(struct platform_device *pdev)
+ 	struct qcom_haptics *h;
+ 	struct input_dev *input;
+ 	struct ff_device *ff;
+-	u32 regs[2], vmax_uv;
++	u32 regs[3], vmax_uv;
+ 	int ret, irq;
+ 
+ 	h = devm_kzalloc(&pdev->dev, sizeof(*h), GFP_KERNEL);
+@@ -1067,17 +1287,23 @@ static int qcom_haptics_probe(struct platform_device *pdev)
+ 		return -ENOMEM;
+ 
+ 	h->dev = &pdev->dev;
++	h->variant = device_get_match_data(&pdev->dev);
++	if (!h->variant)
++		return -ENODEV;
+ 
+ 	h->regmap = dev_get_regmap(pdev->dev.parent, NULL);
+ 	if (!h->regmap)
+ 		return dev_err_probe(h->dev, -ENODEV, "no regmap from parent\n");
+ 
+-	ret = device_property_read_u32_array(h->dev, "reg", regs, ARRAY_SIZE(regs));
++	ret = device_property_read_u32_array(h->dev, "reg", regs,
++					     h->variant->needs_hbst ? 3 : 2);
+ 	if (ret)
+ 		return dev_err_probe(h->dev, ret, "failed to read 'reg' property\n");
+ 
+ 	h->cfg_base = regs[0];
+ 	h->ptn_base = regs[1];
++	if (h->variant->needs_hbst)
++		h->hbst_base = regs[2];
+ 
+ 	ret = device_property_read_u32(h->dev, "qcom,lra-period-us", &h->t_lra_us);
+ 	if (ret)
+@@ -1091,11 +1317,11 @@ static int qcom_haptics_probe(struct platform_device *pdev)
+ 
+ 	h->vmax_mv = clamp(vmax_uv / 1000, (u32)VMAX_STEP_MV, (u32)VMAX_MV_MAX);
+ 
+-	ret = haptics_config_lra_period(h);
++	ret = h->variant->init(h);
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = haptics_configure_autores(h);
++	ret = haptics_config_lra_period(h);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -1103,10 +1329,6 @@ static int qcom_haptics_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = haptics_configure_fifo_mmap(h);
+-	if (ret)
+-		return ret;
+-
+ 	ret = devm_mutex_init(h->dev, &h->play_lock);
+ 	if (ret)
+ 		return ret;
+@@ -1232,8 +1454,30 @@ static const struct dev_pm_ops qcom_haptics_pm_ops = {
+ 		       NULL)
+ };
+ 
++static const struct qcom_haptics_variant hap520_variant = {
++	.fault_clr = HAP520_FAULT_CLR_ALL,
++	.fifo_thresh_lsb = HAP520_FIFO_THRESH_LSB,
++	.fifo_empty_thresh = HAP520_FIFO_EMPTY_THRESH,
++	.fifo_init_fill = HAP520_FIFO_BYTES,
++	.fifo_4byte_writes = true,
++	.needs_hbst = true,
++	.tlra_scale = true,
++	.init = hap520_init,
++	.fifo_reset = hap520_fifo_reset,
++};
++
++static const struct qcom_haptics_variant hap530_variant = {
++	.fault_clr = FAULT_CLR_ALL,
++	.fifo_thresh_lsb = HAP530_FIFO_THRESH_LSB,
++	.fifo_empty_thresh = HAP530_FIFO_EMPTY_THRESH,
++	.fifo_init_fill = HAP530_FIFO_INIT_FILL,
++	.init = hap530_init,
++	.fifo_reset = hap530_fifo_reset,
++};
++
+ static const struct of_device_id qcom_haptics_of_match[] = {
+-	{ .compatible = "qcom,spmi-haptics" },
++	{ .compatible = "qcom,pm8350b-haptics", .data = &hap520_variant },
++	{ .compatible = "qcom,spmi-haptics", .data = &hap530_variant },
+ 	{ }
+ };
+ MODULE_DEVICE_TABLE(of, qcom_haptics_of_match);

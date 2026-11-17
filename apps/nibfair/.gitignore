@@ -1,0 +1,4 @@
+# The repository root ignores every src/ (kernel trees); this one is ours.
+!/src/
+/target/
+/out/

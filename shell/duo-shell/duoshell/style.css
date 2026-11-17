@@ -1,0 +1,1188 @@
+/* duo-shell's look: one dark theme with one accent colour (Adwaita's blue,
+   the apps' accent too), rounded cards, one type scale (Cantarell, as the
+   GNOME apps), the same spacing everywhere (4 / 8 / 12 / 16 / 24 px).
+   The panels are AMOLED: black is unlit, so the bars and backgrounds stay
+   black and the cards are the only lit surfaces.
+
+   Motion: surfaces come in on a spring-like curve (a little overshoot) and
+   leave on a quick ease-in; nothing animates forever. */
+
+@define-color sd_accent #3584e4;
+@define-color sd_accent_bright #62a0ea;
+@define-color sd_danger #e01b24;
+@define-color sd_bg #000000;
+@define-color sd_sheet #0b0d11;
+@define-color sd_card #17191f;
+@define-color sd_card_raised #21242c;
+@define-color sd_card_pressed #2c3039;
+@define-color sd_text #f2f3f5;
+@define-color sd_text_dim rgba(242, 243, 245, 0.62);
+@define-color sd_text_faint rgba(242, 243, 245, 0.42);
+@define-color sd_outline rgba(255, 255, 255, 0.07);
+
+window.duo-bar, window.duo-quick, window.duo-launcher, window.duo-dock, window.duo-banner,
+window.duo-taskbar, window.duo-deskmenu, window.duo-volume, window.duo-home, window.duo-confirm, window.duo-overview-labels, window.duo-sim-pin,
+window.duo-ambient, popover.duo-menu {
+  font-family: "Cantarell", "Noto Sans", sans-serif;
+  color: @sd_text;
+}
+
+button {
+  outline: none;
+}
+
+/* -- motion ------------------------------------------------------------------- */
+
+@keyframes sd-sheet-in {
+  from { opacity: 0; transform: translateY(-48px); }
+  70% { opacity: 1; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes sd-sheet-out {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(-56px); }
+}
+
+@keyframes sd-rise-in {
+  from { opacity: 0; transform: translateY(36px) scale(0.96); }
+  70% { opacity: 1; transform: translateY(-3px) scale(1.005); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes sd-drop-in {
+  from { opacity: 0; transform: translateY(-24px) scale(0.97); }
+  70% { opacity: 1; transform: translateY(2px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes sd-sink-out {
+  from { opacity: 1; transform: none; }
+  to { opacity: 0; transform: translateY(28px) scale(0.97); }
+}
+
+@keyframes sd-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* -- status bar --------------------------------------------------------------- */
+
+window.duo-bar {
+  background-color: @sd_bg;
+}
+
+.duo-bar .clock {
+  font-size: 16px;
+  font-weight: 700;
+  font-feature-settings: "tnum";
+  padding: 0 8px 0 16px;
+}
+
+.duo-bar .operator {
+  font-size: 13px;
+  font-weight: 600;
+  color: @sd_text_dim;
+  padding: 0 6px 0 0;
+}
+
+.duo-bar .percent {
+  font-size: 13px;
+  font-weight: 600;
+  font-feature-settings: "tnum";
+  margin-left: 2px;
+  margin-right: 8px;
+}
+
+.duo-bar image.status {
+  -gtk-icon-size: 16px;
+  margin: 0 4px;
+}
+
+.duo-bar .status-icons {
+  padding: 0 4px;
+  border-radius: 16px;
+}
+
+.duo-bar button {
+  min-width: 44px;
+  min-height: 44px;
+  margin: 2px 0;
+  padding: 0;
+  border-radius: 22px;
+  background: none;
+  box-shadow: none;
+  border: none;
+  color: @sd_text;
+  transition: background-color 150ms ease-out;
+}
+
+.duo-bar button image {
+  -gtk-icon-size: 20px;
+}
+
+.duo-bar button:active {
+  background-color: rgba(255, 255, 255, 0.16);
+}
+
+.duo-bar button.on {
+  background-color: alpha(@sd_accent, 0.30);
+  color: @sd_accent_bright;
+}
+
+.duo-bar .notes {
+  margin-left: 2px;
+}
+
+.duo-bar image.note {
+  -gtk-icon-size: 16px;
+  margin: 0 3px;
+  opacity: 0.85;
+}
+
+/* -- quick menu ------------------------------------------------------------------ */
+
+window.duo-quick {
+  background-color: rgba(0, 0, 0, 0.55);
+}
+
+.duo-quick .sheet {
+  background-color: @sd_sheet;
+  border-radius: 0 0 28px 28px;
+  animation: sd-sheet-in 300ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.duo-quick .sheet.closing {
+  animation: sd-sheet-out 170ms cubic-bezier(0.55, 0, 1, 0.45) forwards;
+}
+
+.duo-quick .header {
+  padding: 12px 8px 4px 20px;
+  min-height: 56px;
+}
+
+.duo-quick .time {
+  font-size: 30px;
+  font-weight: 300;
+  font-feature-settings: "tnum";
+}
+
+.duo-quick .date {
+  font-size: 14px;
+  font-weight: 600;
+  color: @sd_text_dim;
+  margin-left: 8px;
+}
+
+.duo-quick button.round {
+  min-width: 44px;
+  min-height: 44px;
+  border-radius: 22px;
+  background-color: @sd_card;
+  border: none;
+  box-shadow: none;
+  color: @sd_text;
+}
+
+.duo-quick button.handle {
+  min-height: 32px;
+  margin: 0 0 6px 0;
+  border-radius: 0 0 28px 28px;
+  background: none;
+  border: none;
+  box-shadow: none;
+  color: @sd_text_faint;
+}
+
+.duo-quick .content {
+  padding: 8px 16px 16px 16px;
+}
+
+.duo-quick button {
+  background-image: none;
+}
+
+.duo-quick button.tile {
+  min-height: 60px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  background-color: @sd_card_raised;
+  border: none;
+  box-shadow: none;
+  color: @sd_text;
+  transition: background-color 180ms ease-out;
+}
+
+.duo-quick button.tile:active {
+  background-color: @sd_card_pressed;
+}
+
+.duo-quick button.tile.on,
+.duo-quick button.tile.on:hover,
+.duo-quick button.tile.on:active {
+  background-color: @sd_accent;
+}
+
+.duo-quick .tile .title {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.duo-quick .tile .sub {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.duo-quick .slider-row {
+  padding: 8px 14px;
+  min-height: 52px;
+  border-radius: 26px;
+  background-color: @sd_card_raised;
+}
+
+.duo-quick scale trough {
+  min-height: 8px;
+  border-radius: 4px;
+  background-color: rgba(255, 255, 255, 0.12);
+}
+
+.duo-quick scale highlight {
+  border-radius: 4px;
+  background-color: @sd_accent;
+}
+
+.duo-quick scale slider {
+  min-width: 24px;
+  min-height: 24px;
+  background-color: #ffffff;
+  border: none;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+
+.duo-quick .power button {
+  min-height: 64px;
+  border-radius: 20px;
+  background-color: @sd_card;
+  border: none;
+  box-shadow: none;
+  color: @sd_text;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.duo-quick .power button:active {
+  background-color: @sd_card_pressed;
+}
+
+.duo-quick .confirm {
+  padding: 10px 10px 10px 16px;
+  border-radius: 20px;
+  background-color: alpha(@sd_danger, 0.18);
+}
+
+.duo-quick .confirm button {
+  min-height: 40px;
+  border-radius: 20px;
+  padding: 0 16px;
+  background-color: @sd_card_raised;
+  border: none;
+  color: @sd_text;
+}
+
+button.destructive,
+.duo-quick button.destructive,
+.duo-confirm button.destructive {
+  background-color: @sd_danger;
+  color: #ffffff;
+}
+
+.duo-quick .list-head {
+  margin-top: 12px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.duo-quick .list-head button {
+  min-height: 34px;
+  border-radius: 17px;
+  padding: 0 14px;
+  background-color: @sd_card_raised;
+  border: none;
+  color: @sd_text;
+  font-size: 13px;
+}
+
+.duo-quick .empty {
+  color: @sd_text_faint;
+  margin: 20px 0;
+}
+
+/* -- notifications (list and banner alike) ------------------------------------------- */
+
+.notification,
+.banner-card {
+  padding: 12px 14px;
+  border-radius: 20px;
+  background-color: @sd_card;
+  color: @sd_text;
+}
+
+.banner-card {
+  background-color: @sd_card_raised;
+  border: 1px solid @sd_outline;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.55);
+  margin: 2px 2px 14px 2px;
+  animation: sd-drop-in 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.notification.critical,
+.banner-card.critical {
+  border: 1px solid @sd_danger;
+}
+
+.notification .app,
+.banner-card .app {
+  font-size: 12px;
+  font-weight: 600;
+  color: @sd_text_dim;
+}
+
+.notification .when,
+.banner-card .when {
+  font-size: 12px;
+  color: @sd_text_faint;
+}
+
+.notification .summary,
+.banner-card .summary {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.notification .body,
+.banner-card .body {
+  font-size: 14px;
+  color: rgba(242, 243, 245, 0.85);
+}
+
+.notification .actions button,
+.banner-card .actions button {
+  min-height: 36px;
+  border-radius: 18px;
+  background-color: rgba(255, 255, 255, 0.10);
+  border: none;
+  color: @sd_text;
+  font-weight: 600;
+}
+
+window.duo-banner {
+  background: none;
+}
+
+/* -- the app grid ------------------------------------------------------------------------- */
+
+window.duo-launcher {
+  background-color: @sd_sheet;
+}
+
+.duo-launcher > box {
+  animation: sd-rise-in 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+window.duo-launcher.closing > box {
+  animation: sd-sink-out 160ms cubic-bezier(0.55, 0, 1, 0.45) forwards;
+}
+
+.duo-launcher .search-row {
+  padding: 12px 10px 8px 16px;
+}
+
+.duo-launcher entry {
+  min-height: 46px;
+  border-radius: 23px;
+  font-size: 16px;
+  background-color: @sd_card_raised;
+  color: @sd_text;
+  border: none;
+  box-shadow: none;
+  padding: 0 14px;
+}
+
+.duo-launcher .close {
+  min-width: 46px;
+  min-height: 46px;
+  border-radius: 23px;
+  background-color: @sd_card;
+  border: none;
+  box-shadow: none;
+  color: @sd_text;
+}
+
+.duo-launcher flowbox {
+  padding: 4px 8px 24px 8px;
+}
+
+.duo-launcher flowboxchild {
+  padding: 0;
+  border-radius: 18px;
+}
+
+.duo-launcher .tile {
+  min-width: 112px;
+  min-height: 104px;
+  padding: 10px 4px 8px 4px;
+  border-radius: 18px;
+  background: none;
+  border: none;
+  box-shadow: none;
+  color: @sd_text;
+  transition: background-color 150ms ease-out;
+}
+
+.duo-launcher .tile:active {
+  background-color: rgba(255, 255, 255, 0.10);
+}
+
+/* The list view: letters over the sections, the A-Z index, the bubble. */
+.duo-launcher list.app-list {
+  background: none;
+  padding: 0 4px 24px 8px;
+}
+
+.duo-launcher list.app-list > row {
+  padding: 0;
+  background: none;
+}
+
+.duo-launcher .list-letter {
+  font-size: 15px;
+  font-weight: 800;
+  color: @sd_accent_bright;
+  padding: 14px 0 4px 14px;
+}
+
+.duo-launcher button.list-app {
+  min-height: 52px;
+  padding: 4px 10px;
+  border-radius: 14px;
+  background: none;
+  border: none;
+  box-shadow: none;
+  font-size: 16px;
+}
+
+.duo-launcher button.list-app:active {
+  background-color: rgba(255, 255, 255, 0.10);
+}
+
+.duo-launcher .az-index {
+  min-width: 28px;
+  padding: 6px 0 24px 0;
+}
+
+.duo-launcher .az-letter {
+  font-size: 11px;
+  font-weight: 700;
+  color: @sd_text_dim;
+}
+
+.duo-launcher .az-letter.dim {
+  color: @sd_text_faint;
+  opacity: 0.45;
+}
+
+.duo-launcher .az-letter.active {
+  color: @sd_accent_bright;
+}
+
+.duo-launcher .az-bubble {
+  min-width: 64px;
+  min-height: 64px;
+  border-radius: 32px;
+  background-color: @sd_accent;
+  color: #ffffff;
+  font-size: 34px;
+  font-weight: 800;
+}
+
+.duo-launcher .tile image {
+  -gtk-icon-size: 56px;
+}
+
+.duo-launcher .tile label {
+  font-size: 13px;
+  margin-top: 8px;
+}
+
+.duo-launcher .empty {
+  font-size: 15px;
+  color: @sd_text_faint;
+  margin-top: 48px;
+}
+
+popover.duo-menu > contents {
+  padding: 6px;
+  border-radius: 20px;
+  background-color: @sd_card_raised;
+  border: 1px solid @sd_outline;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+}
+
+popover.duo-menu button.menu-item {
+  min-height: 48px;
+  padding: 0 16px;
+  border-radius: 14px;
+  background: none;
+  border: none;
+  box-shadow: none;
+  color: @sd_text;
+  font-size: 15px;
+}
+
+popover.duo-menu button.menu-item:active {
+  background-color: rgba(255, 255, 255, 0.10);
+}
+
+/* -- dock ------------------------------------------------------------------------------------- */
+
+window.duo-dock {
+  background-color: rgba(28, 30, 37, 0.94);
+  border-radius: 28px;
+  border: 1px solid @sd_outline;
+  animation: sd-rise-in 300ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+window.duo-dock.closing {
+  animation: sd-sink-out 160ms cubic-bezier(0.55, 0, 1, 0.45) forwards;
+}
+
+window.duo-dock.home {
+  background-color: rgba(28, 30, 37, 0.80);
+  animation: none;
+}
+
+.duo-dock button.dock-app,
+.duo-dock button.dock-tool {
+  background-image: none;
+  min-width: 52px;
+  min-height: 58px;
+  padding: 2px;
+  border-radius: 18px;
+  background: none;
+  border: none;
+  box-shadow: none;
+  color: @sd_text;
+  transition: background-color 150ms ease-out;
+}
+
+.duo-dock button.dock-tool image {
+  -gtk-icon-size: 22px;
+}
+
+.duo-dock button.dock-app:active,
+.duo-dock button.dock-tool:active {
+  background-color: rgba(255, 255, 255, 0.12);
+}
+
+.duo-dock .dot {
+  min-width: 5px;
+  min-height: 5px;
+  border-radius: 3px;
+  background-color: @sd_accent_bright;
+}
+
+.duo-dock .dock-sep {
+  margin: 14px 4px;
+  background-color: rgba(255, 255, 255, 0.18);
+  min-width: 1px;
+}
+
+.duo-dock .toast {
+  margin-top: -2px;
+  padding: 2px 12px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  background-color: @sd_accent;
+  color: #ffffff;
+}
+
+/* -- the overview's card labels (see-through over duo-wc's overview) ---------------------------- */
+
+window.duo-overview-labels, window.duo-laptop-keys {
+  background: none;
+  background-color: transparent;
+}
+
+.duo-overview-labels .card-label {
+  color: @sd_text;
+  font-size: 13px;
+  font-weight: 700;
+  padding: 0 4px;
+  animation: sd-fade-in 220ms ease-out;
+}
+
+.duo-overview-labels .card-label.stuck {
+  color: #ff7b7f;
+}
+
+/* -- volume keys --------------------------------------------------------------------------------- */
+
+window.duo-volume {
+  background: none;
+}
+
+.volume-pill {
+  min-width: 236px;
+  padding: 12px 18px;
+  border-radius: 26px;
+  background-color: @sd_card_raised;
+  border: 1px solid @sd_outline;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.55);
+  color: @sd_text;
+  margin: 4px 4px 16px 4px;
+  animation: sd-drop-in 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.volume-pill image {
+  -gtk-icon-size: 20px;
+}
+
+.volume-pill .percent {
+  font-size: 14px;
+  font-weight: 700;
+  font-feature-settings: "tnum";
+}
+
+.volume-pill levelbar trough {
+  min-height: 6px;
+  border-radius: 3px;
+  background-color: rgba(255, 255, 255, 0.14);
+  border: none;
+  padding: 0;
+}
+
+.volume-pill levelbar block.filled {
+  min-height: 6px;
+  border-radius: 3px;
+  background-color: @sd_accent;
+  border: none;
+}
+
+.volume-pill levelbar block.empty {
+  background: none;
+  border: none;
+}
+
+window.duo-volume.muted .volume-pill .percent {
+  color: @sd_text_faint;
+}
+
+/* -- the home screen ------------------------------------------------------------------------------ */
+
+window.duo-home {
+  background-color: @sd_bg;
+  background-image: radial-gradient(ellipse at 50% -10%, rgba(53, 132, 228, 0.30) 0%,
+                                    rgba(53, 132, 228, 0.07) 42%, transparent 72%);
+}
+
+/* The minimum heights add up to under 686 px (a portrait panel's home is
+   measured for that much: GTK warned "needs at least 707"): the cells'
+   padding, the header's top and the cards are a little tighter; the grid
+   still fills the page. */
+.duo-home .home-header {
+  padding: 12px 20px 6px 20px;
+  animation: sd-fade-in 400ms ease-out;
+}
+
+.duo-home .home-time {
+  font-size: 66px;
+  font-weight: 300;
+  font-feature-settings: "tnum";
+}
+
+.duo-home .home-date {
+  font-size: 16px;
+  font-weight: 600;
+  color: @sd_text_dim;
+  margin-top: -4px;
+}
+
+.duo-home .home-cards {
+  margin-top: 14px;
+}
+
+.duo-home button.home-card {
+  min-height: 58px;
+  padding: 8px 14px;
+  border-radius: 22px;
+  background-color: rgba(23, 25, 31, 0.86);
+  border: 1px solid @sd_outline;
+  box-shadow: none;
+  color: @sd_text;
+}
+
+.duo-home button.home-card:active {
+  background-color: @sd_card_pressed;
+}
+
+.duo-home .card-main {
+  font-size: 18px;
+  font-weight: 700;
+  font-feature-settings: "tnum";
+}
+
+.duo-home .card-sub {
+  font-size: 12px;
+  color: @sd_text_dim;
+}
+
+.duo-home .home-grid {
+  padding: 8px 8px 0 8px;
+}
+
+/* A panel on its side (757 x 538 logical): the clock and the cards in a
+   column beside the first page's icons (home.py, homemodel.grid_shape). */
+.duo-home.landscape .home-header {
+  padding: 8px 4px 0 20px;
+}
+
+.duo-home.landscape .home-time {
+  font-size: 56px;
+}
+
+.duo-home.landscape .home-cards {
+  margin-top: 12px;
+}
+
+.duo-home.landscape button.home-card {
+  min-height: 48px;
+  min-width: 150px;
+}
+
+.duo-home .home-cell {
+  padding: 4px 2px;
+  border-radius: 18px;
+}
+
+.duo-home .home-cell:active {
+  background-color: rgba(255, 255, 255, 0.08);
+}
+
+.duo-home .home-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: @sd_text;
+}
+
+.duo-home.editing .home-cell {
+  background-color: rgba(255, 255, 255, 0.04);
+}
+
+.duo-home button.home-badge {
+  min-width: 22px;
+  min-height: 22px;
+  padding: 0;
+  margin: -6px -6px 0 0;
+  border-radius: 11px;
+  background-color: #2c3039;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  color: @sd_text;
+}
+
+.duo-home button.home-badge image {
+  -gtk-icon-size: 12px;
+}
+
+.duo-home button.home-done {
+  min-height: 36px;
+  padding: 0 18px;
+  border-radius: 18px;
+  background-color: @sd_accent;
+  color: #ffffff;
+  border: none;
+  font-weight: 700;
+}
+
+.duo-home .home-hint {
+  font-size: 15px;
+  color: @sd_text_faint;
+}
+
+.duo-home .home-dots {
+  margin: 4px 0 6px 0;
+}
+
+.duo-home image.home-floating {
+  opacity: 0.92;
+}
+
+/* The Bing picture's "i" and its card. */
+.duo-home button.home-info {
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0;
+  border-radius: 16px;
+  background-color: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  color: @sd_text;
+}
+
+.duo-home button.home-info .home-info-i {
+  font-family: "DejaVu Serif", serif;
+  font-size: 17px;
+  font-weight: 700;
+  font-style: italic;
+}
+
+popover.home-caption .caption-box {
+  padding: 6px 6px 4px 6px;
+}
+
+popover.home-caption .caption-title {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+popover.home-caption .caption-text {
+  font-size: 13px;
+  color: @sd_text_dim;
+}
+
+popover.home-caption button.caption-more {
+  min-height: 34px;
+  padding: 0 16px;
+  border-radius: 17px;
+  background-color: @sd_accent;
+  color: #ffffff;
+  border: none;
+  font-weight: 700;
+}
+
+/* -- questions (force close) ------------------------------------------------------------------------ */
+
+window.duo-confirm {
+  background: none;
+}
+
+.duo-confirm .confirm-card {
+  padding: 18px 18px 14px 18px;
+  border-radius: 26px;
+  background-color: @sd_card_raised;
+  border: 1px solid @sd_outline;
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.6);
+  margin: 8px;
+  animation: sd-rise-in 300ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.duo-confirm .confirm-title {
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.duo-confirm .confirm-body {
+  font-size: 14px;
+  color: @sd_text_dim;
+}
+
+.duo-confirm .confirm-buttons {
+  margin-top: 10px;
+}
+
+.duo-confirm button {
+  min-height: 44px;
+  border-radius: 22px;
+  border: none;
+  box-shadow: none;
+  background-image: none;
+  background-color: rgba(255, 255, 255, 0.10);
+  color: @sd_text;
+  font-weight: 700;
+}
+
+.duo-confirm button.destructive,
+.duo-confirm button.destructive-action {
+  background-color: @sd_danger;
+  color: #ffffff;
+}
+
+/* -- the closed phone's peek / glance strips (black: unlit) --------------------------------------------- */
+
+window.duo-ambient {
+  background-color: #000000;
+}
+
+.duo-ambient .strip label {
+  color: #ffffff;
+}
+
+.duo-ambient .strip .clock {
+  font-size: 15px;
+  font-weight: 700;
+  font-feature-settings: "tnum";
+}
+
+.duo-ambient .strip.big .clock {
+  font-size: 30px;
+  font-weight: 300;
+}
+
+.duo-ambient .strip .percent {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.duo-ambient .strip.big .percent {
+  font-size: 13px;
+}
+
+/* -- the SIM PIN dialog ------------------------------------------------------------ */
+
+window.duo-sim-pin {
+  background-color: rgba(0, 0, 0, 0.94);
+}
+
+.duo-sim-pin .sim-sheet {
+  padding: 24px 20px;
+}
+
+.duo-sim-pin .sim-icon {
+  color: @sd_accent_bright;
+}
+
+.duo-sim-pin .sim-title {
+  font-size: 24px;
+  font-weight: 800;
+}
+
+.duo-sim-pin .sim-body {
+  font-size: 14px;
+  color: @sd_text_dim;
+}
+
+.duo-sim-pin .sim-left {
+  font-size: 14px;
+  font-weight: 700;
+  color: @sd_text;
+}
+
+.duo-sim-pin .sim-left.warn {
+  color: #ff7b63;
+}
+
+.duo-sim-pin .sim-dots {
+  font-size: 22px;
+  letter-spacing: 6px;
+  min-height: 34px;
+}
+
+.duo-sim-pin .sim-message {
+  font-size: 14px;
+  color: #ff7b63;
+  min-height: 20px;
+}
+
+.duo-sim-pin button.key {
+  min-width: 84px;
+  min-height: 64px;
+  border-radius: 32px;
+  font-size: 26px;
+  font-weight: 600;
+  background-color: @sd_card_raised;
+  border: none;
+  box-shadow: none;
+  color: @sd_text;
+}
+
+.duo-sim-pin button.key:active {
+  background-color: @sd_card_pressed;
+}
+
+.duo-sim-pin button.key.ok {
+  background-color: @sd_accent;
+  color: #ffffff;
+}
+
+.duo-sim-pin button.key image {
+  -gtk-icon-size: 24px;
+}
+
+.duo-sim-pin button.sim-later {
+  margin-top: 6px;
+  min-height: 44px;
+  padding: 0 24px;
+  border-radius: 22px;
+  background: none;
+  border: none;
+  color: @sd_text_dim;
+  font-weight: 700;
+}
+
+/* "Emergency call", and the 112 one-tap button of the emergency dialler. */
+.duo-sim-pin button.sim-emergency {
+  background-color: #c0282b;
+  color: #ffffff;
+}
+
+
+/* -- a desk: the taskbar and the app menu (an external display, laptop mode's desk panel) ------ */
+
+window.duo-taskbar {
+  background-color: rgba(14, 16, 21, 0.94);
+  border-top: 1px solid @sd_outline;
+}
+
+.duo-taskbar button.start,
+.duo-taskbar button.task,
+.duo-taskbar button.tray {
+  background-image: none;
+  background: none;
+  border: none;
+  box-shadow: none;
+  color: @sd_text;
+  border-radius: 12px;
+  transition: background-color 150ms ease-out;
+}
+
+.duo-taskbar button.start {
+  min-width: 44px;
+  min-height: 40px;
+  margin: 4px 0 4px 6px;
+  background-color: rgba(53, 132, 228, 0.22);
+}
+
+.duo-taskbar button.start image {
+  -gtk-icon-size: 20px;
+}
+
+.duo-taskbar button.task {
+  min-width: 44px;
+  min-height: 40px;
+  padding: 2px;
+}
+
+.duo-taskbar button.task.front {
+  background-color: rgba(255, 255, 255, 0.10);
+}
+
+.duo-taskbar button.start:hover,
+.duo-taskbar button.task:hover,
+.duo-taskbar button.tray:hover {
+  background-color: rgba(255, 255, 255, 0.08);
+}
+
+.duo-taskbar button.start:active,
+.duo-taskbar button.task:active,
+.duo-taskbar button.tray:active {
+  background-color: rgba(255, 255, 255, 0.14);
+}
+
+.duo-taskbar .dot {
+  min-width: 14px;
+  min-height: 3px;
+  border-radius: 2px;
+  background-color: @sd_accent_bright;
+}
+
+.duo-taskbar .sep {
+  margin: 12px 4px;
+  background-color: rgba(255, 255, 255, 0.18);
+  min-width: 1px;
+}
+
+.duo-taskbar button.tray {
+  margin: 4px 6px 4px 0;
+  padding: 0 10px;
+}
+
+.duo-taskbar .tray image {
+  -gtk-icon-size: 16px;
+}
+
+.duo-taskbar .percent {
+  font-size: 13px;
+  color: @sd_text_dim;
+}
+
+.duo-taskbar .clock {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.duo-taskbar .date {
+  font-size: 11px;
+  color: @sd_text_dim;
+}
+
+.duo-taskbar .toast {
+  padding: 2px 12px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  background-color: @sd_accent;
+  color: #ffffff;
+}
+
+window.duo-deskmenu {
+  background: none;
+  background-color: transparent;
+}
+
+.duo-deskmenu .card {
+  padding: 12px;
+  border-radius: 20px;
+  background-color: @sd_card;
+  border: 1px solid @sd_outline;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.6);
+  animation: sd-rise-in 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.duo-deskmenu entry {
+  min-height: 40px;
+  border-radius: 20px;
+  font-size: 15px;
+  background-color: @sd_card_raised;
+  color: @sd_text;
+  border: none;
+  box-shadow: none;
+  padding: 0 12px;
+}
+
+.duo-deskmenu list {
+  background: none;
+}
+
+.duo-deskmenu list row {
+  min-height: 44px;
+  padding: 2px 10px;
+  border-radius: 12px;
+  color: @sd_text;
+}
+
+.duo-deskmenu list row:selected {
+  background-color: rgba(53, 132, 228, 0.28);
+}
+
+.duo-deskmenu list row:hover {
+  background-color: rgba(255, 255, 255, 0.07);
+}
+
+.duo-deskmenu .empty {
+  color: @sd_text_faint;
+}
+
+.duo-deskmenu .foot button {
+  min-height: 36px;
+  padding: 0 12px;
+  border-radius: 12px;
+  background: none;
+  background-color: @sd_card;
+  border: none;
+  box-shadow: none;
+  color: @sd_text;
+  font-size: 13px;
+}
+
+.duo-deskmenu .foot button:hover {
+  background-color: @sd_card_raised;
+}

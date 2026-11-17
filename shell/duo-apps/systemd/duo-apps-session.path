@@ -1,0 +1,13 @@
+# duo2-os: run duo-apps-session.service whenever duo-wc's session starts (the
+# session writes /run/duo-wc/session.env at its start, also after a restart of
+# duo-wc). A user unit of the lingering user manager; enabled globally by
+# shell/duo-apps/install.sh.
+[Unit]
+Description=duo-wc session start watch (duo-apps)
+
+[Path]
+PathChanged=/run/duo-wc/session.env
+Unit=duo-apps-session.service
+
+[Install]
+WantedBy=default.target

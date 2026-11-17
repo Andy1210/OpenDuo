@@ -1,0 +1,115 @@
+From e908d6767ca1fc948fa71acf18edba9240c78e71 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 10:20:35 +0100
+Subject: [PATCH 122/137] BRING-UP: HID: spi-hid: Keep the interrupt off in
+ system suspend
+
+The driver had no system sleep callbacks: the digitizer's interrupt
+stayed enabled while the SPI controller was suspended, a report arriving
+then failed with -ESHUTDOWN ("Failed to receive header: -108"), and the
+error handler reset the digitizer. A Surface Duo 2 digitizer comes back
+from such a reset in its single-point fallback, out of the heat mode
+user space had set up, and user space, frozen at the time, never saw
+"ready" drop: touch stayed in the fallback until the touch daemon gave
+up on it and restarted.
+
+Disable the interrupt for system suspend (a report already being read
+finishes first) and enable it again on resume; an edge that came while
+it was off is replayed by the core. The digitizer stays powered and
+keeps its mode.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/hid/spi-hid/spi-hid-core.c | 59 ++++++++++++++++++++++++++++++
+ drivers/hid/spi-hid/spi-hid-core.h |  1 +
+ 2 files changed, 60 insertions(+)
+
+diff --git a/drivers/hid/spi-hid/spi-hid-core.c b/drivers/hid/spi-hid/spi-hid-core.c
+index 4cadabb6a44f..22bbb7eeaa52 100644
+--- a/drivers/hid/spi-hid/spi-hid-core.c
++++ b/drivers/hid/spi-hid/spi-hid-core.c
+@@ -1769,6 +1769,64 @@ static void spi_hid_remove(struct spi_device *spi)
+ 	spi_hid_stop_hid(shid);
+ }
+ 
++/*
++ * System sleep. The digitizer stays powered and keeps the mode its user space
++ * set up; only its interrupt must not be served while the SPI controller is
++ * suspended: a report arriving then failed with -ESHUTDOWN ("Failed to
++ * receive header: -108"), the error handler reset the digitizer, and it came
++ * back in its single-point fallback, out of the heat mode, while user space
++ * was frozen and could not see the "ready" drop.
++ */
++static int spi_hid_suspend(struct device *dev)
++{
++	struct spi_hid *shid = dev_get_drvdata(dev);
++	unsigned long flags;
++	bool idle = false;
++	int i;
++
++	mutex_lock(&shid->power_lock);
++	if (shid->irq_enabled) {
++		disable_irq(shid->irq);
++		shid->irq_enabled = false;
++		shid->irq_off_for_sleep = true;
++	}
++	mutex_unlock(&shid->power_lock);
++
++	/* a report being read (header, then body) finishes first */
++	for (i = 0; i < 50 && !idle; i++) {
++		spin_lock_irqsave(&shid->input_lock, flags);
++		idle = !shid->input_transfer_pending;
++		spin_unlock_irqrestore(&shid->input_lock, flags);
++		if (!idle)
++			usleep_range(2000, 3000);
++	}
++	if (!idle)
++		dev_dbg(dev, "suspend: an input transfer is still pending\n");
++
++	flush_work(&shid->error_work);
++	flush_work(&shid->reset_work);
++
++	return 0;
++}
++
++static int spi_hid_resume(struct device *dev)
++{
++	struct spi_hid *shid = dev_get_drvdata(dev);
++
++	mutex_lock(&shid->power_lock);
++	if (shid->irq_off_for_sleep) {
++		shid->irq_off_for_sleep = false;
++		shid->irq_enabled = true;
++		enable_irq(shid->irq);
++	}
++	mutex_unlock(&shid->power_lock);
++
++	return 0;
++}
++
++static DEFINE_SIMPLE_DEV_PM_OPS(spi_hid_pm_ops, spi_hid_suspend,
++				spi_hid_resume);
++
+ static const struct spi_device_id spi_hid_id_table[] = {
+ 	{ "hid", 0 },
+ 	{ "hid-over-spi", 0 },
+@@ -1782,6 +1840,7 @@ static struct spi_driver spi_hid_driver = {
+ 		.owner	= THIS_MODULE,
+ 		.of_match_table = of_match_ptr(spi_hid_of_match),
+ 		.acpi_match_table = ACPI_PTR(spi_hid_acpi_match),
++		.pm	= pm_sleep_ptr(&spi_hid_pm_ops),
+ 	},
+ 	.probe		= spi_hid_probe,
+ 	.remove		= spi_hid_remove,
+diff --git a/drivers/hid/spi-hid/spi-hid-core.h b/drivers/hid/spi-hid/spi-hid-core.h
+index a6bf00a39c30..c35cee157e61 100644
+--- a/drivers/hid/spi-hid/spi-hid-core.h
++++ b/drivers/hid/spi-hid/spi-hid-core.h
+@@ -237,6 +237,7 @@ struct spi_hid {
+ 	bool refresh_in_progress;
+ 
+ 	bool irq_enabled;
++	bool irq_off_for_sleep; /* disabled by the system suspend */
+ 	int irq;
+ 
+ 	struct regulator *supply;

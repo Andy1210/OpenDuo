@@ -1,0 +1,1975 @@
+#!/usr/bin/python3 -sE
+# duo2-wwan: the modem's switch and mobile data without NetworkManager
+# (telephony/README.md). duo2-os runs systemd-networkd + wpa_supplicant for
+# WiFi; this small daemon does for the modem what NetworkManager would:
+#
+# - a modem whose SIM is ready (ModemManager: 'disabled') is enabled once when
+#   it appears: online, registered, so calls and SMS reach Calls and Chatty. A
+#   later `mmcli -m any --disable` is respected until the modem appears anew
+#   (ModemManager restart, modem restart, SIM change);
+# - no primary subscription although a card with a USIM is in a slot
+#   ('sim-missing'): `duo2-sim auto` picks one (physical slot 1 first); a card
+#   put in while running is left to the modem's own provisioning for up to
+#   30 s, then ModemManager is restarted to look again;
+# - registered (at home, or roaming when ROAMING=yes) and DATA=yes: a data
+#   bearer (ModemManager's simple connect), and the network device it reports
+#   is configured here: address, MTU, a default route with ROUTE_METRIC (above
+#   WiFi's 1024, so WiFi stays the default while it is up), DNS through
+#   systemd-resolved; a dropped bearer is retried with a growing pause.
+#
+# - the user's mobile data switch (the shell's quick menu, through
+#   duo-shell-helper): /var/lib/duo2/mobile-data, `on` or `off`, watched
+#   (a file monitor): off disconnects the bearer at once, on connects;
+#   without the file, wwan.conf's DATA decides;
+# - airplane mode (the quick menu, duo-shell-helper): /var/lib/duo2/airplane,
+#   `on` or `off`, watched the same way: on disables the modem and puts it in
+#   low power (RF off; the helper blocks WiFi and Bluetooth itself), off
+#   powers it up and enables it again. Kept across reboots (the file);
+# - WiFi first: while another device has an IPv4 default route (WiFi), the
+#   bearer keeps its addresses and its IPv4 route at ROUTE_METRIC, but has no
+#   IPv6 default route and is no DNS default route in resolved: a WiFi
+#   without IPv6 would otherwise send every IPv6 connection (most of them,
+#   apps prefer IPv6) over the mobile network. Followed on netlink;
+# - registered but no packet service for minutes (3GPP reject cause #7, e.g.
+#   data provisioned on the SIM after it attached): the modem keeps that until
+#   its radio goes off, so a low-power cycle (disable, low power, enable), at
+#   most every 30 min and 3 times per modem appearance, never during a call.
+# - smart 5G (SMART_5G=yes): 5G NR (NSA) only while it can matter: mobile
+#   data on, a panel lit and the bearer carrying the traffic (WiFi not the
+#   default route); otherwise the modem's mode preference without NR. With NR
+#   allowed the modem stays in EN-DC and never power-collapses, even with no
+#   data at all (measured: asleep 0-23 % with NR, 94 % without; it also gates
+#   the DDR's low-power mode in suspend). Our own QMI client sets the NAS mode
+#   preference "until the next power cycle", never PERMANENT (what
+#   ModemManager's set-allowed-modes sends: a modem NV write); re-applied when
+#   the modem appears. NR goes after NR_DENY_DELAY s dark (no flapping on a
+#   glance), at once before a suspend (a logind delay inhibitor), and comes
+#   back after NR_ALLOW_DELAY s lit; never while a call is dialling, ringing,
+#   active or held (deferred until it ends). Devices on the phone's hotspot
+#   (hotspot/, its state file says so: a device connected and the user's
+#   "use 5G" on) count as data in use: NR allowed with the panels dark and
+#   WiFi the phone's own default route too (SMART_5G_HOTSPOT=yes).
+# - emergency calls (telephony/README.md "Emergency calls"): ModemManager
+#   lets 112 and 911 through in every state (more numbers without a SIM),
+#   but it never switches the radio on for one, and this modem waits in low
+#   power (duo2-modem-lpm) until somebody does. So with no SIM or a SIM
+#   waiting for its PIN (EMERGENCY_RADIO=yes, the default) the radio is put
+#   online anyway: the modem camps on any network ("emergency calls only")
+#   and 112 goes out at once, as on any phone. And an emergency call dialled
+#   while the radio is off (airplane mode, the reject-#7 radio cycle, a
+#   modem disabled by hand) switches it on (airplane mode goes off, as on
+#   Android); if that first attempt failed for the radio, the same number is
+#   dialled once more as soon as the radio is up (never after a hang-up).
+#
+# - other programs' bearers (VoLTE: the modem's IMS stack asks 81voltd for its
+#   own PDNs, `ims`, the emergency `sos`, XCAP's `hos`): only a bearer for the
+#   APN duo2-wwan connects with is its data bearer. The others are left alone:
+#   never adopted (their link gets no address, route or DNS here), and the
+#   mobile data switch disconnects only ours (ModemManager's Simple.Disconnect
+#   with no bearer would take every bearer down, IMS registration included).
+#
+# Event driven (ModemManager's D-Bus signals, netlink, file monitors), no
+# polling. Settings: /etc/duo2/wwan.conf, read at start
+# (`systemctl restart duo2-wwan`).
+import ipaddress
+import json
+import os
+import shlex
+import socket
+import struct
+import subprocess
+import sys
+import time
+
+import gi
+
+gi.require_version("ModemManager", "1.0")
+from gi.repository import Gio, GLib, GObject  # noqa: E402
+from gi.repository import ModemManager as Mm  # noqa: E402
+
+CONF = "/etc/duo2/wwan.conf"
+DATA_SWITCH = "/var/lib/duo2/mobile-data"
+AIRPLANE_SWITCH = "/var/lib/duo2/airplane"
+HOTSPOT_STATE = "/run/duo2/hotspot.json"
+DEFAULTS = {
+    "ENABLE": "yes",
+    "DATA": "yes",
+    "APN": "",
+    "IP_TYPE": "ipv4v6",
+    "APN_USER": "",
+    "APN_PASSWORD": "",
+    "ROAMING": "no",
+    "ROUTE_METRIC": "4096",
+    "PROVISION_SLOT": "1",
+    "SMART_5G": "yes",
+    "SMART_5G_HOTSPOT": "yes",
+    "EMERGENCY_RADIO": "yes",
+    "EMERGENCY_TEST_NUMBER": "",
+}
+RETRY = (10, 30, 60, 120, 300)
+# Registered without packet service (reject cause #7): a radio cycle after
+# PS_GRACE s, at most every PS_EVERY s and PS_CYCLES times per modem.
+PS_GRACE = 180
+PS_EVERY = 1800
+PS_CYCLES = 3
+# MAP header + MAPv5 checksum header: the mux link's MTU may be at most the
+# rmnet_ipa0 MTU minus these (rmnet refuses more).
+RMNET_HEADROOM = 8
+RTMGRP_IPV4_ROUTE = 0x40
+# smart 5G: the NAS RAT mode preference bit of 5G NR, our state in /run (lost
+# at boot, like the modem's power-cycle setting), the timings. Measured on the
+# Duo 2 (2026-11-08): NR -> LTE takes ~1 s with no registration gap.
+NR_BIT = 0x40
+NR_STATE = "/run/duo2/wwan-nr.json"
+NR_ALLOW_DELAY = 3  # s a panel lit (data on, WiFi not the default) before NR comes back
+NR_DENY_DELAY = 30  # s dark, or WiFi the default, before NR goes (at once before a suspend)
+NR_DATA_OFF_DELAY = 2  # s after mobile data is switched off
+NR_RETRY = 60  # s after a failed QMI request
+NR_CALL_RECHECK = 10  # s: a call defers a switch
+WC_SOCK = "/run/duo-wc/admin.sock"
+# Emergency numbers as ModemManager knows them (mm-iface-modem-voice.c, 3GPP
+# TS 22.101): 112 and 911 always, these too without a SIM; plus the national
+# ones by MCC (the same table as duo-shell's emergencymodel.py, a test keeps
+# them in step): dialled in airplane mode they mean an emergency as well.
+EMERGENCY_ALWAYS = ("112", "911")
+EMERGENCY_NO_SIM = ("000", "08", "110", "999", "118", "119")
+EMERGENCY_NATIONAL = {
+    "262": ("110",),
+    "216": ("104", "105", "107"),
+    "232": ("122", "133", "144"),
+    "228": ("117", "118", "144"),
+    "230": ("150", "155", "158"),
+    "231": ("150", "155", "158"),
+    "260": ("997", "998", "999"),
+    "208": ("15", "17", "18"),
+    "222": ("113", "115", "118"),
+    "234": ("999",),
+    "235": ("999",),
+}
+RADIO_SETTLE = 8  # s the radio is up before a redial (the modem finds a cell)
+REDIAL_WINDOW = 90  # s after the first attempt: no redial later than this
+START_GRACE = 3  # s: Calls starts a call it sees; if nobody did, we do
+QMICLI = "/usr/bin/qmicli"
+
+
+def log(*a):
+    print(*a, flush=True)
+
+
+def read_conf():
+    c = dict(DEFAULTS)
+    try:
+        with open(CONF) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                v = shlex.split(v, comments=True)
+                c[k.strip()] = v[0] if v else ""
+    except FileNotFoundError:
+        pass
+    return c
+
+
+def yes(v):
+    return v.lower() in ("1", "yes", "true", "on")
+
+
+def read_switch(path=DATA_SWITCH):
+    """A switch file (mobile data, airplane): True, False, or None (no file:
+    mobile data follows DATA, airplane mode is off)."""
+    try:
+        with open(path) as f:
+            v = f.read().strip().lower()
+    except OSError:
+        return None
+    return {"on": True, "off": False}.get(v)
+
+
+def run(*cmd, check=False):
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0 and check:
+        log("failed:", " ".join(cmd), r.stderr.strip())
+    return r.returncode == 0
+
+
+def link_mtu(*mtus):
+    """The mux link's MTU: the smallest the bearer gave (IPv4 and IPv6 share
+    the link), 0 = none given."""
+    given = [m for m in mtus if m]
+    return min(given) if given else 0
+
+
+def other_default(routes, iface):
+    """Whether `ip -j route show default` (parsed) has a default route on a
+    device other than `iface` (WiFi): then the mobile link is the backup."""
+    return any(r.get("dev") and r.get("dev") != iface for r in routes or [])
+
+
+def own_apn(bearer_apn, ours):
+    """Whether a bearer created for bearer_apn is duo2-wwan's data bearer:
+    the APN it connects with (wwan.conf's, else the carrier profile's),
+    compared as APNs are compared (case does not count). With no APN of
+    ours known, no bearer is ours."""
+    a, b = (bearer_apn or "").strip().lower(), (ours or "").strip().lower()
+    return bool(b) and a == b
+
+
+def bearer_apn(bearer):
+    """The APN a ModemManager bearer was created with ('' if none)."""
+    props = bearer.get_properties() if bearer is not None else None
+    return (props.get_apn() or "") if props is not None else ""
+
+
+def ps_cycle_due(now, last, cycles, every=PS_EVERY, limit=PS_CYCLES):
+    """Whether a low-power cycle for a missing packet service may run now:
+    True, False (the budget of this modem is used up), or the seconds to
+    wait (the last one was too recent)."""
+    if cycles >= limit:
+        return False
+    if last is not None and now - last < every:
+        return int(every - (now - last)) + 1
+    return True
+
+
+def nr_wanted(data_on, lit, wifi_default, sharing=False):
+    """Whether 5G NR may be used: mobile data on, and a panel lit with the
+    bearer carrying the traffic (no default route of WiFi's), or devices on
+    the hotspot (their traffic is the bearer's whatever the phone's own
+    default route)."""
+    return bool(data_on and ((lit and not wifi_default) or sharing))
+
+
+def hotspot_sharing(st):
+    """From the hotspot's state file (parsed): devices on it and the user's
+    "use 5G" on (duo2-hotspotd's `use_5g`)."""
+    return bool(isinstance(st, dict) and st.get("state") == "on" and st.get("use_5g") is True)
+
+
+def read_hotspot(path=HOTSPOT_STATE):
+    try:
+        with open(path) as f:
+            return hotspot_sharing(json.load(f))
+    except (OSError, ValueError):
+        return False
+
+
+def nr_mask(base, allow):
+    """The mode preference to set: the modem's own (base) with NR, or without
+    it. A base without NR (switched off for good) never gets it."""
+    return base if allow else base & ~NR_BIT
+
+
+def nr_base(current, saved):
+    """The modem's own mode preference, from the current one and our saved
+    state: our change ("until power cycle") outlives a restart of duo2-wwan
+    but not one of the modem, which comes back with its own setting."""
+    if (
+        isinstance(saved, dict)
+        and isinstance(saved.get("base"), int)
+        and current == saved.get("applied")
+    ):
+        return saved["base"]
+    return current
+
+
+def nr_delay(allow, data_on):
+    """Seconds before a change of the NR policy is applied."""
+    if allow:
+        return NR_ALLOW_DELAY
+    return NR_DENY_DELAY if data_on else NR_DATA_OFF_DELAY
+
+
+def dialled_digits(number):
+    """A dialled number as plain digits ('112', '1 1 2'), or '' when it is
+    not a plain short number (a '+', a pause, letters)."""
+    out = []
+    for ch in (number or "").strip():
+        if ch.isdigit() and ch.isascii():
+            out.append(ch)
+        elif ch not in " -().":
+            return ""
+    return "".join(out)
+
+
+def is_emergency(number, sim_present, sim_numbers=(), mccs=()):
+    """Whether a dialled number is an emergency number: ModemManager's own
+    rule (112, 911; without a SIM also its no-SIM list; the SIM's list) and
+    the national numbers of the network's or the SIM's country."""
+    n = dialled_digits(number)
+    if not n:
+        return False
+    if n in EMERGENCY_ALWAYS or (not sim_present and n in EMERGENCY_NO_SIM):
+        return True
+    if n in [dialled_digits(s) for s in sim_numbers or ()]:
+        return True
+    return any(n in EMERGENCY_NATIONAL.get(str(m)[:3], ()) for m in mccs or ())
+
+
+def mm_lets_through_unregistered(number, sim_present, sim_numbers=()):
+    """Whether ModemManager dials `number` while the modem is not registered
+    (its "emergency-only" state): 112, 911, the SIM's list, and without a
+    SIM its no-SIM list. A national number (110 with a SIM in) needs the
+    registration first."""
+    n = dialled_digits(number)
+    return bool(n) and (
+        n in EMERGENCY_ALWAYS
+        or (not sim_present and n in EMERGENCY_NO_SIM)
+        or n in [dialled_digits(s) for s in sim_numbers or ()]
+    )
+
+
+def emergency_radio_wanted(state, failed_reason, airplane, conf):
+    """Whether the radio is put online although ModemManager does not
+    enable the modem, for emergency calls: no SIM ('failed', 'sim-missing')
+    or a SIM waiting for its PIN or PUK ('locked'); never in airplane mode;
+    EMERGENCY_RADIO and ENABLE in wwan.conf."""
+    if (
+        airplane
+        or not yes(conf.get("EMERGENCY_RADIO", "yes"))
+        or not yes(conf.get("ENABLE", "yes"))
+    ):
+        return False
+    return state == "locked" or (state == "failed" and failed_reason == "sim-missing")
+
+
+def redial_due(attempt, now, radio_ready):
+    """An emergency call dialled while the radio was off: 'redial' (the
+    attempt failed for the radio, which is up now), 'wait' or 'drop'.
+
+    attempt: {"created": monotonic s, "forced": the radio was off and was
+    switched on for it, "redialled": one redial was made already, "states":
+    the call states seen (ModemManager's names), "ended": the state reason
+    once it terminated, else None}. Only a call that never rang and ended
+    for an error (ModemManager's "unknown" / "error" / "audio-setup-failed":
+    what a dial with the radio off gives) is dialled again: a hang-up
+    ("terminated"), a busy or refused call is the user's or the network's
+    word, never redialled."""
+    if not attempt.get("forced") or attempt.get("redialled"):
+        return "drop"
+    if now - attempt.get("created", now) > REDIAL_WINDOW:
+        return "drop"
+    if set(attempt.get("states") or ()) & {"ringing-out", "active", "held"}:
+        return "drop"
+    ended = attempt.get("ended")
+    if ended is None:
+        return "wait"
+    if ended not in ("unknown", "error", "audio-setup-failed"):
+        return "drop"
+    return "redial" if radio_ready else "wait"
+
+
+def radio_settled(up_at, now, registered, settle=RADIO_SETTLE):
+    """Whether the radio has been up long enough to dial again: registered,
+    or on for `settle` s (the modem has found a cell for an emergency call)."""
+    if registered:
+        return True
+    return up_at is not None and now - up_at >= settle
+
+
+def default_routes():
+    r = subprocess.run(
+        ["ip", "-4", "-j", "route", "show", "default"], capture_output=True, text=True
+    )
+    try:
+        return json.loads(r.stdout or "[]")
+    except ValueError:
+        return []
+
+
+class RouteWatch:
+    """Calls changed() (300 ms after a burst) when an IPv4 route changes:
+    WiFi's default route coming or going (netlink, RTMGRP_IPV4_ROUTE)."""
+
+    def __init__(self, changed):
+        self.changed = changed
+        self.pending = 0
+        self.sock = socket.socket(
+            socket.AF_NETLINK, socket.SOCK_RAW | socket.SOCK_NONBLOCK, socket.NETLINK_ROUTE
+        )
+        self.sock.bind((0, RTMGRP_IPV4_ROUTE))
+        GLib.io_add_watch(self.sock.fileno(), GLib.PRIORITY_DEFAULT, GLib.IO_IN, self._readable)
+
+    def _readable(self, *_a):
+        try:
+            while self.sock.recv(65536):
+                pass
+        except OSError:
+            pass  # drained (EAGAIN), or an overrun (ENOBUFS): read the table anyway
+        if not self.pending:
+            self.pending = GLib.timeout_add(300, self._fire)
+        return True
+
+    def _fire(self):
+        self.pending = 0
+        self.changed()
+        return False
+
+
+class Net:
+    """The bearer's network device, configured by hand (networkd leaves it
+    alone). `backup`: another device (WiFi) has an IPv4 default route; then
+    the link has no IPv6 default route and is no DNS default route."""
+
+    def __init__(self, metric):
+        self.metric = metric
+        self.iface = None
+        self.v6 = False
+        self.backup = other_default(default_routes(), None)
+
+    def up(self, bearer):
+        iface = bearer.get_interface()
+        if not iface:
+            log("bearer connected without a network device?")
+            return
+        if self.iface and self.iface != iface:
+            self.down()
+        self.iface = iface
+        v4, v6 = bearer.get_ipv4_config(), bearer.get_ipv6_config()
+        sysctl = "/proc/sys/net/ipv6/conf/%s/" % iface
+        # No default route from the network's RA (the kernel's would have
+        # metric 1024 and tie with WiFi's): ours, below, follows WiFi.
+        self._write(sysctl + "accept_ra", "0")
+        self._write(sysctl + "accept_ra_defrtr", "0")
+        run("ip", "-6", "route", "flush", "dev", iface, "proto", "ra")
+        run("ip", "addr", "flush", "dev", iface, "scope", "global")
+        dns = []
+        mtus = []
+        has_v4 = bool(v4 and v4.get_method() == Mm.BearerIpMethod.STATIC and v4.get_address())
+        if has_v4:
+            run(
+                "ip",
+                "addr",
+                "add",
+                "%s/%d" % (v4.get_address(), v4.get_prefix() or 32),
+                "dev",
+                iface,
+                check=True,
+            )
+            mtus.append(v4.get_mtu())
+            dns += list(v4.get_dns() or [])
+        self.v6 = bool(v6 and v6.get_method() in (Mm.BearerIpMethod.STATIC, Mm.BearerIpMethod.DHCP))
+        if self.v6:
+            if v6.get_method() == Mm.BearerIpMethod.STATIC and v6.get_address():
+                run(
+                    "ip",
+                    "-6",
+                    "addr",
+                    "add",
+                    "%s/%d" % (v6.get_address(), v6.get_prefix() or 64),
+                    "dev",
+                    iface,
+                    check=True,
+                )
+            # SLAAC as well (the network's prefix comes in its RA).
+            self._write(sysctl + "accept_ra", "2")
+            mtus.append(v6.get_mtu())
+            dns += list(v6.get_dns() or [])
+        self._set_mtu(iface, link_mtu(*mtus))
+        run("ip", "link", "set", iface, "up", check=True)
+        if has_v4:
+            run(
+                "ip",
+                "route",
+                "replace",
+                "default",
+                "dev",
+                iface,
+                "metric",
+                str(self.metric),
+                check=True,
+            )
+        self._v6_route()
+        dns = [d for d in dns if self._ip(d)]
+        if dns:
+            run("resolvectl", "dns", iface, *dns, check=True)
+        run("resolvectl", "default-route", iface, "no" if self.backup else "yes")
+        log(
+            "data up on %s (%s%s), DNS %d server(s), default route metric %d%s"
+            % (
+                iface,
+                "IPv4" if has_v4 else "",
+                " IPv6" if self.v6 else "",
+                len(dns),
+                self.metric,
+                ", WiFi first (no IPv6 default, no DNS default)" if self.backup else "",
+            )
+        )
+
+    def _set_mtu(self, iface, mtu):
+        if not mtu:
+            return
+        if run("ip", "link", "set", iface, "mtu", str(mtu)):
+            return
+        # More than the mux link may carry (rmnet: the parent's MTU minus the
+        # MAP headers): as much as it may.
+        parent = self._parent_mtu(iface)
+        if (
+            parent
+            and parent - RMNET_HEADROOM < mtu
+            and run("ip", "link", "set", iface, "mtu", str(parent - RMNET_HEADROOM), check=True)
+        ):
+            log("MTU %d is more than %s carries: %d" % (mtu, iface, parent - RMNET_HEADROOM))
+        else:
+            log("could not set the MTU of %s to %d" % (iface, mtu))
+
+    @staticmethod
+    def _parent_mtu(iface):
+        try:
+            with open("/sys/class/net/%s/iflink" % iface) as f:
+                index = f.read().strip()
+            out = subprocess.run(
+                ["ip", "-j", "link", "show"], capture_output=True, text=True
+            ).stdout
+            for link in json.loads(out or "[]"):
+                if str(link.get("ifindex")) == index:
+                    return int(link.get("mtu") or 0)
+        except (OSError, ValueError):
+            pass
+        return 0
+
+    def _v6_route(self):
+        """The IPv6 default route of the link: only while WiFi has none of
+        its own to take over (no IPv4 default elsewhere)."""
+        if not self.iface or not self.v6:
+            return
+        if self.backup:
+            run(
+                "ip", "-6", "route", "del", "default", "dev", self.iface, "metric", str(self.metric)
+            )
+        else:
+            run(
+                "ip",
+                "-6",
+                "route",
+                "replace",
+                "default",
+                "dev",
+                self.iface,
+                "metric",
+                str(self.metric),
+            )
+
+    def routes_changed(self):
+        backup = other_default(default_routes(), self.iface)
+        if backup == self.backup:
+            return
+        self.backup = backup
+        if not self.iface:
+            return
+        self._v6_route()
+        run("resolvectl", "default-route", self.iface, "no" if backup else "yes")
+        log(
+            "WiFi %s: %s %s"
+            % (
+                "up" if backup else "gone",
+                self.iface,
+                "is the backup (no IPv6 default, no DNS default)"
+                if backup
+                else "carries everything",
+            )
+        )
+
+    def down(self):
+        if not self.iface:
+            return
+        iface, self.iface = self.iface, None
+        self.v6 = False
+        run("resolvectl", "revert", iface)
+        run("ip", "route", "flush", "dev", iface)
+        run("ip", "-6", "route", "flush", "dev", iface)
+        run("ip", "addr", "flush", "dev", iface, "scope", "global")
+        log("data down on %s" % iface)
+
+    @staticmethod
+    def _ip(s):
+        try:
+            ipaddress.ip_address(s)
+            return True
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _write(path, value):
+        try:
+            with open(path, "w") as f:
+                f.write(value)
+        except OSError:
+            pass
+
+
+class NasModePref:
+    """The modem's NAS RAT mode preference over QRTR, from a QMI client of our
+    own (ModemManager's is not ours to use). Set always with the change
+    duration "until power cycle" (RAM only), never PERMANENT. Blocking, a
+    few hundred ms at most; used a few times a day."""
+
+    AF_QIPCRTR = 42
+    CTRL_PORT = 0xFFFFFFFE
+    NEW_SERVER, NEW_LOOKUP = 4, 10
+    NAS = 3
+    SET_SSP, GET_SSP = 0x0033, 0x0034
+    TLV_MODE, TLV_DURATION, POWER_CYCLE = 0x11, 0x17, 0x00
+
+    def __init__(self, timeout=3.0):
+        self.timeout = timeout
+        self.txn = 0
+
+    def _transact(self, msg_id, tlvs):
+        """One request on a fresh client: the response's TLVs, or None."""
+        sock = socket.socket(self.AF_QIPCRTR, socket.SOCK_DGRAM)
+        try:
+            sock.settimeout(self.timeout)
+            local = sock.getsockname()[0]
+            sock.sendto(
+                struct.pack("<5I", self.NEW_LOOKUP, self.NAS, 0, 0, 0), (local, self.CTRL_PORT)
+            )
+            addr = None
+            end = time.monotonic() + self.timeout
+            while addr is None and time.monotonic() < end:
+                data, src = sock.recvfrom(65536)
+                if src[1] == self.CTRL_PORT and len(data) >= 20:
+                    cmd, svc, _inst, node, port = struct.unpack("<5I", data[:20])
+                    if cmd == self.NEW_SERVER and svc == self.NAS:
+                        addr = (node, port)
+            if addr is None:
+                return None
+            self.txn = (self.txn + 1) & 0xFFFF or 1
+            body = b"".join(struct.pack("<BH", t, len(v)) + v for t, v in tlvs)
+            sock.sendto(struct.pack("<BHHH", 0, self.txn, msg_id, len(body)) + body, addr)
+            while time.monotonic() < end:
+                data, src = sock.recvfrom(65536)
+                if src != addr or len(data) < 7:
+                    continue
+                typ, txn, mid, ln = struct.unpack_from("<BHHH", data, 0)
+                if typ != 2 or txn != self.txn or mid != msg_id:
+                    continue
+                out, i, b = {}, 0, data[7 : 7 + ln]
+                while i + 3 <= len(b):
+                    t, n = struct.unpack_from("<BH", b, i)
+                    out[t] = b[i + 3 : i + 3 + n]
+                    i += 3 + n
+                res = out.get(0x02, b"\xff\xff\xff\xff")
+                if struct.unpack("<HH", res[:4]) != (0, 0):
+                    log("QMI NAS 0x%04x: error 0x%04x" % (msg_id, struct.unpack("<HH", res[:4])[1]))
+                    return None
+                return out
+            return None
+        except OSError as e:
+            log("QMI NAS 0x%04x: %s" % (msg_id, e))
+            return None
+        finally:
+            sock.close()
+
+    def get(self):
+        out = self._transact(self.GET_SSP, [])
+        if not out or self.TLV_MODE not in out:
+            return None
+        return struct.unpack("<H", out[self.TLV_MODE][:2])[0]
+
+    def set(self, mask):
+        return (
+            self._transact(
+                self.SET_SSP,
+                [
+                    (self.TLV_MODE, struct.pack("<H", mask)),
+                    (self.TLV_DURATION, bytes([self.POWER_CYCLE])),
+                ],
+            )
+            is not None
+        )
+
+
+class Panels:
+    """Whether a panel is lit (duo-wc's admin socket: its state events; root
+    only). A glance or a peek does not count. Calls changed() on a change;
+    without duo-wc the panels count as dark (tried again every 5 s)."""
+
+    def __init__(self, changed, path=WC_SOCK):
+        self.changed = changed
+        self.path = path
+        self.sock = None
+        self.watch = 0
+        self.buf = b""
+        self.lit = False
+        self.connect()
+
+    def connect(self):
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(5)
+            s.connect(self.path)
+            s.sendall(b'{"id":1,"request":"subscribe"}\n')
+            s.setblocking(False)
+        except OSError:
+            GLib.timeout_add_seconds(5, self._retry)
+            return
+        self.sock, self.buf = s, b""
+        self.watch = GLib.io_add_watch(
+            s.fileno(),
+            GLib.PRIORITY_DEFAULT,
+            GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR,
+            self._readable,
+        )
+
+    def _retry(self):
+        self.connect()
+        return False
+
+    def _readable(self, *_a):
+        try:
+            data = self.sock.recv(65536)
+        except BlockingIOError:
+            return True
+        except OSError:
+            data = b""
+        if not data:
+            self.sock.close()
+            self.sock, self.watch = None, 0
+            self._set(False)
+            GLib.timeout_add_seconds(5, self._retry)
+            return False
+        self.buf += data
+        while b"\n" in self.buf:
+            line, self.buf = self.buf.split(b"\n", 1)
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            st = None
+            if isinstance(msg.get("ok"), dict) and "state" in msg["ok"]:
+                st = msg["ok"]["state"]
+            elif msg.get("event") == "state":
+                st = msg.get("state")
+            if isinstance(st, dict):
+                self._set(bool(st.get("lit")))
+        return True
+
+    def _set(self, lit):
+        if lit != self.lit:
+            self.lit = lit
+            self.changed()
+
+
+class SleepWatch:
+    """A logind delay inhibitor: before a suspend, before_sleep() runs and the
+    inhibitor is let go; after it, after_sleep() and a new one is taken."""
+
+    def __init__(self, bus, before_sleep, after_sleep):
+        self.bus, self.before, self.after = bus, before_sleep, after_sleep
+        self.fd = -1
+        bus.signal_subscribe(
+            "org.freedesktop.login1",
+            "org.freedesktop.login1.Manager",
+            "PrepareForSleep",
+            "/org/freedesktop/login1",
+            None,
+            Gio.DBusSignalFlags.NONE,
+            self._signal,
+        )
+        self.take()
+
+    def take(self):
+        if self.fd >= 0:
+            return
+        try:
+            ret, fds = self.bus.call_with_unix_fd_list_sync(
+                "org.freedesktop.login1",
+                "/org/freedesktop/login1",
+                "org.freedesktop.login1.Manager",
+                "Inhibit",
+                GLib.Variant(
+                    "(ssss)", ("sleep", "duo2-wwan", "5G NR off before the sleep", "delay")
+                ),
+                GLib.VariantType("(h)"),
+                Gio.DBusCallFlags.NONE,
+                5000,
+                None,
+                None,
+            )
+            self.fd = fds.get(ret.unpack()[0])
+        except GLib.Error as e:
+            log(
+                "no logind delay inhibitor (%s): 5G NR goes only after the panels' delay"
+                % e.message
+            )
+
+    def release(self):
+        if self.fd >= 0:
+            os.close(self.fd)
+            self.fd = -1
+
+    def _signal(self, _conn, _sender, _path, _iface, _signal, params):
+        if params.unpack()[0]:
+            try:
+                self.before()
+            finally:
+                self.release()
+        else:
+            self.take()
+            self.after()
+
+
+class SmartNr:
+    """The 5G NR policy (SMART_5G): see the header. One modem at a time."""
+
+    def __init__(self, daemon):
+        self.d = daemon
+        self.qmi = NasModePref()
+        self.modem = None
+        self.base = None
+        self.applied = None
+        self.timer = 0
+        self.timer_target = None
+        self.failed_logged = False
+
+    def _load(self):
+        try:
+            with open(NR_STATE) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return None
+
+    def _save(self):
+        try:
+            os.makedirs(os.path.dirname(NR_STATE), exist_ok=True)
+            with open(NR_STATE + ".tmp", "w") as f:
+                json.dump({"base": self.base, "applied": self.applied}, f)
+            os.replace(NR_STATE + ".tmp", NR_STATE)
+        except OSError as e:
+            log("smart 5G: cannot save %s: %s" % (NR_STATE, e))
+
+    def modem_gone(self, modem):
+        if self.modem is modem:
+            self.modem = None
+            self.base = self.applied = None
+            self._cancel()
+
+    def _cancel(self):
+        if self.timer:
+            GLib.source_remove(self.timer)
+        self.timer, self.timer_target = 0, None
+
+    def _usable(self, m):
+        return (
+            m is not None
+            and not m.busy
+            and not m.cycling
+            and not self.d.airplane
+            and m.state() >= Mm.ModemState.ENABLED
+        )
+
+    def target(self):
+        """(mask, allow, reason) the policy wants now, or None (nothing to do)."""
+        if self.base is None:
+            return None
+        if not yes(self.d.conf["SMART_5G"]):
+            return self.base, True, "smart 5G off"
+        data_on, lit, wifi = self.d.data_on(), self.d.panels.lit, self.d.net.backup
+        sharing = self.d.sharing and yes(self.d.conf["SMART_5G_HOTSPOT"])
+        allow = nr_wanted(data_on, lit, wifi, sharing)
+        why = (
+            "devices on the hotspot"
+            if allow and sharing and not (lit and not wifi)
+            else "panel lit, data on the mobile network"
+            if allow
+            else "mobile data off"
+            if not data_on
+            else "WiFi carries the data"
+            if wifi
+            else "panels dark"
+        )
+        return nr_mask(self.base, allow), allow, why
+
+    def evaluate(self, modem=None):
+        if modem is not None and self.modem is None:
+            self.modem = modem
+        m = self.modem
+        if not self._usable(m):
+            self._cancel()
+            return
+        if self.base is None:
+            current = self.qmi.get()
+            if current is None:
+                if not self.failed_logged:
+                    self.failed_logged = True
+                    log("smart 5G: cannot read the modem's mode preference (tried again later)")
+                if not self.timer:
+                    self.timer = GLib.timeout_add_seconds(NR_RETRY, self._due)
+                return
+            self.failed_logged = False
+            self.base = nr_base(current, self._load())
+            self.applied = current
+            log(
+                "smart 5G: the modem's mode preference 0x%02x%s, now 0x%02x"
+                % (self.base, "" if self.base & NR_BIT else " (no 5G NR: nothing to do)", current)
+            )
+        t = self.target()
+        if t is None:
+            return
+        mask, allow, _why = t
+        if mask == self.applied:
+            self._cancel()
+            return
+        if self.timer and self.timer_target == mask:
+            return
+        self._cancel()
+        self.timer_target = mask
+        self.timer = GLib.timeout_add_seconds(nr_delay(allow, self.d.data_on()), self._due)
+
+    def _due(self):
+        self.timer, self.timer_target = 0, None
+        self.apply_now(deferrable=True)
+        return False
+
+    def apply_now(self, deferrable=False, force_deny=False, why_extra=""):
+        """Apply what the policy wants (force_deny: without NR, before a
+        suspend). A call in progress defers it."""
+        m = self.modem
+        if not self._usable(m):
+            return
+        if self.base is None:
+            self.evaluate()
+            return
+        t = self.target()
+        if t is None:
+            return
+        mask, allow, why = t
+        if force_deny and allow:
+            mask, allow, why = nr_mask(self.base, False), False, "suspend"
+        if mask == self.applied:
+            return
+        if m.call_busy():
+            if deferrable and not self.timer:
+                self.timer_target = mask
+                self.timer = GLib.timeout_add_seconds(NR_CALL_RECHECK, self._due)
+            return
+        t0 = time.monotonic()
+        if not self.qmi.set(mask):
+            log(
+                "smart 5G: setting the mode preference 0x%02x failed (again in %d s)"
+                % (mask, NR_RETRY)
+            )
+            if not self.timer:
+                self.timer_target = mask
+                self.timer = GLib.timeout_add_seconds(NR_RETRY, self._due)
+            return
+        self.applied = mask
+        self._save()
+        log(
+            "smart 5G: 5G NR %s (%s%s): mode preference 0x%02x until the modem restarts, %d ms"
+            % (
+                "allowed" if mask & NR_BIT else "off",
+                why,
+                why_extra,
+                mask,
+                (time.monotonic() - t0) * 1000,
+            )
+        )
+
+    def before_sleep(self):
+        self._cancel()
+        self.apply_now(force_deny=True)
+
+    def after_sleep(self):
+        self.evaluate()
+
+
+class Modem:
+    def __init__(self, daemon, obj):
+        self.d = daemon
+        self.obj = obj
+        self.path = obj.get_object_path()
+        self.modem = obj.get_modem()
+        self.m3gpp = obj.get_modem_3gpp()
+        self.simple = obj.get_modem_simple()
+        self.enabled_once = False
+        self.enabling = False
+        self.connecting = False
+        self.bearer = None
+        self.bearer_handler = None
+        self.foreign_seen = set()  # other programs' bearers, logged once
+        self.retry = 0
+        self.timer = 0
+        self.was_registered = False
+        self.was_attached = False
+        # airplane mode / the radio cycle: a disable or power change of ours
+        # is under way (evaluate waits for its end)
+        self.busy = False
+        self.cycling = False
+        self.power_logged = None
+        # registered without packet service (reject cause #7)
+        self.ps_timer = 0
+        self.ps_cycles = 0
+        self.ps_last = None
+        self.ps_gave_up = False
+        self.cycle_timer = 0
+        # emergency calls: the radio put online for them (no SIM, a locked
+        # SIM: monotonic time, else None), when the radio came up, the
+        # emergency call being watched, our redial's path
+        self.radio_online = None
+        self.radio_pending = False
+        self.radio_up_at = None
+        self.attempt = None
+        self.attempt_timer = 0
+        self.redial_path = None
+        self.voice = None
+        self.voice_handlers = []
+        self.call_handlers = []
+        self.handlers = [
+            (self.modem, self.modem.connect("state-changed", lambda *a: self.evaluate())),
+            (self.modem, self.modem.connect("notify::power-state", lambda *a: self.evaluate())),
+            (obj, obj.connect("notify::modem-voice", lambda *a: self.watch_voice())),
+        ]
+        if self.m3gpp:
+            for prop in ("registration-state", "packet-service-state"):
+                self.handlers.append(
+                    (self.m3gpp, self.m3gpp.connect("notify::" + prop, lambda *a: self.evaluate()))
+                )
+        log("modem %s appeared" % self.path)
+        self.watch_voice()
+        self.evaluate()
+
+    def gone(self):
+        for o, h in self.handlers:
+            o.handler_disconnect(h)
+        self.unwatch_voice()
+        self.drop_attempt()
+        self.d.nr.modem_gone(self)
+        self.drop_bearer()
+        self.cancel_retry()
+        self.cancel_ps()
+        self.d.net.down()
+
+    def cancel_retry(self):
+        if self.timer:
+            GLib.source_remove(self.timer)
+            self.timer = 0
+
+    def state(self):
+        return self.modem.get_state()
+
+    def evaluate(self):
+        c = self.d.conf
+        st = self.state()
+        self.note_radio(st)
+        self.d.nr.evaluate(self)
+        if self.cycling or self.busy:
+            return
+        if self.d.airplane:
+            self.cancel_ps()
+            self.airplane(st)
+            return
+        if st != Mm.ModemState.FAILED:
+            # A new failure (a SIM put in or changed later) gets its tries again.
+            self.d.provision_tries = 0
+        if st not in (Mm.ModemState.FAILED, Mm.ModemState.LOCKED):
+            self.radio_online = None
+        if st == Mm.ModemState.FAILED:
+            reason = self.modem.get_state_failed_reason()
+            if reason == Mm.ModemStateFailedReason.SIM_MISSING and self.d.provision_tries < 2:
+                # `duo2-sim auto` acts only when a card with a USIM is there:
+                # it waits for the modem's own primary session (a card put in
+                # while running) and restarts ModemManager, or makes that card
+                # primary itself (which restarts ModemManager too); at most
+                # twice until the modem is healthy again (no restart loop).
+                self.d.provision_tries += 1
+                subprocess.Popen(["/usr/local/sbin/duo2-sim", "auto"])
+            log("modem failed: %s" % Mm.modem_state_failed_reason_get_string(reason))
+            self.d.net.down()
+            self.emergency_radio(st)
+            return
+        if st == Mm.ModemState.LOCKED:
+            log("SIM locked: the shell asks for its PIN (or as root: mmcli -i any --pin=...)")
+            self.emergency_radio(st)
+            return
+        if st == Mm.ModemState.DISABLED:
+            self.d.net.down()
+            if self.enabling:
+                pass
+            elif yes(c["ENABLE"]) and not self.enabled_once:
+                self.enabled_once = True
+                log("enabling the modem")
+                self.enable()
+            elif self.emergency_active() and not self.attempt.get("enabled"):
+                # An emergency call: on, whatever ENABLE or a disable by hand said.
+                log("emergency call: enabling the modem")
+                self.attempt["enabled"] = True
+                self.enabled_once = True
+                self.enable()
+            return
+        if st < Mm.ModemState.REGISTERED:
+            # enabling / enabled / searching: the bearer has gone with the
+            # registration (or is not there yet).
+            self.was_registered = self.was_attached = False
+            self.cancel_ps()
+            self.d.net.down()
+            return
+        attached = self.packet_attached()
+        if not self.was_registered or (attached and not self.was_attached):
+            # Registered anew or packet-attached now (a radio cycle, a network
+            # that has just allowed data): try at once, not after the backoff
+            # left over from the earlier failures.
+            self.retry = 0
+            self.cancel_retry()
+        self.was_registered, self.was_attached = True, attached
+        self.watch_packet_service(attached)
+        self.maybe_connect()
+
+    # -- airplane mode ------------------------------------------------------------------
+
+    def airplane(self, st):
+        """Airplane mode: the modem disabled and in low power (RF off)."""
+        self.cancel_retry()
+        self.drop_bearer()
+        self.d.net.down()
+        S = Mm.ModemState
+        if st in (S.ENABLING, S.DISABLING, S.INITIALIZING, S.UNKNOWN):
+            return  # its next state comes with a signal
+        if st >= S.ENABLED:
+            log("airplane mode: disabling the modem")
+            self.busy = True
+            self.modem.disable(None, self._airplane_disabled)
+            return
+        # disabled, locked (SIM PIN) or failed (no SIM): low power. A radio we
+        # put online behind ModemManager's back (emergency calls) shows as
+        # low there still: ModemManager reads the real mode before it sets one.
+        power = self.modem.get_power_state()
+        if power in (Mm.ModemPowerState.LOW, Mm.ModemPowerState.OFF) and self.radio_online is None:
+            if self.power_logged != "low":
+                self.power_logged = "low"
+                log("airplane mode: the modem is in low power (RF off)")
+            return
+        self.busy = True
+        self.radio_online = None
+        self.modem.set_power_state(Mm.ModemPowerState.LOW, None, self._airplane_low)
+
+    def _airplane_disabled(self, modem, res):
+        self.busy = False
+        try:
+            modem.disable_finish(res)
+        except GLib.Error as e:
+            log("disabling failed: %s" % e.message)
+        self.evaluate()
+
+    def _airplane_low(self, modem, res):
+        self.busy = False
+        try:
+            modem.set_power_state_finish(res)
+        except GLib.Error as e:
+            # e.g. a state ModemManager does not change the power in: it is
+            # tried again on the next state change, not in a loop.
+            log("low power failed: %s" % e.message)
+            self.power_logged = "failed"
+            return
+        self.evaluate()
+
+    def airplane_switched(self):
+        if self.d.airplane:
+            self.evaluate()
+            return
+        # Off: the modem comes back as at its appearance (enable once).
+        self.enabled_once = False
+        self.power_logged = None
+        log("airplane mode off")
+        self.evaluate()
+
+    # -- emergency calls -----------------------------------------------------------------
+
+    def note_radio(self, st):
+        """When the radio came up (for the redial's settle time)."""
+        on = (st >= Mm.ModemState.ENABLED or self.radio_online is not None) and not self.cycling
+        if on and self.radio_up_at is None:
+            self.radio_up_at = self.radio_online or time.monotonic()
+        elif not on:
+            self.radio_up_at = None
+
+    def emergency_radio(self, st, forced=False):
+        """No SIM or a locked SIM: the radio online all the same, so the
+        modem camps on any network and an emergency call goes out at once
+        (EMERGENCY_RADIO; `forced`: an emergency call is being dialled)."""
+        name = "locked" if st == Mm.ModemState.LOCKED else "failed"
+        reason = ""
+        if st == Mm.ModemState.FAILED:
+            reason = Mm.modem_state_failed_reason_get_string(self.modem.get_state_failed_reason())
+        if not forced and not emergency_radio_wanted(name, reason, self.d.airplane, self.d.conf):
+            return
+        if self.radio_online is not None or self.radio_pending:
+            return
+        if not forced and self.modem.get_power_state() == Mm.ModemPowerState.ON:
+            self.radio_online = time.monotonic()
+            return
+        self.radio_pending = True
+        why = (
+            "an emergency call"
+            if forced
+            else ("no SIM" if name == "failed" else "the SIM waits for its PIN")
+        )
+        if st == Mm.ModemState.FAILED:
+            # ModemManager allows "on" in the failed state for exactly this.
+            self.modem.set_power_state(Mm.ModemPowerState.ON, None, self._radio_on_mm, why)
+        else:
+            self._radio_on_qmi(why)
+
+    def _radio_on_mm(self, modem, res, why):
+        try:
+            modem.set_power_state_finish(res)
+        except GLib.Error as e:
+            log(
+                "radio on for emergency calls (%s): ModemManager refused (%s), over QMI"
+                % (why, e.message)
+            )
+            self._radio_on_qmi(why)
+            return
+        self._radio_is_on(why)
+
+    def _radio_on_qmi(self, why):
+        """The DMS operating mode online, as duo2-modem-lpm sets low-power
+        (a RAM setting: no NV write); ModemManager does not allow "on" for a
+        locked modem."""
+        try:
+            p = subprocess.Popen(
+                [QMICLI, "-d", "qrtr://0", "--dms-set-operating-mode=online"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+        except OSError as e:
+            self.radio_pending = False
+            log("radio on for emergency calls (%s): %s" % (why, e))
+            return
+        GLib.child_watch_add(GLib.PRIORITY_DEFAULT, p.pid, self._qmi_done, (p, why))
+
+    def _qmi_done(self, _pid, status, data):
+        # GLib reaped the child: its status is the truth (Popen.wait would
+        # see ECHILD and call it a success).
+        p, why = data
+        try:
+            code = os.waitstatus_to_exitcode(status)
+        except ValueError:
+            code = -1
+        if code == 0:
+            self._radio_is_on(why)
+        else:
+            self.radio_pending = False
+            err = (p.stderr.read() or b"").decode("utf-8", "replace").strip() if p.stderr else ""
+            log("radio on for emergency calls (%s) failed: %s" % (why, err or code))
+
+    def _radio_is_on(self, why):
+        self.radio_pending = False
+        self.radio_online = time.monotonic()
+        log("radio on (%s): emergency calls only until the SIM is usable" % why)
+        self.evaluate()
+
+    def watch_voice(self):
+        voice = self.obj.get_modem_voice()
+        if voice is self.voice:
+            return
+        self.unwatch_voice()
+        self.voice = voice
+        if voice is not None:
+            self.voice_handlers = [
+                voice.connect("call-added", self.call_added),
+                voice.connect("call-deleted", self.call_deleted),
+            ]
+
+    def unwatch_voice(self):
+        for h in self.voice_handlers:
+            try:
+                self.voice.handler_disconnect(h)
+            except (TypeError, AttributeError):
+                pass
+        self.voice_handlers = []
+        self.voice = None
+
+    def find_call(self, path):
+        if self.voice is None:
+            return None
+        try:
+            calls = self.voice.list_calls_sync(None) or []
+        except GLib.Error:
+            return None
+        return next((c for c in calls if c.get_path() == path), None)
+
+    def emergency_context(self):
+        """(SIM present, the SIM's emergency numbers, the MCCs) for is_emergency."""
+        st = self.state()
+        present = not (
+            st == Mm.ModemState.FAILED
+            and self.modem.get_state_failed_reason() == Mm.ModemStateFailedReason.SIM_MISSING
+        )
+        mccs = []
+        if self.m3gpp:
+            code = self.m3gpp.get_operator_code() or ""
+            if code:
+                mccs.append(code[:3])
+        sim_numbers = ()
+        try:
+            sim = (
+                self.modem.get_sim_sync(None)
+                if present and self.modem.dup_sim_path() not in (None, "", "/")
+                else None
+            )
+        except GLib.Error:
+            sim = None
+        if sim is not None:
+            sim_numbers = (
+                tuple(sim.dup_emergency_numbers() or ())
+                if hasattr(sim, "dup_emergency_numbers")
+                else ()
+            )
+            ident = sim.get_operator_identifier() or ""
+            if ident:
+                mccs.append(ident[:3])
+        return present, sim_numbers, mccs
+
+    def radio_off(self):
+        """Whether the radio is off now (an emergency call would fail)."""
+        if self.d.airplane or self.cycling:
+            return True
+        st = self.state()
+        if st in (Mm.ModemState.FAILED, Mm.ModemState.LOCKED):
+            return (
+                self.radio_online is None and self.modem.get_power_state() != Mm.ModemPowerState.ON
+            )
+        if st >= Mm.ModemState.ENABLED:
+            return False
+        return self.modem.get_power_state() != Mm.ModemPowerState.ON
+
+    def emergency_active(self):
+        return (
+            self.attempt is not None
+            and self.attempt.get("forced")
+            and time.monotonic() - self.attempt["created"] <= REDIAL_WINDOW
+        )
+
+    def call_added(self, _voice, path):
+        call = self.find_call(path)
+        if call is None or call.get_direction() != Mm.CallDirection.OUTGOING:
+            return
+        number = dialled_digits(call.get_number() or "")
+        present, sim_numbers, mccs = self.emergency_context()
+        test = dialled_digits(self.d.conf.get("EMERGENCY_TEST_NUMBER", ""))
+        if test and number == test:
+            label = "the test number (EMERGENCY_TEST_NUMBER)"
+        elif is_emergency(number, present, sim_numbers, mccs):
+            label = number
+        else:
+            return
+        ours = path == self.redial_path
+        off = self.radio_off()
+        log(
+            "emergency call to %s%s"
+            % (
+                label,
+                " (dialled again)"
+                if ours
+                else ": the radio is off, switching it on"
+                if off
+                else "",
+            )
+        )
+        redialled = bool(
+            ours
+            or (
+                self.attempt
+                and self.attempt.get("redialled")
+                and self.attempt.get("number") == number
+            )
+        )
+        self.drop_attempt()
+        self.attempt = {
+            "path": path,
+            "number": number,
+            "created": time.monotonic(),
+            "forced": off and not ours,
+            "redialled": redialled,
+            "states": set(),
+            "ended": None,
+            "enabled": False,
+        }
+        self.track(call)
+        if off:
+            self.emergency_radio_on()
+
+    def track(self, call):
+        def changed(_c, _old, new, reason):
+            if self.attempt is None or self.attempt["path"] != call.get_path():
+                return
+            self.attempt["states"].add(Mm.call_state_get_string(new))
+            if new == Mm.CallState.TERMINATED:
+                self.attempt["ended"] = Mm.call_state_reason_get_string(reason)
+                self.check_attempt()
+
+        self.call_handlers = [(call, call.connect("state-changed", changed))]
+        self.attempt["states"].add(Mm.call_state_get_string(call.get_state()))
+
+    def call_deleted(self, _voice, path):
+        if (
+            self.attempt is not None
+            and self.attempt["path"] == path
+            and self.attempt["ended"] is None
+        ):
+            # Gone without a word on how it ended: no redial (it may have been a hang-up).
+            self.drop_attempt()
+
+    def drop_attempt(self):
+        for c, h in self.call_handlers:
+            try:
+                c.handler_disconnect(h)
+            except TypeError:
+                pass
+        self.call_handlers = []
+        if self.attempt_timer:
+            GLib.source_remove(self.attempt_timer)
+            self.attempt_timer = 0
+        self.attempt = None
+
+    def emergency_radio_on(self):
+        """The radio on for an emergency call that is being dialled:
+        airplane mode off (as Android does; WiFi and Bluetooth stay as they
+        are), the radio cycle's wait cut short, a disabled modem enabled, a
+        modem without a usable SIM online."""
+        if self.d.airplane:
+            log("emergency call: airplane mode off")
+            try:
+                os.makedirs(os.path.dirname(AIRPLANE_SWITCH), exist_ok=True)
+                with open(AIRPLANE_SWITCH + ".tmp", "w") as f:
+                    f.write("off\n")
+                os.replace(AIRPLANE_SWITCH + ".tmp", AIRPLANE_SWITCH)
+            except OSError as e:
+                log("cannot write %s: %s" % (AIRPLANE_SWITCH, e))
+            self.d.airplane_changed()
+        if self.cycle_timer:
+            GLib.source_remove(self.cycle_timer)
+            self.cycle_timer = 0
+            self._cycle_up()
+            return
+        st = self.state()
+        if self.busy or self.cycling:
+            return  # evaluate() comes again at the end of that step
+        if st in (Mm.ModemState.FAILED, Mm.ModemState.LOCKED):
+            self.emergency_radio(st, forced=True)
+        else:
+            self.evaluate()
+
+    def radio_ready(self, number):
+        st = self.state()
+        if self.d.airplane or self.cycling or self.busy:
+            return False
+        registered = st >= Mm.ModemState.REGISTERED
+        if not registered:
+            present, sim_numbers, _mccs = self.emergency_context()
+            if not mm_lets_through_unregistered(number, present, sim_numbers):
+                return False  # a national number: ModemManager wants the registration
+        return radio_settled(self.radio_up_at, time.monotonic(), registered)
+
+    def check_attempt(self):
+        if self.attempt is None:
+            return False
+        due = redial_due(self.attempt, time.monotonic(), self.radio_ready(self.attempt["number"]))
+        if due == "wait":
+            if not self.attempt_timer:
+                self.attempt_timer = GLib.timeout_add_seconds(1, self._attempt_tick)
+            return True
+        if due == "redial":
+            self.redial(self.attempt["number"])
+        self.drop_attempt()
+        return False
+
+    def _attempt_tick(self):
+        self.attempt_timer = 0
+        self.check_attempt()
+        return False
+
+    def redial(self, number):
+        if self.voice is None:
+            return
+        log(
+            "emergency call to %s again: the first attempt failed with the radio off"
+            % (
+                "the test number"
+                if number == dialled_digits(self.d.conf.get("EMERGENCY_TEST_NUMBER", ""))
+                else number
+            )
+        )
+        props = Mm.CallProperties.new()
+        props.set_number(number)
+        self.voice.create_call(props, None, self._redial_created, number)
+
+    def _redial_created(self, voice, res, number):
+        try:
+            call = voice.create_call_finish(res)
+        except GLib.Error as e:
+            log("emergency call to %s again: %s" % (number, e.message))
+            return
+        self.redial_path = call.get_path()
+
+        def start():
+            # GNOME Calls starts an outgoing call it sees; nobody did.
+            if call.get_state() == Mm.CallState.UNKNOWN:
+                call.start(None, lambda c, r: self._started(c, r, number))
+            return False
+
+        GLib.timeout_add_seconds(START_GRACE, start)
+
+    def _started(self, call, res, number):
+        try:
+            call.start_finish(res)
+        except GLib.Error as e:
+            log("emergency call to %s: starting it failed: %s" % (number, e.message))
+
+    # -- registered without packet service (reject cause #7) ---------------------------
+
+    def watch_packet_service(self, attached):
+        if attached or not self.d.data_on() or not self.registered_ok():
+            self.cancel_ps()
+            return
+        if not self.ps_timer:
+            self.ps_timer = GLib.timeout_add_seconds(PS_GRACE, self._ps_due)
+
+    def cancel_ps(self):
+        if self.ps_timer:
+            GLib.source_remove(self.ps_timer)
+            self.ps_timer = 0
+
+    def rejection(self):
+        get = getattr(self.m3gpp, "get_network_rejection", None) if self.m3gpp else None
+        try:
+            rej = get() if get else None
+            err = rej.get_error() if rej else Mm.NetworkError.NONE
+            if not err or err == Mm.NetworkError.NONE:
+                return ""
+            return " (network reject: %s, cause #%d)" % (Mm.network_error_get_string(err), int(err))
+        except (AttributeError, TypeError):
+            return ""
+
+    def in_call(self):
+        voice = self.obj.get_modem_voice()
+        get = (
+            getattr(voice, "dup_calls", None) or getattr(voice, "get_calls", None)
+            if voice
+            else None
+        )
+        try:
+            return bool(get and get())
+        except TypeError:
+            return False
+
+    def call_busy(self):
+        """A call dialling, ringing, active, held or waiting (a terminated
+        call object left for the app to delete does not count)."""
+        voice = self.obj.get_modem_voice()
+        if voice is None:
+            return False
+        try:
+            calls = voice.list_calls_sync(None) or []
+        except GLib.Error:
+            return True  # cannot tell: as if there were one
+        s = Mm.CallState
+        busy = {s.DIALING, s.RINGING_OUT, s.RINGING_IN, s.ACTIVE, s.HELD, s.WAITING}
+        return any(c.get_state() in busy for c in calls)
+
+    def _ps_due(self):
+        self.ps_timer = 0
+        if (
+            self.cycling
+            or self.busy
+            or self.d.airplane
+            or self.state() < Mm.ModemState.REGISTERED
+            or self.packet_attached()
+            or not self.d.data_on()
+            or not self.registered_ok()
+        ):
+            return False
+        due = ps_cycle_due(time.monotonic(), self.ps_last, self.ps_cycles)
+        if due is False:
+            if not self.ps_gave_up:
+                self.ps_gave_up = True
+                log(
+                    "still no packet service after %d radio cycles: left alone until the modem "
+                    "appears anew (airplane mode off / on, a restart)" % PS_CYCLES
+                )
+            return False
+        if due is not True:
+            self.ps_timer = GLib.timeout_add_seconds(due, self._ps_due)
+            return False
+        if self.in_call():
+            self.ps_timer = GLib.timeout_add_seconds(60, self._ps_due)
+            return False
+        self.ps_cycles += 1
+        self.ps_last = time.monotonic()
+        log(
+            "registered for %d s without packet service%s: a low-power radio cycle (%d of %d)"
+            % (PS_GRACE, self.rejection(), self.ps_cycles, PS_CYCLES)
+        )
+        self.radio_cycle()
+        return False
+
+    def radio_cycle(self):
+        """Disable, low power, enable: what clears a reject cause #7 state."""
+        self.cycling = True
+        self.cancel_retry()
+        self.drop_bearer()
+        self.d.net.down()
+        if self.state() >= Mm.ModemState.ENABLED:
+            self.modem.disable(None, self._cycle_disabled)
+        else:
+            self._cycle_disabled(self.modem, None)
+
+    def _cycle_disabled(self, modem, res):
+        if res is not None:
+            try:
+                modem.disable_finish(res)
+            except GLib.Error as e:
+                log("radio cycle: disabling failed: %s" % e.message)
+                self.cycling = False
+                self.evaluate()
+                return
+        modem.set_power_state(Mm.ModemPowerState.LOW, None, self._cycle_low)
+
+    def _cycle_low(self, modem, res):
+        try:
+            modem.set_power_state_finish(res)
+        except GLib.Error as e:
+            log("radio cycle: low power failed: %s" % e.message)
+        # An emergency call dialled meanwhile does not wait the 3 s.
+        self.cycle_timer = GLib.timeout_add_seconds(
+            0 if self.emergency_active() else 3, self._cycle_up
+        )
+
+    def _cycle_up(self):
+        self.cycle_timer = 0
+        self.cycling = False
+        if self.d.airplane or not yes(self.d.conf["ENABLE"]):
+            self.evaluate()
+            return False
+        self.enabled_once = True
+        self.retry = 0
+        log("radio cycle: enabling the modem")
+        self.enable()
+        return False
+
+    def packet_attached(self):
+        get = getattr(self.m3gpp, "get_packet_service_state", None) if self.m3gpp else None
+        return bool(get) and get() == Mm.Modem3gppPacketServiceState.ATTACHED
+
+    def carrier_apn(self):
+        """No APN configured: the one the modem attaches LTE with, from the
+        carrier profile the modem picked for this SIM (like Android's carrier
+        config); ModemManager refuses a 3GPP connection without an APN."""
+        get = getattr(self.m3gpp, "get_initial_eps_bearer_settings", None) if self.m3gpp else None
+        settings = get() if get else None
+        return (settings.get_apn() or "") if settings else ""
+
+    def data_apn(self):
+        """The APN our data bearer connects with."""
+        return self.d.conf["APN"] or self.carrier_apn()
+
+    def own_bearers(self):
+        """ModemManager's bearers for our APN (connected or not)."""
+        apn = self.data_apn()
+        return [b for b in self.modem.list_bearers_sync(None) or [] if own_apn(bearer_apn(b), apn)]
+
+    def note_foreign(self, bearer):
+        path = bearer.get_path()
+        if path in self.foreign_seen:
+            return
+        self.foreign_seen.add(path)
+        log(
+            "bearer %s (APN %s, %s) belongs to another program: left alone"
+            % (
+                path.rsplit("/", 1)[-1],
+                bearer_apn(bearer) or "none",
+                bearer.get_interface() or "no device",
+            )
+        )
+
+    def enable(self):
+        self.enabling = True
+        self.modem.enable(None, self._enabled)
+
+    def _enabled(self, modem, res):
+        self.enabling = False
+        try:
+            modem.enable_finish(res)
+            log("modem enabled")
+        except GLib.Error as e:
+            log("enabling failed: %s" % e.message)
+        self.evaluate()
+
+    def registered_ok(self):
+        if not self.m3gpp:
+            return True
+        r = Mm.Modem3gppRegistrationState
+        reg = self.m3gpp.get_registration_state()
+        if reg in (r.HOME, r.HOME_CSFB_NOT_PREFERRED):
+            return True
+        if reg in (r.ROAMING, r.ROAMING_CSFB_NOT_PREFERRED):
+            return yes(self.d.conf["ROAMING"])
+        return False
+
+    def maybe_connect(self):
+        c = self.d.conf
+        if not self.d.data_on() or self.connecting or self.timer:
+            return
+        if self.bearer and self.bearer.get_connected():
+            return
+        if not self.registered_ok():
+            return
+        # Our bearer connected before a restart of ours (or by hand). Another
+        # program's (the IMS ones: 81voltd) is not adopted: its link stays
+        # unconfigured, and our own is connected beside it.
+        apn = self.data_apn()
+        for b in self.modem.list_bearers_sync(None) or []:
+            if not b.get_connected():
+                continue
+            if own_apn(bearer_apn(b), apn):
+                self.watch_bearer(b)
+                self.d.net.up(b)
+                return
+            self.note_foreign(b)
+        props = Mm.SimpleConnectProperties.new()
+        if apn:
+            props.set_apn(apn)
+        fam = {
+            "ipv4": Mm.BearerIpFamily.IPV4,
+            "ipv6": Mm.BearerIpFamily.IPV6,
+            "ipv4v6": Mm.BearerIpFamily.IPV4V6,
+        }.get(c["IP_TYPE"].lower(), Mm.BearerIpFamily.IPV4V6)
+        props.set_ip_type(fam)
+        props.set_allow_roaming(yes(c["ROAMING"]))
+        if c["APN_USER"]:
+            props.set_user(c["APN_USER"])
+        if c["APN_PASSWORD"]:
+            props.set_password(c["APN_PASSWORD"])
+        self.connecting = True
+        log(
+            "connecting data (APN %s)"
+            % (c["APN"] or ("%s, the carrier profile's" % apn if apn else "the network's default"))
+        )
+        self.simple.connect(props, None, self._connected)
+
+    def _connected(self, simple, res):
+        self.connecting = False
+        try:
+            bearer = simple.connect_finish(res)
+        except GLib.Error as e:
+            log("data connection failed: %s" % e.message)
+            self.schedule_retry()
+            return
+        self.retry = 0
+        self.watch_bearer(bearer)
+        self.d.net.up(bearer)
+
+    def watch_bearer(self, bearer):
+        if self.bearer is bearer:
+            return
+        self.drop_bearer()
+        self.bearer = bearer
+        # GObject's connect: MMBearer.connect() is the bearer's D-Bus Connect.
+        self.bearer_handler = GObject.Object.connect(
+            bearer, "notify::connected", self._bearer_changed
+        )
+
+    def drop_bearer(self):
+        if self.bearer and self.bearer_handler:
+            # not MMBearer.disconnect(): that would take the data connection down
+            self.bearer.handler_disconnect(self.bearer_handler)
+        self.bearer = None
+        self.bearer_handler = None
+
+    def _bearer_changed(self, bearer, _pspec):
+        if bearer.get_connected():
+            self.d.net.up(bearer)
+            return
+        log("data bearer disconnected")
+        self.d.net.down()
+        self.drop_bearer()
+        if self.d.data_on():
+            self.schedule_retry()
+
+    def data_switched(self):
+        """The user switched mobile data: off disconnects now (and no retry),
+        on connects when registered."""
+        if self.d.data_on():
+            self.retry = 0
+            self.evaluate()
+            return
+        self.cancel_retry()
+        self.cancel_ps()
+        # Only our own bearer: Simple.Disconnect without a bearer would take
+        # every bearer down, the IMS one (VoLTE) too.
+        mine = {}
+        if self.bearer is not None:
+            mine[self.bearer.get_path()] = self.bearer
+        if self.state() >= Mm.ModemState.ENABLED:
+            for b in self.own_bearers():
+                mine.setdefault(b.get_path(), b)
+        self.drop_bearer()
+        self.d.net.down()
+        for b in mine.values():
+            if b.get_connected():
+                log("mobile data switched off: disconnecting %s" % b.get_path().rsplit("/", 1)[-1])
+                # MMBearer.disconnect(): the bearer's D-Bus Disconnect
+                b.disconnect(None, self._disconnected)
+
+    def _disconnected(self, bearer, res):
+        try:
+            bearer.disconnect_finish(res)
+        except GLib.Error as e:
+            log("disconnecting failed: %s" % e.message)
+
+    def schedule_retry(self):
+        if self.timer:
+            return
+        pause = RETRY[min(self.retry, len(RETRY) - 1)]
+        self.retry += 1
+        log("next data attempt in %d s" % pause)
+        self.timer = GLib.timeout_add_seconds(pause, self._retry_now)
+
+    def _retry_now(self):
+        self.timer = 0
+        if self.state() >= Mm.ModemState.REGISTERED:
+            self.maybe_connect()
+        return False
+
+
+class Daemon:
+    def __init__(self):
+        self.conf = read_conf()
+        try:
+            metric = int(self.conf["ROUTE_METRIC"])
+        except ValueError:
+            metric = 4096
+        self.net = Net(metric)
+        self.nr = SmartNr(self)
+        self.panels = Panels(lambda: self.nr.evaluate())
+        self.modems = {}
+        self.provision_tries = 0
+        self.switch = read_switch()
+        self.switch_monitor = Gio.File.new_for_path(DATA_SWITCH).monitor_file(
+            Gio.FileMonitorFlags.NONE, None
+        )
+        self.switch_monitor.connect("changed", lambda *a: self.switch_changed())
+        self.airplane = read_switch(AIRPLANE_SWITCH) is True
+        self.airplane_monitor = Gio.File.new_for_path(AIRPLANE_SWITCH).monitor_file(
+            Gio.FileMonitorFlags.NONE, None
+        )
+        self.airplane_monitor.connect("changed", lambda *a: self.airplane_changed())
+        self.sharing = read_hotspot()
+        try:
+            os.makedirs(
+                os.path.dirname(HOTSPOT_STATE), exist_ok=True
+            )  # inotify needs the directory
+        except OSError:
+            pass
+        self.hotspot_monitor = Gio.File.new_for_path(HOTSPOT_STATE).monitor_file(
+            Gio.FileMonitorFlags.NONE, None
+        )
+        self.hotspot_monitor.connect("changed", lambda *a: self.hotspot_changed())
+        try:
+            self.routes = RouteWatch(self.routes_changed)
+        except OSError as e:
+            log("no netlink route watch (%s): the IPv6 route does not follow WiFi" % e)
+        bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+        self.sleep = SleepWatch(bus, self.nr.before_sleep, self.nr.after_sleep)
+        self.mgr = Mm.Manager.new_sync(
+            bus, Gio.DBusObjectManagerClientFlags.DO_NOT_AUTO_START, None
+        )
+        self.mgr.connect("object-added", lambda m, o: self.add(o))
+        self.mgr.connect("object-removed", lambda m, o: self.remove(o))
+        self.mgr.connect("notify::name-owner", lambda *a: self.owner_changed())
+        log(
+            "duo2-wwan: ENABLE=%s DATA=%s switch=%s airplane=%s APN=%s ROAMING=%s metric %d SMART_5G=%s"
+            % (
+                self.conf["ENABLE"],
+                self.conf["DATA"],
+                {True: "on", False: "off", None: "-"}[self.switch],
+                "on" if self.airplane else "off",
+                self.conf["APN"] or "(default)",
+                self.conf["ROAMING"],
+                metric,
+                self.conf["SMART_5G"],
+            )
+        )
+        self.owner_changed()
+
+    def routes_changed(self):
+        self.net.routes_changed()
+        self.nr.evaluate()
+
+    def data_on(self):
+        """Mobile data wanted: not in airplane mode, then the user's switch,
+        else wwan.conf's DATA."""
+        if self.airplane:
+            return False
+        return self.switch if self.switch is not None else yes(self.conf["DATA"])
+
+    def airplane_changed(self):
+        airplane = read_switch(AIRPLANE_SWITCH) is True
+        if airplane == self.airplane:
+            return
+        self.airplane = airplane
+        log("airplane mode switch: %s" % ("on" if airplane else "off"))
+        for m in self.modems.values():
+            m.airplane_switched()
+        self.nr.evaluate()
+
+    def hotspot_changed(self):
+        sharing = read_hotspot()
+        if sharing == self.sharing:
+            return
+        self.sharing = sharing
+        log(
+            "hotspot: %s"
+            % ("devices on it (data in use for smart 5G)" if sharing else "no device on it")
+        )
+        self.nr.evaluate()
+
+    def switch_changed(self):
+        switch = read_switch()
+        if switch == self.switch:
+            return
+        self.switch = switch
+        log("mobile data switch: %s" % {True: "on", False: "off", None: "(DATA)"}[switch])
+        for m in self.modems.values():
+            m.data_switched()
+        self.nr.evaluate()
+
+    def owner_changed(self):
+        if not self.mgr.get_name_owner():
+            log("ModemManager is not running")
+            for path in list(self.modems):
+                self.modems.pop(path).gone()
+            return
+        for o in self.mgr.get_objects():
+            self.add(o)
+
+    def add(self, obj):
+        path = obj.get_object_path()
+        if path in self.modems or not obj.get_modem():
+            return
+        self.modems[path] = Modem(self, obj)
+
+    def remove(self, obj):
+        m = self.modems.pop(obj.get_object_path(), None)
+        if m:
+            log("modem %s gone" % m.path)
+            m.gone()
+
+
+def main():
+    d = Daemon()
+    loop = GLib.MainLoop()
+    for sig in (15, 2):
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, loop.quit)
+    loop.run()
+    # The bearer stays up (ModemManager's); its routes and DNS go with us and
+    # come back when duo2-wwan starts again and finds it connected.
+    d.net.down()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

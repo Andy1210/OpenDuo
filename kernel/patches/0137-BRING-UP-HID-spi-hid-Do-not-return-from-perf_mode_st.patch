@@ -1,0 +1,43 @@
+From 3f61fb4a7a051af666230eada7b50cfc31c88444 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Tue, 17 Nov 2026 01:31:21 +0100
+Subject: [PATCH 137/137] BRING-UP: HID: spi-hid: Do not return from
+ perf_mode_store with the lock held
+
+spi_hid_perf_mode_store() took input_lock with spin_lock_irqsave() and then
+returned -EINVAL from a failed kstrtou8() without releasing it, leaving the
+lock held and interrupts off on that CPU after root wrote a non-number to
+the spi_hid_perf_mode attribute. It also overwrote perf_mode with whatever
+kstrtou8() had half-parsed before failing.
+
+Parse the value first, and take the lock only to store it and reset the
+latency log. The error code of kstrtou8() is returned as is.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/hid/spi-hid/spi-hid-core.c | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/hid/spi-hid/spi-hid-core.c b/drivers/hid/spi-hid/spi-hid-core.c
+index 22bbb7eeaa52..502f1d56c50a 100644
+--- a/drivers/hid/spi-hid/spi-hid-core.c
++++ b/drivers/hid/spi-hid/spi-hid-core.c
+@@ -1523,10 +1523,16 @@ static ssize_t spi_hid_perf_mode_store(struct device *dev,
+ {
+ 	struct spi_hid *shid = dev_get_drvdata(dev);
+ 	unsigned long flags;
++	u8 mode;
++	int ret;
++
++	/* Parse before taking the lock: an error must not leave it held. */
++	ret = kstrtou8(buf, 10, &mode);
++	if (ret)
++		return ret;
+ 
+ 	spin_lock_irqsave(&shid->input_lock, flags);
+-	if (kstrtou8(buf, 10, &shid->perf_mode))
+-		return -EINVAL;
++	shid->perf_mode = mode;
+ 
+ 	// Reset the log
+ 	if (shid->perf_mode) {

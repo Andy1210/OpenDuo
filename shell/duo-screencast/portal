@@ -1,0 +1,20 @@
+#!/bin/sh
+# The screen-cast portal backend, xdg-desktop-portal-wlr, as duo-wc's session
+# starts it (compositor/duo-wc/dist/session keeps it running; docs/SCREENCAST.md).
+#
+# It gets a Wayland connection that may capture the screen and nothing else
+# guarded (duoctl exec-trusted --capture: no virtual keyboard, no lock, no
+# layer shell), and a capture-only factory (--keep-capture) for the
+# screenshot gate it runs. The session's full trust factory is closed before
+# xdg-desktop-portal-wlr starts. Its D-Bus activation unit is masked: started
+# by the user manager it would have no capture connection.
+#
+# - the config is ours, by path (a file in ~/.config could switch the
+#   chooser off: chooser_type=none shares the screen without asking);
+# - XDPW_PERSIST_MODE unset: every share asks (no restore tokens);
+# - PATH: the screenshot gate (bin/grim) before the real grim.
+set -u
+lib=/usr/local/lib/duo-screencast
+exec duoctl exec-trusted --capture --keep-capture -- \
+    env -u XDPW_PERSIST_MODE PATH="$lib/bin:/usr/local/bin:/usr/bin:/bin" \
+    /usr/libexec/xdg-desktop-portal-wlr --config "$lib/xdpw.conf" --loglevel INFO

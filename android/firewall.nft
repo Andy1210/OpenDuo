@@ -1,0 +1,35 @@
+#!/usr/sbin/nft -f
+# duo2-os: the network of the Waydroid container (docs/hardware/android.md). Loaded by duo2-waydroid-prestart before every
+# container manager start; replaces itself (no other table is touched).
+#
+# Android sits behind waydroid0 (192.168.240.0/24, NATed out by
+# waydroid-net.sh, which also turns ip_forward on). From the container:
+#   - out to the internet / LAN through the phone's uplinks: allowed (NAT)
+#   - to the phone itself: only DHCP and DNS (Waydroid's dnsmasq on
+#     192.168.240.1); sshd and every other host service: dropped, on every
+#     host address (the bridge's, the WiFi one, 127.x via a crafted route ...)
+# To the container: only replies to its own connections; nothing inbound.
+# Nothing else is forwarded: the phone is not a router between its other
+# interfaces (WiFi, USB, mobile data) because Waydroid turned forwarding on.
+# The one exception is what the hotspot's own table (`inet duo2_hotspot`,
+# hotspot/: its devices to and from mobile data only) forwards: it runs
+# before this chain and marks those packets (0x10000000).
+table inet duo2_waydroid
+delete table inet duo2_waydroid
+table inet duo2_waydroid {
+	chain input {
+		type filter hook input priority filter - 10; policy accept;
+		iifname "waydroid0" udp dport { 53, 67 } accept
+		iifname "waydroid0" tcp dport 53 accept
+		iifname "waydroid0" counter drop
+	}
+	chain forward {
+		type filter hook forward priority filter - 10; policy accept;
+		iifname "waydroid0" oifname "waydroid0" counter drop
+		iifname "waydroid0" accept
+		oifname "waydroid0" ct state established,related accept
+		oifname "waydroid0" counter drop
+		meta mark & 0x10000000 == 0x10000000 accept
+		counter drop
+	}
+}

@@ -1,0 +1,33 @@
+[package]
+name = "nibfair"
+version = "0.1.0"
+edition = "2021"
+description = "Nibfair: three pen games (fishing, slicing, pottery) for the Surface Duo 2 and its Slim Pen 2"
+license = "MIT"
+publish = false
+
+[lib]
+name = "nibfair"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nibfair"
+path = "src/main.rs"
+
+[dependencies]
+# SDL 3.2.10 is what Debian trixie (the phone) ships: the bindings of exactly that release.
+sdl3-sys = "=0.4.9"
+fontdue = "0.9"
+
+[build-dependencies]
+cc = "1"
+
+[profile.release]
+opt-level = 3
+codegen-units = 4
+lto = "thin"
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 1

@@ -1,0 +1,146 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""duo2-ssc: look at the Surface Duo 2's sensors on the SLPI (SSC).
+
+  duo2-ssc list [TYPE...]                 sensors and their attributes
+  duo2-ssc watch [-r HZ] [-t SECS] TYPE[:N]...
+                                          enable and print events; :N picks the
+                                          N-th sensor of a type (default: all)
+  duo2-ssc wait [-t SECS] TYPE...         until the SSC lists every TYPE (exit 1
+                                          on timeout): the sensors register a few
+                                          seconds after hexagonrpcd attaches
+
+Types seen on the Duo 2: accel gyro mag ambient_light proximity hall
+hinge_angle posture device_orient sensor_temperature gravity ...
+"""
+
+import argparse
+import sys
+import time
+
+sys.path.insert(0, "/usr/local/lib/duo-posed")
+sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.abspath(__file__)))
+import duo2_ssc as ssc  # noqa: E402
+
+DEFAULT_TYPES = [
+    "accel",
+    "gyro",
+    "mag",
+    "ambient_light",
+    "proximity",
+    "hall",
+    "hinge_angle",
+    "posture",
+    "device_orient",
+    "sensor_temperature",
+    "gravity",
+    "pressure",
+    "sar_posture",
+    "fold",
+    "flip",
+    "device_state",
+    "display_state",
+    "facing",
+]
+
+
+def cmd_list(cli, args):
+    for t in args.types or DEFAULT_TYPES:
+        try:
+            sensors = cli.sensors(t)
+        except ssc.SscError as e:
+            print("%-18s error: %s" % (t, e))
+            continue
+        if not sensors:
+            print("%-18s -" % t)
+        for i, s in enumerate(sensors):
+            print("%-18s [%d] %s" % (t, i, s.describe()))
+            if args.verbose:
+                for aid, v in sorted(s.attrs.items()):
+                    print("%22s attr %d = %r" % ("", aid, v))
+
+
+def cmd_watch(cli, args):
+    chosen = []
+    for spec in args.types:
+        t, _, n = spec.partition(":")
+        sensors = cli.sensors(t)
+        if not sensors:
+            sys.exit("no %s sensor" % t)
+        chosen += [sensors[int(n)]] if n else sensors
+    for s in chosen:
+        cli.enable(s, rate_hz=args.rate)
+        print("enabled %s" % s.describe(), flush=True)
+    by_suid = {s.suid: s for s in chosen}
+    t0 = time.monotonic()
+    try:
+        while args.time <= 0 or time.monotonic() - t0 < args.time:
+            for suid, mid, _ts, payload in cli.events(0.5):
+                s = by_suid.get(suid)
+                name = ("%s/hw%s" % (s.name, s.hw_id)) if s else "%x" % suid[0]
+                print(
+                    "%8.3f %-28s %s"
+                    % (time.monotonic() - t0, name, ssc.describe_event(s, mid, payload)),
+                    flush=True,
+                )
+    except KeyboardInterrupt:
+        pass
+    finally:
+        for s in chosen:
+            try:
+                cli.disable(s)
+            except ssc.SscError:
+                pass
+
+
+def cmd_wait(args):
+    t0 = time.monotonic()
+    missing = list(args.types)
+    while True:
+        try:
+            cli = ssc.SscClient(timeout=5)
+            try:
+                missing = [t for t in missing if not cli.lookup(t, timeout=3)]
+            finally:
+                cli.close()
+        except (ssc.SscError, OSError):
+            pass
+        if not missing:
+            print(
+                "SSC sensors present after %.1f s: %s"
+                % (time.monotonic() - t0, " ".join(args.types))
+            )
+            return 0
+        if time.monotonic() - t0 >= args.time:
+            print("SSC sensors still missing after %.0f s: %s" % (args.time, " ".join(missing)))
+            return 1
+        time.sleep(1)
+
+
+def main():
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+    pl = sub.add_parser("list")
+    pl.add_argument("-v", "--verbose", action="store_true")
+    pl.add_argument("types", nargs="*")
+    pw = sub.add_parser("watch")
+    pw.add_argument("-r", "--rate", type=float, default=5.0, help="streaming rate, Hz")
+    pw.add_argument("-t", "--time", type=float, default=0, help="stop after SECS")
+    pw.add_argument("types", nargs="+")
+    pa = sub.add_parser("wait")
+    pa.add_argument("-t", "--time", type=float, default=60)
+    pa.add_argument("types", nargs="+")
+    args = p.parse_args()
+    if args.cmd == "wait":
+        sys.exit(cmd_wait(args))
+    cli = ssc.SscClient()
+    try:
+        {"list": cmd_list, "watch": cmd_watch}[args.cmd](cli, args)
+    finally:
+        cli.close()
+
+
+if __name__ == "__main__":
+    main()

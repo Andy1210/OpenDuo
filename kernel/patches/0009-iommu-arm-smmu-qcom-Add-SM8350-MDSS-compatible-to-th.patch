@@ -1,0 +1,34 @@
+From bdf611ae63cb4f5ec405f6fd9c883f0cbccce561 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Fri, 6 Nov 2026 09:09:53 +0100
+Subject: [PATCH 009/137] iommu/arm-smmu-qcom: Add SM8350 MDSS compatible to
+ the identity-domain list
+
+The display subsystem of SM8350 is missing from qcom_smmu_client_of_match,
+so it gets a translated default domain. When the device is added to its
+IOMMU group, the scanout the firmware left running (an EFI GOP framebuffer
+at a physical address) starts taking translation faults:
+
+  arm-smmu 15000000.iommu: Unhandled context fault: fsr=0x402,
+  iova=0xe1000000, fsynr=0x110021, cbfrsynra=0x820, cb=5
+
+and both panels of a Surface Duo 2 go black about 22 s into boot. Its
+neighbours sm8250 and sm8450 are already listed.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/iommu/arm/arm-smmu/arm-smmu-qcom.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/iommu/arm/arm-smmu/arm-smmu-qcom.c b/drivers/iommu/arm/arm-smmu/arm-smmu-qcom.c
+index 795e8ec7e8fa..3dd8335c4fd7 100644
+--- a/drivers/iommu/arm/arm-smmu/arm-smmu-qcom.c
++++ b/drivers/iommu/arm/arm-smmu/arm-smmu-qcom.c
+@@ -425,6 +425,7 @@ static const struct of_device_id qcom_smmu_client_of_match[] __maybe_unused = {
+ 	{ .compatible = "qcom,sm6375-mdss" },
+ 	{ .compatible = "qcom,sm8150-mdss" },
+ 	{ .compatible = "qcom,sm8250-mdss" },
++	{ .compatible = "qcom,sm8350-mdss" },
+ 	{ .compatible = "qcom,sm8450-mdss" },
+ 	{ .compatible = "qcom,x1e80100-mdss" },
+ 	{ }

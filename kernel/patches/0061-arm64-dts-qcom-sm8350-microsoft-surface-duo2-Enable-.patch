@@ -1,0 +1,67 @@
+From 7a1e51c1e37182e3970828f4799e57faaa5d8670 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 06:04:45 +0100
+Subject: [PATCH 061/137] arm64: dts: qcom: sm8350-microsoft-surface-duo2:
+ Enable the CCIs and the camera EEPROMs
+
+Enable both camera control interfaces and describe the two I2C EEPROMs
+on CCI1: the ST M24C64-X of the ultrawide camera (bus 0, 0x50) and the
+onsemi N24S64B of the front camera (bus 1, 0x50). The stock power
+sequence for reading them raises only the 1.8 V camera I/O rail
+(PM8008j L3) with the sensor held in reset. Both are read-only: they
+hold the factory calibration of the camera modules.
+
+The comment lists what else sits on the four buses (vendor DT and
+camera module descriptions); none of it has a driver yet.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../qcom/sm8350-microsoft-surface-duo2.dts    | 35 +++++++++++++++++++
+ 1 file changed, 35 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+index deffad5a6ddb..f2f8cecc81d5 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+@@ -549,6 +549,41 @@ vreg_l1d_1p2: ldo1 {
+ 	};
+ };
+ 
++/*
++ * The camera control interfaces. CCI0: tele (bus 0: IMX481 0x1a, LC898129
++ * AF/OIS + calibration 0x3c) and wide (bus 1: IMX563 0x1a, LC898129 0x3b).
++ * CCI1: ultrawide (bus 0: IMX481 0x10, M24C64-X 0x50) and front (bus 1:
++ * IMX481 0x1a, N24S64B 0x50, TMF8801 time-of-flight 0x41). The sensors and
++ * the LC898129s have no driver yet; the two EEPROMs need only DOVDD (the
++ * stock power sequence of their reads) and are read-only: they hold the
++ * factory calibration of the modules.
++ */
++&cci0 {
++	status = "okay";
++};
++
++&cci1 {
++	status = "okay";
++};
++
++&cci1_i2c0 {
++	eeprom@50 {
++		compatible = "st,24c64", "atmel,24c64";
++		reg = <0x50>;
++		vcc-supply = <&vreg_l3j_1p8>;
++		read-only;
++	};
++};
++
++&cci1_i2c1 {
++	eeprom@50 {
++		compatible = "onnn,n24s64b", "atmel,24c64";
++		reg = <0x50>;
++		vcc-supply = <&vreg_l3j_1p8>;
++		read-only;
++	};
++};
++
+ &cdsp {
+ 	status = "okay";
+ 	firmware-name = "qcom/sm8350/microsoft/cdsp.mbn";

@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# The vibration motor (PM8350B haptics, qcom-spmi-haptics): find its input
+# force-feedback device, print what it offers, and play each kind of effect
+# once with a pause between them, reading the haptics registers before and
+# after.
+#
+#   scripts/duo2-vibra-test [regs|rumble|sine|constant|fifo|all]   (default all)
+#
+#   regs      only the register dump, nothing is played
+#   rumble    FF_RUMBLE, strong then weak, 300 ms each (feedbackd's effect)
+#   sine      FF_PERIODIC / FF_SINE, 300 ms (DIRECT_PLAY)
+#   constant  FF_CONSTANT at half level, 300 ms (DIRECT_PLAY)
+#   fifo      FF_PERIODIC / FF_CUSTOM: 250 ms of a 163 Hz sine as 8 kHz PCM
+#             (2000 samples: the 640-sample FIFO is refilled from the
+#             FIFO-empty interrupt)
+#
+# Runs as the administrator with sudo (the node belongs to root:feedbackd).
+# Whether it vibrated is for a hand on the phone to tell; the script reports
+# what the hardware says (faults, the boost, HAPTICS_EN back off after the
+# 1 s autosuspend).
+set -euo pipefail
+. "$(dirname "$0")/lib/remote.sh"
+WHAT=${1:-all}
+case $WHAT in regs|rumble|sine|constant|fifo|all) ;; *) echo "usage: $0 [regs|rumble|sine|constant|fifo|all]" >&2; exit 2 ;; esac
+
+duo2_ssh "sudo python3 -I - $WHAT" <<'PY'
+import ctypes, fcntl, os, struct, sys, time
+
+what = sys.argv[1]
+
+# ---- the haptics registers through regmap debugfs (pm8350b = SPMI SID 3)
+REGS = "/sys/kernel/debug/regmap/0-03/registers"
+NAMES = [
+    (0xf00c, "CFG FAULT_STATUS"), (0xf010, "CFG INT_RT_STS"),
+    (0xf046, "CFG EN_CTL"), (0xf048, "CFG VMAX"), (0xf049, "CFG DRV_WF_SEL"),
+    (0xf04c, "CFG SPMI_PLAY"), (0xf04e, "CFG SWR_ACCESS"),
+    (0xf05c, "CFG TLRA_OL_HIGH"), (0xf05d, "CFG TLRA_OL_LOW"),
+    (0xf063, "CFG AUTORES_CFG"), (0xf072, "CFG CAL_EN"),
+    (0xf124, "PTN FIFO_PLAY_RATE"), (0xf126, "PTN DIRECT_PLAY"),
+    (0xf12a, "PTN FIFO_EMPTY_CFG"),
+    (0xf20b, "HBST STATUS4"), (0xf241, "HBST HW_CTRL_FOLLOW"),
+    (0xf246, "HBST VREG_EN"), (0xf270, "HBST CLAMP"),
+]
+
+def dump(title):
+    # one "rrrr: vv\n" line (9 bytes) per register: read only these lines
+    out = []
+    with open(REGS, "rb") as f:
+        for reg, name in NAMES:
+            f.seek(reg * 9)
+            line = f.read(9).decode().strip()
+            out.append("%s=%s" % (name, line.split(": ")[1] if ": " in line else "?"))
+    print("%s: %s" % (title, ", ".join(out)))
+
+# ---- the input device
+dev = None
+for ev in sorted(os.listdir("/sys/class/input")):
+    if not ev.startswith("event"):
+        continue
+    with open("/sys/class/input/%s/device/name" % ev) as f:
+        if f.read().strip() == "qcom-spmi-haptics":
+            dev = "/dev/input/" + ev
+if not dev:
+    print("no qcom-spmi-haptics input device (driver not loaded? dmesg | grep -i haptics)")
+    sys.exit(1)
+st = os.stat(dev)
+print("device %s (uid %d gid %d mode %o)" % (dev, st.st_uid, st.st_gid, st.st_mode & 0o777))
+
+EV_FF = 0x15
+FF_RUMBLE, FF_PERIODIC, FF_CONSTANT = 0x50, 0x51, 0x52
+FF_SINE, FF_CUSTOM, FF_GAIN = 0x5a, 0x5d, 0x60
+FF_NAMES = {0x50: "RUMBLE", 0x51: "PERIODIC", 0x52: "CONSTANT", 0x53: "SPRING",
+            0x54: "FRICTION", 0x55: "DAMPER", 0x56: "INERTIA", 0x57: "RAMP",
+            0x58: "SQUARE", 0x59: "TRIANGLE", 0x5a: "SINE", 0x5b: "SAW_UP",
+            0x5c: "SAW_DOWN", 0x5d: "CUSTOM", 0x60: "GAIN", 0x61: "AUTOCENTER"}
+
+def ioc(d, nr, size):
+    return (d << 30) | (size << 16) | (ord("E") << 8) | nr
+
+fd = os.open(dev, os.O_RDWR)
+bits = bytearray(16)
+fcntl.ioctl(fd, ioc(2, 0x20 + EV_FF, len(bits)), bits, True)
+ff = [n for n in range(128) if bits[n // 8] >> (n % 8) & 1]
+print("FF bits: " + " ".join(FF_NAMES.get(n, hex(n)) for n in ff))
+neff = bytearray(4)
+fcntl.ioctl(fd, ioc(2, 0x84, 4), neff, True)  # EVIOCGEFFECTS
+print("effects at once: %d" % struct.unpack("<i", neff)[0])
+
+# struct ff_effect on arm64: 16-byte header, 32-byte union (it holds a pointer)
+EVIOCSFF = ioc(1, 0x80, 48)
+EVIOCRMFF = ioc(1, 0x81, 4)
+
+def upload(etype, length_ms, union):
+    buf = bytearray(48)
+    struct.pack_into("<HhHHHHH", buf, 0, etype, -1, 0, 0, 0, length_ms, 0)
+    buf[16:16 + len(union)] = union
+    fcntl.ioctl(fd, EVIOCSFF, buf, True)
+    return struct.unpack_from("<h", buf, 2)[0]
+
+def play(eid, length_ms, label):
+    os.write(fd, struct.pack("<qqHHi", 0, 0, EV_FF, eid, 1))
+    time.sleep(length_ms / 1000 + 0.05)
+    dump("  during/after %s" % label)
+    time.sleep(0.6)
+    fcntl.ioctl(fd, EVIOCRMFF, eid)
+
+def periodic(waveform, magnitude, custom=None):
+    u = bytearray(32)
+    struct.pack_into("<HHhhH", u, 0, waveform, 0, magnitude, 0, 0)
+    if custom is not None:
+        arr = (ctypes.c_int16 * len(custom))(*custom)
+        periodic.keep = arr
+        struct.pack_into("<IQ", u, 20, len(custom), ctypes.addressof(arr))
+    return bytes(u)
+
+# full gain
+os.write(fd, struct.pack("<qqHHi", 0, 0, EV_FF, FF_GAIN, 0xffff))
+dump("before")
+if what == "regs":
+    sys.exit(0)
+
+if what in ("rumble", "all"):
+    play(upload(FF_RUMBLE, 300, struct.pack("<HH", 0xffff, 0)), 300, "strong rumble")
+    time.sleep(0.5)
+    play(upload(FF_RUMBLE, 300, struct.pack("<HH", 0, 0xffff)), 300, "weak rumble")
+    time.sleep(0.5)
+if what in ("sine", "all"):
+    play(upload(FF_PERIODIC, 300, periodic(FF_SINE, 0x7fff)), 300, "sine")
+    time.sleep(0.5)
+if what in ("constant", "all"):
+    play(upload(FF_CONSTANT, 300, struct.pack("<h", 0x4000)), 300, "constant 50%")
+    time.sleep(0.5)
+if what in ("fifo", "all"):
+    import math
+    n = 2000                                  # 250 ms at 8 kHz
+    samples = [round(100 * math.sin(2 * math.pi * 163 * i / 8000)) for i in range(n)]
+    data = [8, 0] + samples                   # PLAY_RATE_F_8KHZ, default vmax
+    play(upload(FF_PERIODIC, 0, periodic(FF_CUSTOM, 0x7fff, data)), 250, "FIFO 8 kHz")
+time.sleep(1.2)
+dump("1.2 s later (EN_CTL should be 00 again)")
+os.close(fd)
+PY
+duo2_ssh 'sudo dmesg | grep -i haptic | grep -v "Modules linked in" | tail -5' || true

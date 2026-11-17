@@ -1,0 +1,52 @@
+From 40a23a13819399aa1e69827dee7987f3451a948c Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 19:31:56 +0100
+Subject: [PATCH 108/137] arm64: dts: qcom: sm8350: Add the Q6 voice services
+
+The SM8350 ADSP runs the Elite voice services (MVM, CVS, CVP) next to
+AFE/ASM/ADM on the APR "apr_audio_svc" channel, in the same audio
+protection domain. Describe them, with the q6voice DAIs under the MVM,
+disabled: a board enables them when it routes modem voice.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ arch/arm64/boot/dts/qcom/sm8350.dtsi | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350.dtsi b/arch/arm64/boot/dts/qcom/sm8350.dtsi
+index 1e669917b159..2908fab59685 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8350.dtsi
+@@ -2025,6 +2025,32 @@ q6routing: routing {
+ 							#sound-dai-cells = <0>;
+ 						};
+ 					};
++
++					q6mvm: service@9 {
++						compatible = "qcom,q6mvm";
++						reg = <APR_SVC_ADSP_MVM>;
++						qcom,protection-domain = "avs/audio", "msm/adsp/audio_pd";
++						status = "disabled";
++
++						q6voicedai: dais {
++							compatible = "qcom,q6voice-dais";
++							#sound-dai-cells = <1>;
++						};
++					};
++
++					q6cvs: service@a {
++						compatible = "qcom,q6cvs";
++						reg = <APR_SVC_ADSP_CVS>;
++						qcom,protection-domain = "avs/audio", "msm/adsp/audio_pd";
++						status = "disabled";
++					};
++
++					q6cvp: service@b {
++						compatible = "qcom,q6cvp";
++						reg = <APR_SVC_ADSP_CVP>;
++						qcom,protection-domain = "avs/audio", "msm/adsp/audio_pd";
++						status = "disabled";
++					};
+ 				};
+ 
+ 				fastrpc {

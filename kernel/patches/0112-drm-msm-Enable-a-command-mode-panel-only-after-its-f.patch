@@ -1,0 +1,227 @@
+From 8abead0f5a39f37fbe1a4364b1c90a3459e2b783 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 09:01:22 +0100
+Subject: [PATCH 112/137] drm/msm: Enable a command-mode panel only after its
+ first frame
+
+A command-mode panel shows its own frame memory. After the panel has
+been reset, that memory holds random data until the first frame has been
+written into it, and data only reaches the panel when a frame is
+flushed, after the bridges have been enabled: a panel driver that turns
+the display on in its enable callback, as the panel API asks, shows
+coloured noise until then (on the Surface Duo 2's panels about one frame,
+or the next panel's whole power-up when one commit enables two of them).
+
+The panel documentation has the enable callback run once the display
+controller is transmitting; for command mode that is after the first
+flush. Let the backend name the outputs whose bridges are to be enabled
+then (the DPU: command-mode interfaces) and enable those bridges after
+->wait_flush(), once the first frame has been transferred (the DPU
+waits for its ping-pong done). Everything else is enabled as before.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c | 23 +++++++
+ drivers/gpu/drm/msm/msm_atomic.c        | 91 ++++++++++++++++++++++++-
+ drivers/gpu/drm/msm/msm_kms.h           | 17 +++++
+ 3 files changed, 130 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
+index da3556eb6ecc..c73ae675766a 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
+@@ -530,6 +530,27 @@ static void dpu_kms_wait_for_commit_done(struct msm_kms *kms,
+ 	}
+ }
+ 
++/*
++ * A command-mode panel shows its own frame memory, which holds random data
++ * after the panel's reset until the first frame has been written into it:
++ * turn the panel on only after that frame (see msm_atomic_commit_tail()).
++ */
++static bool dpu_kms_late_bridge_enable(struct msm_kms *kms,
++				       struct drm_encoder *encoder)
++{
++	return dpu_encoder_get_intf_mode(encoder) == INTF_MODE_CMD;
++}
++
++static void dpu_kms_wait_for_tx_done(struct msm_kms *kms,
++				     struct drm_encoder *encoder)
++{
++	int ret = dpu_encoder_wait_for_tx_complete(encoder);
++
++	if (ret && ret != -EWOULDBLOCK)
++		DPU_ERROR("enc%d: first frame not sent: %d\n",
++			  DRMID(encoder), ret);
++}
++
+ static void dpu_kms_wait_flush(struct msm_kms *kms, unsigned crtc_mask)
+ {
+ 	struct dpu_kms *dpu_kms = to_dpu_kms(kms);
+@@ -1077,6 +1098,8 @@ static const struct msm_kms_funcs kms_funcs = {
+ 	.check_mode_changed = dpu_kms_check_mode_changed,
+ 	.flush_commit    = dpu_kms_flush_commit,
+ 	.wait_flush      = dpu_kms_wait_flush,
++	.late_bridge_enable = dpu_kms_late_bridge_enable,
++	.wait_for_tx_done = dpu_kms_wait_for_tx_done,
+ 	.complete_commit = dpu_kms_complete_commit,
+ 	.enable_vblank   = dpu_kms_enable_vblank,
+ 	.disable_vblank  = dpu_kms_disable_vblank,
+diff --git a/drivers/gpu/drm/msm/msm_atomic.c b/drivers/gpu/drm/msm/msm_atomic.c
+index a8babf1dbe0d..0bdf019a12d6 100644
+--- a/drivers/gpu/drm/msm/msm_atomic.c
++++ b/drivers/gpu/drm/msm/msm_atomic.c
+@@ -5,6 +5,7 @@
+  */
+ 
+ #include <drm/drm_atomic_uapi.h>
++#include <drm/drm_bridge.h>
+ #include <drm/drm_vblank.h>
+ 
+ #include "msm_atomic_trace.h"
+@@ -210,6 +211,89 @@ int msm_atomic_check(struct drm_device *dev, struct drm_atomic_commit *state)
+ 	return drm_atomic_helper_check(dev, state);
+ }
+ 
++static bool msm_atomic_late_bridges(struct msm_kms *kms,
++				    struct drm_connector_state *conn_state)
++{
++	return kms->funcs->late_bridge_enable &&
++	       kms->funcs->late_bridge_enable(kms, conn_state->best_encoder);
++}
++
++/*
++ * drm_atomic_helper_commit_modeset_enables(), except that the bridges of an
++ * output the backend wants enabled late are left for
++ * msm_atomic_commit_late_bridge_enables(). Returns whether there are any.
++ */
++static bool msm_atomic_commit_modeset_enables(struct msm_kms *kms,
++					      struct drm_atomic_commit *state)
++{
++	struct drm_device *dev = state->dev;
++	struct drm_connector_state *new_conn_state;
++	struct drm_connector *connector;
++	bool late = false;
++	int i;
++
++	drm_atomic_helper_commit_crtc_enable(dev, state);
++	drm_atomic_helper_commit_encoder_bridge_pre_enable(dev, state);
++
++	for_each_new_connector_in_state(state, connector, new_conn_state, i) {
++		const struct drm_encoder_helper_funcs *funcs;
++		struct drm_encoder *encoder = new_conn_state->best_encoder;
++		struct drm_bridge *bridge;
++
++		if (!encoder || !new_conn_state->crtc->state->active ||
++		    !drm_atomic_crtc_needs_modeset(new_conn_state->crtc->state))
++			continue;
++
++		funcs = encoder->helper_private;
++		if (funcs) {
++			if (funcs->atomic_enable)
++				funcs->atomic_enable(encoder, state);
++			else if (funcs->enable)
++				funcs->enable(encoder);
++			else if (funcs->commit)
++				funcs->commit(encoder);
++		}
++
++		if (msm_atomic_late_bridges(kms, new_conn_state)) {
++			late = true;
++			continue;
++		}
++
++		bridge = drm_bridge_chain_get_first_bridge(encoder);
++		drm_atomic_bridge_chain_enable(bridge, state);
++		drm_bridge_put(bridge);
++	}
++
++	drm_atomic_helper_commit_writebacks(dev, state);
++
++	return late;
++}
++
++static void msm_atomic_commit_late_bridge_enables(struct msm_kms *kms,
++						  struct drm_atomic_commit *state)
++{
++	struct drm_connector_state *new_conn_state;
++	struct drm_connector *connector;
++	int i;
++
++	for_each_new_connector_in_state(state, connector, new_conn_state, i) {
++		struct drm_bridge *bridge;
++
++		if (!new_conn_state->best_encoder ||
++		    !new_conn_state->crtc->state->active ||
++		    !drm_atomic_crtc_needs_modeset(new_conn_state->crtc->state) ||
++		    !msm_atomic_late_bridges(kms, new_conn_state))
++			continue;
++
++		if (kms->funcs->wait_for_tx_done)
++			kms->funcs->wait_for_tx_done(kms, new_conn_state->best_encoder);
++
++		bridge = drm_bridge_chain_get_first_bridge(new_conn_state->best_encoder);
++		drm_atomic_bridge_chain_enable(bridge, state);
++		drm_bridge_put(bridge);
++	}
++}
++
+ void msm_atomic_commit_tail(struct drm_atomic_commit *state)
+ {
+ 	struct drm_device *dev = state->dev;
+@@ -218,6 +302,7 @@ void msm_atomic_commit_tail(struct drm_atomic_commit *state)
+ 	struct drm_crtc *async_crtc = NULL;
+ 	unsigned crtc_mask = get_crtc_mask(state);
+ 	bool async = can_do_async(state, &async_crtc);
++	bool late;
+ 
+ 	trace_msm_atomic_commit_tail_start(async, crtc_mask);
+ 
+@@ -246,7 +331,7 @@ void msm_atomic_commit_tail(struct drm_atomic_commit *state)
+ 	 */
+ 	drm_atomic_helper_commit_modeset_disables(dev, state);
+ 	drm_atomic_helper_commit_planes(dev, state, 0);
+-	drm_atomic_helper_commit_modeset_enables(dev, state);
++	late = msm_atomic_commit_modeset_enables(kms, state);
+ 
+ 	if (async) {
+ 		struct msm_pending_timer *timer =
+@@ -310,6 +395,10 @@ void msm_atomic_commit_tail(struct drm_atomic_commit *state)
+ 	kms->funcs->wait_flush(kms, crtc_mask);
+ 	trace_msm_atomic_wait_flush_finish(crtc_mask);
+ 
++	/* the first frame is on its way: the panels may show it once it is in */
++	if (late)
++		msm_atomic_commit_late_bridge_enables(kms, state);
++
+ 	vblank_put(kms, crtc_mask);
+ 
+ 	lock_crtcs(kms, crtc_mask);
+diff --git a/drivers/gpu/drm/msm/msm_kms.h b/drivers/gpu/drm/msm/msm_kms.h
+index f25b31e502d2..79d422b27419 100644
+--- a/drivers/gpu/drm/msm/msm_kms.h
++++ b/drivers/gpu/drm/msm/msm_kms.h
+@@ -90,6 +90,23 @@ struct msm_kms_funcs {
+ 	 */
+ 	void (*wait_flush)(struct msm_kms *kms, unsigned crtc_mask);
+ 
++	/**
++	 * Optional: whether the bridges after @encoder are to be enabled
++	 * only once the first frame of a modeset has been transferred. For
++	 * a panel with its own frame memory (DSI command mode): data reaches
++	 * it only when a frame is flushed, and enabling it before (display
++	 * on) shows whatever that memory holds.
++	 */
++	bool (*late_bridge_enable)(struct msm_kms *kms,
++				   struct drm_encoder *encoder);
++
++	/**
++	 * Wait until the frame flushed last on @encoder has been
++	 * transferred (with ->late_bridge_enable()).
++	 */
++	void (*wait_for_tx_done)(struct msm_kms *kms,
++				 struct drm_encoder *encoder);
++
+ 	/**
+ 	 * Clean up after commit is completed.  This is called after
+ 	 * ->wait_flush(), to give the backend a chance to do any

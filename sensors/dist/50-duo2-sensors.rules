@@ -1,0 +1,9 @@
+// The Duo 2's desktop (duo-wc under seatd) runs without a logind session, so
+// polkit sees its clients as "inactive" and iio-sensor-proxy's default policy
+// (active sessions only) refuses every claim. Members of the video group (the
+// compositor's user) may claim the sensors.
+polkit.addRule(function(action, subject) {
+    if (action.id == "net.hadess.SensorProxy.claim-sensor" && subject.isInGroup("video")) {
+        return polkit.Result.YES;
+    }
+});

@@ -1,0 +1,52 @@
+From 945e94e08283e9633e7109962328f8fe03a08ba2 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 07:48:54 +0100
+Subject: [PATCH 2/6] ipa: libipa: camera_sensor_helper: Add IMX481 and IMX563
+ helpers
+
+Add camera sensor helpers for the Sony IMX481 and IMX563, as used in the
+Microsoft Surface Duo 2. Both use the usual Sony analogue gain model,
+gain = 1024 / (1024 - code), the one the vendor camera stack of the
+device uses for both sensors. The black level was measured on dark
+frames of all four camera modules: 64 at 10 bits.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/ipa/libipa/camera_sensor_helper.cpp | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/src/ipa/libipa/camera_sensor_helper.cpp b/src/ipa/libipa/camera_sensor_helper.cpp
+index 9457d62b..c7ae44fe 100644
+--- a/src/ipa/libipa/camera_sensor_helper.cpp
++++ b/src/ipa/libipa/camera_sensor_helper.cpp
+@@ -642,6 +642,30 @@ public:
+ };
+ REGISTER_CAMERA_SENSOR_HELPER("imx477", CameraSensorHelperImx477)
+ 
++class CameraSensorHelperImx481 : public CameraSensorHelper
++{
++public:
++	CameraSensorHelperImx481()
++	{
++		/* From dark frame measurement: 0x40 at 10bits. */
++		blackLevel_ = 4096;
++		gain_ = AnalogueGainLinear{ 0, 1024, -1, 1024 };
++	}
++};
++REGISTER_CAMERA_SENSOR_HELPER("imx481", CameraSensorHelperImx481)
++
++class CameraSensorHelperImx563 : public CameraSensorHelper
++{
++public:
++	CameraSensorHelperImx563()
++	{
++		/* From dark frame measurement: 0x40 at 10bits. */
++		blackLevel_ = 4096;
++		gain_ = AnalogueGainLinear{ 0, 1024, -1, 1024 };
++	}
++};
++REGISTER_CAMERA_SENSOR_HELPER("imx563", CameraSensorHelperImx563)
++
+ class CameraSensorHelperImx678 : public CameraSensorHelper
+ {
+ public:

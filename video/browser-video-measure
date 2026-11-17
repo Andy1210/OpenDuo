@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+"""Measure a browser playing a video on the phone: CPU, battery, video core.
+
+Run on the phone as root (sudo, from the administrator's ssh), with duo-wc
+running:
+
+  browser-video-measure [options] -- BROWSER-COMMAND...
+
+The command is started as duo-wc's user inside its session (the way
+compositor/duo-wc/tools/video-measure.sh starts Chromium), with the window
+expected on --where (DSI-1). After --settle seconds the script samples once a
+second for --secs seconds:
+
+  - the CPU time of every process of the browser (the started command and
+    all its descendants), by process type, in % of one core;
+  - the battery current and power (qcom-battmgr-bat; negative = drawn from
+    the battery, so it only compares runs on the same supply);
+  - the video core: whether the iris device is runtime-active, and its core
+    clock (video_cc_mvs0_clk) rate;
+  - the page's own line from the window title (pages that set "vt ...",
+    tools/video/test.html and video/web/mse.html: frames shown / decoded /
+    dropped per second).
+
+Then it stops the browser (its own processes, by PID), and prints the kernel
+lines the run added that mention the video core, and the lines of the
+browser's output that match --grep.
+
+--serve DIR starts a web server for DIR on 127.0.0.1:--port (as the GUI user)
+for the run; the MSE page needs one (it fetches its segments).
+
+This never opens a video device itself; the browser runs as the GUI user, who
+cannot open the iris encoder node (root's only, 72-duo2-video.rules).
+"""
+
+import argparse
+import json
+import os
+import re
+import signal
+import socket
+import subprocess
+import sys
+import time
+
+IRIS = "/sys/bus/platform/devices/aa00000.video-codec"
+CLK = "/sys/kernel/debug/clk/video_cc_mvs0_clk"
+BAT = "/sys/class/power_supply/qcom-battmgr-bat"
+USB = "/sys/class/power_supply/qcom-battmgr-usb"
+HZ = os.sysconf("SC_CLK_TCK")
+
+
+def read(path, default=""):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+def duoctl(req):
+    s = socket.socket(socket.AF_UNIX)
+    s.connect(os.environ.get("DUO_WC_ADMIN_SOCKET", "/run/duo-wc/admin.sock"))
+    s.sendall((json.dumps({"id": 1, "request": req}) + "\n").encode())
+    b = b""
+    while not b.endswith(b"\n"):
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        b += chunk
+    s.close()
+    return json.loads(b).get("ok", {})
+
+
+def proc_table():
+    """pid -> (ppid, label, cpu ticks)"""
+    out = {}
+    for p in os.listdir("/proc"):
+        if not p.isdigit():
+            continue
+        try:
+            st = read("/proc/%s/stat" % p)
+            with open("/proc/%s/cmdline" % p, "rb") as f:
+                cmd = f.read().split(b"\0")
+        except OSError:
+            continue
+        if not st:
+            continue
+        name = st[st.index("(") + 1 : st.rindex(")")]
+        fields = st[st.rindex(")") + 2 :].split()
+        whole = b" ".join(cmd).decode(errors="replace")
+        # Chromium: --type=gpu-process etc.; Firefox: "-contentproc ... tab|rdd|socket|utility".
+        if "--type=" in whole:
+            label = name + "/" + whole.split("--type=", 1)[1].split()[0]
+        elif "-contentproc" in whole:
+            words = whole.split()
+            kind = words[-1] if words else "?"
+            label = name + "/" + kind
+        else:
+            label = name
+        out[int(p)] = (int(fields[1]), label, int(fields[11]) + int(fields[12]))
+    return out
+
+
+def descendants(table, root):
+    kids = {}
+    for pid, (ppid, _, _) in table.items():
+        kids.setdefault(ppid, []).append(pid)
+    seen, todo = set(), [root]
+    while todo:
+        p = todo.pop()
+        if p in seen:
+            continue
+        seen.add(p)
+        todo.extend(kids.get(p, []))
+    return seen
+
+
+def signal_all(pids, sig):
+    for pid in pids:
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            pass
+
+
+def start_time(pid):
+    st = read("/proc/%d/stat" % pid)
+    return st[st.rindex(")") + 2 :].split()[19] if st else None
+
+
+def stop_tree(child):
+    """TERM a started process and its descendants, KILL what is left of them
+    after 10 s. The tree is taken before the TERM (children of a process that
+    exits are reparented), and a PID is only signalled again while it is still
+    the same process (same start time)."""
+    tree = {pid: start_time(pid) for pid in descendants(proc_table(), child.pid)}
+    signal_all(tree, signal.SIGTERM)
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        alive = [pid for pid, st in tree.items() if st and start_time(pid) == st]
+        if not alive:
+            break
+        time.sleep(0.5)
+    signal_all([pid for pid, st in tree.items() if st and start_time(pid) == st], signal.SIGKILL)
+    child.wait()
+
+
+def iris_lines():
+    out = subprocess.run(["dmesg"], capture_output=True, text=True).stdout.splitlines()
+    return [
+        line
+        for line in out
+        if "qcom-iris" in line or "aa00000.video-codec" in line or "cut here" in line
+    ]
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--secs", type=int, default=20)
+    ap.add_argument("--settle", type=int, default=8)
+    ap.add_argument("--where", default="DSI-1")
+    ap.add_argument("--log", default="/tmp/browser-video.log")
+    ap.add_argument("--grep", default=r"V4L2|v4l2|DUO2TEST|FFmpeg|Decoder|decoder|CAPTURE_queue")
+    ap.add_argument("--serve", default="")
+    ap.add_argument("--port", type=int, default=8899)
+    ap.add_argument("cmd", nargs=argparse.REMAINDER)
+    a = ap.parse_args()
+    cmd = a.cmd[1:] if a.cmd[:1] == ["--"] else a.cmd
+    if not cmd:
+        ap.error("no browser command")
+    gui = subprocess.run(
+        ["systemctl", "show", "-p", "User", "--value", "duo-wc"], capture_output=True, text=True
+    ).stdout.strip()
+    as_gui = ["sudo", "-u", gui, "sh", "-c", '. /run/duo-wc/session.env; exec "$@"', "sh"]
+
+    started = []
+    server = None
+    if a.serve:
+        server = subprocess.Popen(
+            as_gui
+            + [
+                "python3",
+                "-m",
+                "http.server",
+                "--bind",
+                "127.0.0.1",
+                str(a.port),
+                "--directory",
+                a.serve,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        started.append(server.pid)
+        time.sleep(1)
+
+    subprocess.run(["duoctl", "set_power", "all", "on"], stdout=subprocess.DEVNULL)
+    subprocess.run(["duoctl", "expect_window", a.where], stdout=subprocess.DEVNULL)
+    before = iris_lines()
+    log = open(a.log, "w")
+    browser = subprocess.Popen(as_gui + cmd, stdout=log, stderr=subprocess.STDOUT)
+    started.append(browser.pid)
+    time.sleep(a.settle)
+
+    t0 = proc_table()
+    pids0 = descendants(t0, browser.pid)
+    cur, volt, usb, active, rates, titles = [], [], [], 0, [], []
+    start = time.time()
+    for _ in range(a.secs):
+        time.sleep(1)
+        c = read(BAT + "/current_now")
+        u = read(BAT + "/voltage_now")
+        if c and u:
+            cur.append(int(c))
+            volt.append(int(u))
+        if read(USB + "/online") == "1":
+            usb.append(int(read(USB + "/current_now", "0")) * int(read(USB + "/voltage_now", "0")))
+        if read(IRIS + "/power/runtime_status") == "active":
+            active += 1
+        r = read(CLK + "/clk_rate")
+        if r and read(CLK + "/clk_enable_count", "0") != "0":
+            rates.append(int(r) // 1000000)
+        try:
+            for w in duoctl("get_state").get("windows", []):
+                if (w.get("title") or "").startswith("vt "):
+                    titles.append(w["title"])
+        except OSError:
+            pass
+    dt = time.time() - start
+    t1 = proc_table()
+    pids1 = descendants(t1, browser.pid)
+
+    agg = {}
+    for pid in pids1:
+        if pid in t0 and pid in pids0 and pid in t1:
+            label = t1[pid][1]
+            agg[label] = agg.get(label, 0.0) + (t1[pid][2] - t0[pid][2]) / HZ / dt * 100
+    total = sum(agg.values())
+    print("cpu %% of one core over %.1f s: total %.0f" % (dt, total))
+    for label, pct in sorted(agg.items(), key=lambda kv: -kv[1])[:8]:
+        print("  %-36s %6.1f" % (label, pct))
+    if cur:
+        mean_ma = sum(cur) / len(cur) / 1000
+        mean_mw = sum(c * v for c, v in zip(cur, volt)) / len(cur) / 1e9
+        print(
+            "battery: %.0f mA, %.0f mW (mean of %d samples; negative = drawn), %s%%%s"
+            % (
+                mean_ma,
+                mean_mw,
+                len(cur),
+                read(BAT + "/capacity", "?"),
+                (
+                    ", usb in %.0f mW, so the phone takes about %.0f mW (usb in - into the battery)"
+                    % (sum(usb) / len(usb) / 1e9, sum(usb) / len(usb) / 1e9 - mean_mw)
+                )
+                if usb
+                else ", on battery",
+            )
+        )
+    rate = (" core clock %s MHz" % "/".join(str(r) for r in sorted(set(rates)))) if rates else ""
+    print("video core: runtime-active %d of %d s%s" % (active, a.secs, rate))
+    for t in titles[-3:]:
+        print("page: " + t)
+    print("load", " ".join(read("/proc/loadavg").split()[:3]))
+
+    # Stop what we started (the browser's and the web server's own process
+    # trees, by PID): TERM, then KILL whatever is left after 10 s.
+    stop_tree(browser)
+    if server:
+        stop_tree(server)
+    log.close()
+
+    new = [line for line in iris_lines() if line not in before]
+    print("kernel lines added: %d" % len(new))
+    for line in new[-12:]:
+        print("  " + line)
+    pat = re.compile(a.grep)
+    hits = [line.rstrip() for line in open(a.log, errors="replace") if pat.search(line)]
+    print("browser output matching /%s/: %d lines (all in %s)" % (a.grep, len(hits), a.log))
+    for line in hits[:12] + (["  ..."] if len(hits) > 24 else []) + hits[max(12, len(hits) - 12) :]:
+        print("  " + line[:200])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

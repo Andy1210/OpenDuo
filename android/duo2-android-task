@@ -1,0 +1,154 @@
+#!/bin/sh
+# duo2-android-task: size an Android app's window inside Android (Waydroid),
+# for duo-wc's "Android full screen" (compositor/duo-wc/README.md "Android
+# apps"). Root (it goes through `waydroid shell`); the GUI user may run it
+# with sudo (/etc/sudoers.d/duo2-android-task), nothing else.
+#
+#   duo2-android-task fill PACKAGE WIDTH HEIGHT   the app's visible task to
+#                                                  0,0 - WIDTH,HEIGHT (Android px)
+#   duo2-android-task restore PACKAGE             back to where it was before
+#                                                  the first fill
+#   duo2-android-task fit PACKAGE WIDTH HEIGHT    the app's visible task moved
+#                                                  (shrunk only if it must) into
+#                                                  0,0 - WIDTH,HEIGHT; nothing if
+#                                                  it is inside already
+#   duo2-android-task night yes|no                Android's night mode (dark apps):
+#                                                  Settings > Appearance through
+#                                                  duo-appearance; exit 3 when
+#                                                  Android does not run (or is
+#                                                  frozen, or still booting)
+#
+# Waydroid runs every app in Android's freeform mode (so that each can be a
+# window of its own); Android's own maximize turns a task into a fullscreen
+# one, which hides every other Android app (they lose their windows). A
+# freeform task resized to the whole display stays freeform: the others
+# stay. The bounds before the fill are kept in /run/duo2-android-task/.
+#
+# All Android apps share ONE display, as big as the biggest window duo-wc
+# lays out (a spanning one: both panels). An app opened meanwhile on one
+# panel is placed by Android on that whole display, partly beyond its own
+# window: duo-wc has it moved inside (`fit`).
+set -euf  # -f: no globbing (the task's bounds come from inside Android)
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+die() { echo "duo2-android-task: $*" >&2; exit 2; }
+
+# ints COUNT VALUE...: exactly COUNT whole numbers (a minus allowed, at most
+# 6 digits each). What Android prints is checked before it is used.
+ints() {
+    n=$1
+    shift
+    [ $# -eq "$n" ] || return 1
+    for v in "$@"; do
+        v=${v#-}
+        case $v in "" | *[!0-9]* | ???????*) return 1 ;; esac
+    done
+}
+
+[ "$(id -u)" = 0 ] || die "run as root (sudo)"
+action=${1:-}
+if [ "$action" = night ]; then
+    [ $# -eq 2 ] || die "usage: night yes|no"
+    case $2 in yes | no) ;; *) die "night: yes or no, not '$2'" ;; esac
+    # Only into a running container: a frozen one would hold `waydroid shell`.
+    [ "$(lxc-info -P /var/lib/waydroid/lxc -n waydroid -sH 2>/dev/null)" = RUNNING ] ||
+        { echo "duo2-android-task: Android does not run" >&2; exit 3; }
+    [ "$(timeout 20 waydroid shell -- getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ] ||
+        { echo "duo2-android-task: Android is still starting" >&2; exit 3; }
+    timeout 20 waydroid shell -- cmd uimode night "$2"
+    exit $?
+fi
+pkg=${2:-}
+case $pkg in
+"" | *[!A-Za-z0-9._]* | .* | *. | *..*) die "not a package name: '$pkg'" ;;
+esac
+case $pkg in *.*) ;; *) die "not a package name: '$pkg'" ;; esac
+number() {
+    case $1 in "" | *[!0-9]*) die "not a size: '$1'" ;; esac
+    [ "$1" -ge 64 ] && [ "$1" -le 8000 ] || die "size out of range: $1"
+}
+state=/run/duo2-android-task
+[ -d "$state" ] || mkdir -m 0700 "$state"
+
+# The visible task of the package: "ID L T R B" from `am stack list`
+# ("taskId=14: com.android.settings/... bounds=[157,189][1187,1534] ... visible=true").
+task() {
+    timeout 20 waydroid shell -- am stack list 2>/dev/null | awk -v p="$pkg" '
+        $1 ~ /^taskId=/ && index($2, p "/") == 1 && /visible=true/ {
+            id = $1; sub(/^taskId=/, "", id); sub(/:$/, "", id)
+            m = $0; sub(/.*bounds=/, "", m); sub(/ .*/, "", m)      # "[L,T][R,B]"
+            gsub(/[\[\]]/, " ", m); gsub(/,/, " ", m)
+            print id, m; exit
+        }'
+}
+
+# fit_bounds L T R B W H: the bounds L,T - R,B moved into 0,0 - W,H (and
+# shrunk to it where they are bigger); the same when they are inside.
+fit_bounds() {
+    awk -v l="$1" -v t="$2" -v r="$3" -v b="$4" -v W="$5" -v H="$6" 'BEGIN {
+        w = r - l; h = b - t
+        if (w > W) w = W
+        if (h > H) h = H
+        if (l + w > W) l = W - w
+        if (t + h > H) t = H - h
+        if (l < 0) l = 0
+        if (t < 0) t = 0
+        print l, t, l + w, t + h
+    }'
+}
+
+case $action in
+fit)
+    [ $# -eq 4 ] || die "usage: fit PACKAGE WIDTH HEIGHT"
+    number "$3"
+    number "$4"
+    t=$(task) || true
+    [ -n "$t" ] || die "no visible task of $pkg"
+    # shellcheck disable=SC2086 # split on purpose (no globbing: set -f)
+    set -- $t "$3" "$4"
+    ints 7 "$@" || die "Android's task line for $pkg is not ID L T R B"
+    id=$1
+    now="$2 $3 $4 $5"
+    want=$(fit_bounds "$2" "$3" "$4" "$5" "$6" "$7")
+    [ "$want" = "$now" ] && exit 0
+    # shellcheck disable=SC2086 # four numbers
+    set -- $want
+    timeout 20 waydroid shell -- am task resize "$id" "$1" "$2" "$3" "$4"
+    ;;
+fill)
+    [ $# -eq 4 ] || die "usage: fill PACKAGE WIDTH HEIGHT"
+    number "$3"
+    number "$4"
+    t=$(task) || true
+    [ -n "$t" ] || die "no visible task of $pkg"
+    # shellcheck disable=SC2086 # split on purpose (no globbing: set -f)
+    set -- $t "$3" "$4"
+    ints 7 "$@" || die "Android's task line for $pkg is not ID L T R B"
+    id=$1
+    # Keep the first bounds (a second fill keeps the medium window's place).
+    [ -e "$state/$pkg" ] || echo "$2 $3 $4 $5" >"$state/$pkg"
+    timeout 20 waydroid shell -- am task resize "$id" 0 0 "$6" "$7"
+    ;;
+restore)
+    [ $# -eq 2 ] || die "usage: restore PACKAGE"
+    t=$(task) || true
+    [ -n "$t" ] || die "no visible task of $pkg"
+    # shellcheck disable=SC2086 # split on purpose (no globbing: set -f)
+    set -- $t
+    ints 5 "$@" || die "Android's task line for $pkg is not ID L T R B"
+    id=$1
+    if [ -e "$state/$pkg" ]; then
+        read -r l t r b <"$state/$pkg" || true
+        rm -f "$state/$pkg"
+        ints 4 "$l" "$t" "$r" "$b" || die "the kept bounds of $pkg are not L T R B"
+        set -- "$l" "$t" "$r" "$b"
+    else
+        exit 0
+    fi
+    timeout 20 waydroid shell -- am task resize "$id" "$1" "$2" "$3" "$4"
+    ;;
+*)
+    die "usage: fill PACKAGE WIDTH HEIGHT | restore PACKAGE | fit PACKAGE WIDTH HEIGHT | night yes|no"
+    ;;
+esac

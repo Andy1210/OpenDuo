@@ -1,0 +1,62 @@
+#!/bin/sh
+# duo2-bt-addr hciN: give the WCN6855 its factory Bluetooth address.
+#
+# hci_qca leaves the controller unconfigured: the stock NVM file carries a
+# placeholder address (00:00:00:00:5a:ad), so the kernel wants a public
+# address from the DT (local-bd-address, which an Android bootloader fills and
+# the WOA UEFI does not) or from userspace over mgmt. This sets it once the
+# controller's setup (the firmware download, ~2 s) is over; the kernel then
+# programs it (EDL_WRITE_BD_ADDR), the index comes up configured, and
+# bluetoothd adopts the adapter. The address comes from
+# /etc/duo2/factory-addresses (BT_ADDR=, written by duo2-factory-addr).
+#
+# Started by udev for the phone's own UART controller only
+# (90-duo2-bt-addr.rules -> duo2-bt-addr@hciN.service).
+set -eu
+
+dev=${1:?usage: duo2-bt-addr hciN}
+idx=${dev#hci}
+case $idx in '' | *[!0-9]*) echo "not an hci device: $dev" >&2; exit 2 ;; esac
+conf=/etc/duo2/factory-addresses
+addr=$(sed -n 's/^BT_ADDR=//p' "$conf")
+echo "$addr" | grep -qiE '^[0-9a-f]{2}(:[0-9a-f]{2}){5}$' || { echo "$conf: no valid BT_ADDR" >&2; exit 1; }
+
+# btmgmt hangs with /dev/null as stdin (a service's default: its shell cannot
+# watch it), so every call gets an empty pipe instead.
+mgmt() { true | btmgmt --index "$idx" "$@"; }
+
+wait=${DUO2_BT_ADDR_WAIT:-40}
+start=$(date +%s)
+while :; do
+	# Read Controller Configuration works on an unconfigured index too; while
+	# the setup still runs, the index is invalid.
+	cfg=$(mgmt config 2>&1 | sed 's/\x1b\[[0-9;]*m//g') || true
+	case $cfg in
+	*"missing options: public-address"*)
+		if mgmt public-addr "$addr" >/dev/null 2>&1; then
+			# The kernel powers it on and programs the address: wait
+			# until the configured index reports it.
+			i=0
+			while [ $i -lt 15 ]; do
+				if mgmt info 2>/dev/null | grep -qi "addr $addr"; then
+					echo "$dev: factory public address set"
+					exit 0
+				fi
+				sleep 1
+				i=$((i + 1))
+			done
+			echo "$dev: public address accepted, but the controller does not report it" >&2
+			exit 1
+		fi
+		;;
+	*"supported options"*)
+		echo "$dev: already configured, nothing to do"
+		exit 0
+		;;
+	esac
+	if [ $(($(date +%s) - start)) -ge "$wait" ]; then
+		echo "$dev: no unconfigured controller to set within $wait s" >&2
+		exit 1
+	fi
+	sleep 1
+done

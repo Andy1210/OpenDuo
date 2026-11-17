@@ -1,0 +1,42 @@
+#!/bin/sh
+# duo2-os: the modem's first operating-mode request, the one Android's RIL makes.
+#
+# The Surface Duo 2's modem (MPSS.HI.4.0, SM8350) comes up in the DMS operating
+# mode 'shutting-down' (the call manager's power-off state) and stays there
+# until the AP asks for a mode: on Android qcrild puts it into low-power at
+# start and online when the radio is switched on. ModemManager cannot read
+# 'shutting-down' as a power state ("Unhandled power state"), so before it
+# probes the modem it is put into low-power: RF off, the SIM and every QMI
+# service up. Only from 'shutting-down': a modem that somebody (ModemManager,
+# duo2-wwan) already switched on is left alone.
+#
+# Run by duo2-modem-lpm.service after every (re)start of rmtfs (which starts
+# the modem) and before ModemManager. Waits at most 60 s for the modem's DMS
+# service on QRTR (node 0); never fails: no modem means nothing to do.
+set -u
+i=0
+while ! qrtr-lookup 2 2>/dev/null | awk '$1 == 2 && $4 == 0 { f = 1 } END { exit !f }'; do
+    i=$((i + 1))
+    if [ "$i" -gt 120 ]; then
+        echo "no DMS service from the modem after 60 s: nothing to do"
+        exit 0
+    fi
+    sleep 0.5
+done
+
+mode=
+for _ in 1 2 3; do
+    mode=$(timeout 15 qmicli -d qrtr://0 --dms-get-operating-mode 2>/dev/null |
+        sed -n "s/^[[:space:]]*Mode: '\(.*\)'/\1/p")
+    [ -n "$mode" ] && break
+    sleep 1
+done
+echo "modem operating mode: ${mode:-unknown}"
+if [ "$mode" = shutting-down ]; then
+    if timeout 15 qmicli -d qrtr://0 --dms-set-operating-mode=low-power >/dev/null 2>&1; then
+        echo "modem set to low-power"
+    else
+        echo "could not set the modem to low-power"
+    fi
+fi
+exit 0

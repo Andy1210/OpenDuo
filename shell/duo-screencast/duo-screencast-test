@@ -1,0 +1,252 @@
+#!/usr/bin/python3 -I
+"""Try the screen-cast and screenshot portals the way an app uses them.
+
+    duo-screencast-test record [SECONDS] [FILE]
+        org.freedesktop.portal.ScreenCast: a session, one monitor, the
+        chooser on the panel; then GStreamer records the PipeWire stream
+        (pipewiresrc, VP8 in WebM, half size) for SECONDS (default 10) into
+        FILE (default ~/Videos/screencast-<time>.webm).
+    duo-screencast-test stream [SECONDS]
+        The same session, the stream taken as DMA-BUFs (what a browser's
+        WebRTC capturer asks for) and thrown away: duo-wc's journal shows
+        the frames (`capture frame drawn ... dma=true`).
+    duo-screencast-test screenshot [--interactive]
+        org.freedesktop.portal.Screenshot: prints the picture's URI. Without
+        --interactive the portal frontend first asks once whether apps may
+        take screenshots at all (its access dialog; the answer is kept for
+        every unsandboxed app), then the chooser asks as every time.
+
+Run it in the session (an ssh login: `. /run/duo-wc/session.env` first, or
+scripts/lib/remote.sh's duo2_session). It is what Firefox, Chromium (WebRTC)
+or a screen recorder (Kooha, OBS) do through the portal, minus the encoder.
+"""
+
+import os
+import subprocess
+import sys
+import time
+
+import gi
+
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio, GLib  # noqa: E402
+
+PORTAL = "org.freedesktop.portal.Desktop"
+OBJECT = "/org/freedesktop/portal/desktop"
+SCREENCAST = "org.freedesktop.portal.ScreenCast"
+SCREENSHOT = "org.freedesktop.portal.Screenshot"
+REQUEST = "org.freedesktop.portal.Request"
+
+
+class Portal:
+    def __init__(self):
+        self.bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        self.sender = self.bus.get_unique_name()[1:].replace(".", "_")
+        self.n = 0
+
+    def token(self):
+        self.n += 1
+        return "duo_screencast_test_%d_%d" % (os.getpid(), self.n)
+
+    def call(self, iface, method, args_fn, timeout_s=180):
+        """Call a portal method that answers with a Request's Response
+        signal; returns (response code, results dict)."""
+        token = self.token()
+        path = "/org/freedesktop/portal/desktop/request/%s/%s" % (self.sender, token)
+        loop = GLib.MainLoop()
+        got = {}
+
+        def on_response(_conn, _sender, _path, _iface, _signal, params):
+            code, results = params.unpack()
+            got["code"], got["results"] = code, results
+            loop.quit()
+
+        # Subscribed before the call (the path is known from the token), so
+        # a quick Response is not missed.
+        sub = self.bus.signal_subscribe(
+            PORTAL, REQUEST, "Response", path, None, Gio.DBusSignalFlags.NONE, on_response
+        )
+        self.bus.call_sync(
+            PORTAL, OBJECT, iface, method, args_fn(token), None, Gio.DBusCallFlags.NONE, -1, None
+        )
+        GLib.timeout_add_seconds(timeout_s, loop.quit)
+        loop.run()
+        self.bus.signal_unsubscribe(sub)
+        if "code" not in got:
+            raise RuntimeError("%s.%s: no answer in %d s" % (iface, method, timeout_s))
+        return got["code"], got["results"]
+
+
+def record(seconds, out, dmabuf=False):
+    p = Portal()
+    code, res = p.call(
+        SCREENCAST,
+        "CreateSession",
+        lambda t: GLib.Variant(
+            "(a{sv})",
+            (
+                {
+                    "handle_token": GLib.Variant("s", t),
+                    "session_handle_token": GLib.Variant("s", t + "_s"),
+                },
+            ),
+        ),
+    )
+    if code != 0:
+        print("CreateSession: response %d" % code)
+        return 1
+    session = res["session_handle"]
+    print("session", session)
+    code, _ = p.call(
+        SCREENCAST,
+        "SelectSources",
+        lambda t: GLib.Variant(
+            "(oa{sv})",
+            (
+                session,
+                {
+                    "handle_token": GLib.Variant("s", t),
+                    "types": GLib.Variant("u", 1),  # monitor
+                    "multiple": GLib.Variant("b", False),
+                    "cursor_mode": GLib.Variant("u", 1),  # hidden
+                },
+            ),
+        ),
+    )
+    if code != 0:
+        print("SelectSources: response %d" % code)
+        return 1
+    print("pick a panel on the phone...")
+    code, res = p.call(
+        SCREENCAST,
+        "Start",
+        lambda t: GLib.Variant(
+            "(osa{sv})",
+            (
+                session,
+                "",
+                {
+                    "handle_token": GLib.Variant("s", t),
+                },
+            ),
+        ),
+    )
+    if code != 0:
+        print("Start: response %d (1 = cancelled by the user)" % code)
+        return 1
+    streams = res.get("streams") or []
+    if not streams:
+        print("Start: no stream")
+        return 1
+    node, props = streams[0]
+    print("stream: PipeWire node %d %s" % (node, props))
+    reply, fds = p.bus.call_with_unix_fd_list_sync(
+        PORTAL,
+        OBJECT,
+        SCREENCAST,
+        "OpenPipeWireRemote",
+        GLib.Variant("(oa{sv})", (session, {})),
+        GLib.VariantType("(h)"),
+        Gio.DBusCallFlags.NONE,
+        -1,
+        None,
+        None,
+    )
+    fd = fds.get(reply.unpack()[0])
+    size = props.get("size")
+    if dmabuf:
+        pipeline = (
+            "pipewiresrc fd=%d path=%d do-timestamp=true ! video/x-raw(memory:DMABuf) "
+            "! fakesink sync=false" % (fd, node)
+        )
+    else:
+        os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+        caps = ""
+        if size:
+            caps = " ! video/x-raw,width=%d,height=%d" % (
+                size[0] // 2 // 2 * 2,
+                size[1] // 2 // 2 * 2,
+            )
+        pipeline = (
+            "pipewiresrc fd=%d path=%d do-timestamp=true keepalive-time=1000 always-copy=true "
+            "! videoconvert ! videoscale%s ! videorate ! video/x-raw,framerate=15/1 "
+            "! vp8enc deadline=1 cpu-used=8 threads=4 ! webmmux ! filesink location=%s"
+            % (fd, node, caps, out)
+        )
+    print("gst-launch-1.0 -e", pipeline)
+    started = time.monotonic()
+    proc = subprocess.Popen(["gst-launch-1.0", "-e"] + pipeline.split(" "), pass_fds=(fd,))
+    try:
+        proc.wait(timeout=seconds)
+    except subprocess.TimeoutExpired:
+        proc.send_signal(2)  # SIGINT: -e sends EOS, the file is finished
+        try:
+            proc.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    took = time.monotonic() - started
+    p.bus.call_sync(
+        PORTAL,
+        session,
+        "org.freedesktop.portal.Session",
+        "Close",
+        None,
+        None,
+        Gio.DBusCallFlags.NONE,
+        -1,
+        None,
+    )
+    if dmabuf:
+        print("streamed %.1f s (gst-launch exit %s)" % (took, proc.returncode))
+        return 0 if proc.returncode == 0 else 1
+    ok = os.path.exists(out) and os.path.getsize(out) > 0
+    print(
+        "%s: %s (%d bytes, %.1f s)"
+        % ("recorded" if ok else "FAILED", out, os.path.getsize(out) if ok else 0, took)
+    )
+    return 0 if ok else 1
+
+
+def screenshot(interactive):
+    p = Portal()
+    code, res = p.call(
+        SCREENSHOT,
+        "Screenshot",
+        lambda t: GLib.Variant(
+            "(sa{sv})",
+            (
+                "",
+                {
+                    "handle_token": GLib.Variant("s", t),
+                    "interactive": GLib.Variant("b", interactive),
+                },
+            ),
+        ),
+    )
+    if code != 0:
+        print("Screenshot: response %d (1 = cancelled, 2 = failed)" % code)
+        return 1
+    print(res.get("uri"))
+    return 0
+
+
+def main(argv):
+    if len(argv) >= 2 and argv[1] == "record":
+        seconds = float(argv[2]) if len(argv) > 2 else 10.0
+        out = (
+            argv[3]
+            if len(argv) > 3
+            else os.path.expanduser("~/Videos/screencast-%s.webm" % time.strftime("%Y%m%d-%H%M%S"))
+        )
+        return record(seconds, out)
+    if len(argv) >= 2 and argv[1] == "stream":
+        return record(float(argv[2]) if len(argv) > 2 else 10.0, None, dmabuf=True)
+    if len(argv) >= 2 and argv[1] == "screenshot":
+        return screenshot("--interactive" in argv[2:])
+    print(__doc__.strip(), file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

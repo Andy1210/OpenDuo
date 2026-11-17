@@ -1,0 +1,74 @@
+From d870098c413e2cd8c61f85b1d2f6fcefc01f7d7d Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 00:25:15 +0100
+Subject: [PATCH 067/137] clk: qcom: camcc-sm8350: Give the PLLs their
+ configurations
+
+qcom_cc_probe() configures the PLLs from clk_alpha_pll.config: without it
+the probe stopped at "cam_cc_pll0: missing pll config or regs".
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/clk/qcom/camcc-sm8350.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/drivers/clk/qcom/camcc-sm8350.c b/drivers/clk/qcom/camcc-sm8350.c
+index 4cdb77355fc6..b281e995f4f7 100644
+--- a/drivers/clk/qcom/camcc-sm8350.c
++++ b/drivers/clk/qcom/camcc-sm8350.c
+@@ -69,6 +69,7 @@ static const struct alpha_pll_config cam_cc_pll0_config = {
+ 
+ static struct clk_alpha_pll cam_cc_pll0 = {
+ 	.offset = 0x0,
++	.config = &cam_cc_pll0_config,
+ 	.vco_table = lucid_5lpe_vco,
+ 	.num_vco = ARRAY_SIZE(lucid_5lpe_vco),
+ 	.regs = clk_alpha_pll_regs[CLK_ALPHA_PLL_TYPE_LUCID],
+@@ -147,6 +148,7 @@ static const struct alpha_pll_config cam_cc_pll1_config = {
+ 
+ static struct clk_alpha_pll cam_cc_pll1 = {
+ 	.offset = 0x1000,
++	.config = &cam_cc_pll1_config,
+ 	.vco_table = lucid_5lpe_vco,
+ 	.num_vco = ARRAY_SIZE(lucid_5lpe_vco),
+ 	.regs = clk_alpha_pll_regs[CLK_ALPHA_PLL_TYPE_LUCID],
+@@ -196,6 +198,7 @@ static const struct alpha_pll_config cam_cc_pll2_config = {
+ 
+ static struct clk_alpha_pll cam_cc_pll2 = {
+ 	.offset = 0x2000,
++	.config = &cam_cc_pll2_config,
+ 	.vco_table = zonda_5lpe_vco,
+ 	.num_vco = ARRAY_SIZE(zonda_5lpe_vco),
+ 	.regs = clk_alpha_pll_regs[CLK_ALPHA_PLL_TYPE_ZONDA],
+@@ -228,6 +231,7 @@ static const struct alpha_pll_config cam_cc_pll3_config = {
+ 
+ static struct clk_alpha_pll cam_cc_pll3 = {
+ 	.offset = 0x3000,
++	.config = &cam_cc_pll3_config,
+ 	.vco_table = lucid_5lpe_vco,
+ 	.num_vco = ARRAY_SIZE(lucid_5lpe_vco),
+ 	.regs = clk_alpha_pll_regs[CLK_ALPHA_PLL_TYPE_LUCID],
+@@ -283,6 +287,7 @@ static const struct alpha_pll_config cam_cc_pll4_config = {
+ 
+ static struct clk_alpha_pll cam_cc_pll4 = {
+ 	.offset = 0x4000,
++	.config = &cam_cc_pll4_config,
+ 	.vco_table = lucid_5lpe_vco,
+ 	.num_vco = ARRAY_SIZE(lucid_5lpe_vco),
+ 	.regs = clk_alpha_pll_regs[CLK_ALPHA_PLL_TYPE_LUCID],
+@@ -338,6 +343,7 @@ static const struct alpha_pll_config cam_cc_pll5_config = {
+ 
+ static struct clk_alpha_pll cam_cc_pll5 = {
+ 	.offset = 0x5000,
++	.config = &cam_cc_pll5_config,
+ 	.vco_table = lucid_5lpe_vco,
+ 	.num_vco = ARRAY_SIZE(lucid_5lpe_vco),
+ 	.regs = clk_alpha_pll_regs[CLK_ALPHA_PLL_TYPE_LUCID],
+@@ -393,6 +399,7 @@ static const struct alpha_pll_config cam_cc_pll6_config = {
+ 
+ static struct clk_alpha_pll cam_cc_pll6 = {
+ 	.offset = 0x6000,
++	.config = &cam_cc_pll6_config,
+ 	.vco_table = lucid_5lpe_vco,
+ 	.num_vco = ARRAY_SIZE(lucid_5lpe_vco),
+ 	.regs = clk_alpha_pll_regs[CLK_ALPHA_PLL_TYPE_LUCID],

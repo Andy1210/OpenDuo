@@ -1,0 +1,54 @@
+#!/bin/sh
+# duo2-charge-hold status|on|off|apply
+#
+# The battery's charge hold (Microsoft's optimized-charging hold of the
+# Surface Duo 2 firmware, "DOC"): on, the firmware keeps the battery short of
+# full, for a phone that lives on its charger. The kernel offers it as the
+# battery's charge_types: "Standard" or "Long Life" (patch "qcom_battmgr:
+# Microsoft's charge hold"). Where it holds is the firmware's choice.
+#
+#   status   on | off | unsupported (anyone; reads sysfs)
+#   on, off  set it and remember it in /etc/duo2/charge-hold (root; the GUI
+#            user through sudo, for Duo Settings)
+#   apply    set what /etc/duo2/charge-hold says (udev, when the battery
+#            appears; the firmware forgets it on every boot)
+set -eu
+T=/sys/class/power_supply/qcom-battmgr-bat/charge_types
+F=/etc/duo2/charge-hold
+
+status() {
+	[ -r "$T" ] || { echo unsupported; return; }
+	case $(cat "$T" 2>/dev/null) in
+	*"[Long Life]"*) echo on ;;
+	*"[Standard]"*) echo off ;;
+	*) echo unsupported ;;
+	esac
+}
+
+set_hold() { # on|off
+	[ -w "$T" ] || { echo "no charge hold on this kernel ($T)" >&2; exit 1; }
+	if [ "$1" = on ]; then v="Long Life"; else v=Standard; fi
+	printf '%s\n' "$v" > "$T"
+}
+
+case ${1:-status} in
+status) status ;;
+on|off)
+	set_hold "$1"
+	mkdir -p /etc/duo2
+	echo "$1" > "$F.tmp" && mv "$F.tmp" "$F"
+	status
+	;;
+apply)
+	[ -r "$F" ] || exit 0
+	want=$(cat "$F")
+	case $want in on|off) ;; *) exit 0 ;; esac
+	# the battery manager may still be coming up (service_up): a few tries
+	i=0
+	until set_hold "$want" 2>/dev/null; do
+		i=$((i + 1)); [ $i -ge 10 ] && { echo "charge hold: could not set $want" >&2; exit 1; }
+		sleep 3
+	done
+	;;
+*) echo "usage: $0 status|on|off|apply" >&2; exit 2 ;;
+esac

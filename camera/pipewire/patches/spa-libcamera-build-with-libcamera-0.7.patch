@@ -1,0 +1,31 @@
+Description: spa: libcamera: Build with libcamera 0.7
+ libcamera 0.7 returns the Model property as a std::string_view and the
+ planes of a FrameBuffer as a Span: convert the model to a string, and
+ take the planes as they come. Both still build with the libcamera
+ versions trixie's pipewire was built for.
+Author: duo2-os
+Forwarded: not-needed (a local rebuild of trixie's 1.4.2)
+Last-Update: 2026-11-08
+---
+--- a/spa/plugins/libcamera/libcamera-device.cpp
++++ b/spa/plugins/libcamera/libcamera-device.cpp
+@@ -66,7 +66,7 @@
+ static std::string cameraModel(const Camera& camera)
+ {
+ 	if (auto model = camera.properties().get(properties::Model))
+-		return std::move(model.value());
++		return std::string(model.value());
+ 
+ 	return camera.id();
+ }
+--- a/spa/plugins/libcamera/libcamera-utils.cpp
++++ b/spa/plugins/libcamera/libcamera-utils.cpp
+@@ -118,7 +118,7 @@
+ 	Stream *stream = impl->config->at(0).stream();
+ 	const std::vector<std::unique_ptr<FrameBuffer>> &bufs =
+ 			impl->allocator->buffers(stream);
+-	const std::vector<libcamera::FrameBuffer::Plane> &planes = bufs[0]->planes();
++	const auto &planes = bufs[0]->planes();
+ 	int fd = -1;
+ 	uint32_t buffers_blocks = 0;
+ 

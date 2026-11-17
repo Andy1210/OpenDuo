@@ -1,0 +1,4 @@
+# OpenDuo: the administrator (ssh key login only, no GUI session) has root;
+# the GUI user has none, only the narrow helpers of the shell, Duo Settings
+# and the services (their own rules). docs/hardware/security.md.
+duo2admin ALL=(ALL:ALL) NOPASSWD: ALL

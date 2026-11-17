@@ -1,0 +1,17 @@
+#!/bin/sh
+# @PKG@: never the running kernel (its modules are this package's files);
+# otherwise its boot entry and ESP files go (duo2-boot).
+set -e
+REL=@RELEASE@
+case "$1" in
+remove)
+    if [ "$(uname -r)" = "$REL" ] && [ -z "${OPENDUO_REMOVE_RUNNING_KERNEL:-}" ]; then
+        echo "@PKG@: $REL is the running kernel: not removed (start another one first)" >&2
+        exit 1
+    fi
+    if [ -x /usr/local/sbin/duo2-boot ]; then
+        /usr/local/sbin/duo2-boot remove "$REL" || true
+    fi
+    ;;
+esac
+exit 0

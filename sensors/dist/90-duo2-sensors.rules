@@ -1,0 +1,9 @@
+# The Surface Duo 2's sensors live on the SLPI (SSC), reached through its
+# FastRPC device: tell iio-sensor-proxy (3.9, SSC support) which ones to use.
+# Debian's 3.7 rules know nothing of SSC. The proxy's SSC drivers take the
+# FIRST sensor of a type; the Duo 2 has two of most (one per half), and the
+# posture-aware rotation is duo-posed's job (it reads both accelerometers).
+ACTION=="remove", GOTO="duo2_sensors_end"
+SUBSYSTEM=="misc", KERNEL=="fastrpc-sdsp", ENV{IIO_SENSOR_PROXY_TYPE}="ssc-accel ssc-light ssc-proximity ssc-compass", \
+    TAG+="systemd", ENV{SYSTEMD_WANTS}+="iio-sensor-proxy.service hexagonrpcd.service"
+LABEL="duo2_sensors_end"

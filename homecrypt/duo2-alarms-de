@@ -1,0 +1,78 @@
+#!/usr/bin/python3 -sE
+"""duo2-alarms-de: Clocks' alarms for before the first unlock (homecrypt/README.md).
+
+With the home encrypted, the user's dconf database (~/.config/dconf/user) is
+not there until the first unlock, and Clocks would find no alarm to ring.
+This user service (running only while the home is encrypted and unlocked)
+keeps a copy of `org.gnome.clocks alarms` in /var/lib/duo2-de/alarms, a
+compiled dconf database that the boot job lists after the user's own in
+/etc/dconf/profile/user (`file-db:`). Before the first unlock the user's
+database is empty and the copy answers; after it, the user's own value
+wins. Only the alarms are copied: their times, names and repeat days stay
+unencrypted on the flash, nothing else.
+"""
+
+import os
+import subprocess
+import sys
+import tempfile
+
+import gi
+
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio, GLib  # noqa: E402
+
+DE_FILE = "/var/lib/duo2-de/alarms"
+SCHEMA = "org.gnome.clocks"
+
+
+def log(*args):
+    print("duo2-alarms-de:", *args, file=sys.stderr, flush=True)
+
+
+def keyfile(value_text):
+    """The dconf keyfile with the one key (dconf compile's input)."""
+    return "[org/gnome/clocks]\nalarms=%s\n" % value_text
+
+
+def save(settings):
+    text = settings.get_value("alarms").print_(True)
+    d = os.path.dirname(DE_FILE)
+    with tempfile.TemporaryDirectory(dir=d) as tmp:
+        src = os.path.join(tmp, "keyfile.d")
+        os.mkdir(src)
+        with open(os.path.join(src, "alarms"), "w") as f:
+            f.write(keyfile(text))
+        out = os.path.join(tmp, "alarms")
+        rc = subprocess.call(["dconf", "compile", out, src])
+        if rc != 0:
+            log("dconf compile failed (%d)" % rc)
+            return
+        os.chmod(out, 0o600)
+        os.replace(out, DE_FILE)
+
+
+def main():
+    source = Gio.SettingsSchemaSource.get_default()
+    if source is None or source.lookup(SCHEMA, True) is None:
+        log("no Clocks schema: nothing to copy")
+        return 0
+    if not os.access(os.path.dirname(DE_FILE), os.W_OK):
+        log("%s is not writable: nothing to copy" % os.path.dirname(DE_FILE))
+        return 0
+    settings = Gio.Settings.new(SCHEMA)
+
+    def changed(s, _key):
+        try:
+            save(s)
+        except OSError as e:
+            log("not saved: %s" % e)
+
+    settings.connect("changed::alarms", changed)
+    changed(settings, "alarms")
+    GLib.MainLoop().run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

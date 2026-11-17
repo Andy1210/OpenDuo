@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily Bing image of the day for the wallpaper
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+RandomizedDelaySec=2h
+Persistent=true
+# A phone that was off at the time: a few minutes after the session starts.
+OnStartupSec=5min
+
+[Install]
+WantedBy=timers.target

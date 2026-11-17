@@ -1,0 +1,8 @@
+# The WiFi interface keeps its kernel name: wpa_supplicant@wlan0 and
+# 20-wlan.network expect wlan0, and udev renamed it to wlp1s0 when it won the
+# race against wpa_supplicant bringing it up.
+[Match]
+Driver=ath11k_pci
+
+[Link]
+Name=wlan0

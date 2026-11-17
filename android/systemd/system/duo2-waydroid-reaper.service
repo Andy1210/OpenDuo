@@ -1,0 +1,7 @@
+[Unit]
+Description=Stop the idle Waydroid container manager
+ConditionPathExists=/var/lib/waydroid/lxc/waydroid/config
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/duo2-waydroid-reaper

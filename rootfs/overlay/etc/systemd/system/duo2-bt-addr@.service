@@ -1,0 +1,14 @@
+[Unit]
+Description=Factory Bluetooth address for %i
+Documentation=file:/usr/local/sbin/duo2-bt-addr
+ConditionPathExists=/etc/duo2/factory-addresses
+BindsTo=sys-subsystem-bluetooth-devices-%i.device
+After=sys-subsystem-bluetooth-devices-%i.device duo2-factory-addr.service
+# bluetoothd adopts the adapter whenever it turns configured; ordering it
+# after this only spares it the unconfigured phase at boot.
+Before=bluetooth.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/duo2-bt-addr %i
+TimeoutStartSec=60

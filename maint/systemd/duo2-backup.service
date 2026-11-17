@@ -1,0 +1,13 @@
+[Unit]
+Description=Back up the owner's data to the NAS / PC (duo2-backup)
+Documentation=file:///usr/local/sbin/duo2-backup
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/duo2/backup.conf
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/duo2-backup run
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=6h

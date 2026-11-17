@@ -1,0 +1,96 @@
+#!/bin/sh
+# duo2-wifi-join SSID [SSID ...]
+#
+# Join a WPA2-PSK network on wlan0 with wpa_supplicant.
+#
+# The passphrase (8-63 characters) or the 64-hex-digit PSK is read from
+# stdin, never from the command line, so it stays out of shell history and
+# `ps`. On a terminal it prompts without echo. Every SSID given gets the same
+# key (a dual-band router with one password and two names), the first one the
+# highest priority. The result is /etc/wpa_supplicant/wpa_supplicant-wlan0.conf
+# (mode 600), and wpa_supplicant@wlan0 is (re)started and enabled; DHCP on
+# wlan* is systemd-networkd's job (20-wlan.network).
+#
+#   echo 'passphrase' | sudo duo2-wifi-join HomeNet5 HomeNet24
+#
+# CONF=/tmp/test.conf writes elsewhere and starts nothing (for testing).
+set -eu
+
+[ $# -ge 1 ] || { echo "usage: $0 SSID [SSID ...] < passphrase" >&2; exit 2; }
+
+if [ -t 0 ]; then
+	stty -echo
+	printf 'Passphrase: ' >&2
+	IFS= read -r P || true
+	stty echo
+	echo >&2
+else
+	IFS= read -r P || true
+fi
+P=$(printf '%s' "$P" | tr -d '\r')
+len=${#P}
+if printf '%s' "$P" | grep -qE '^[0-9a-fA-F]{64}$'; then
+	hex=1
+elif [ "$len" -ge 8 ] && [ "$len" -le 63 ]; then
+	hex=0
+else
+	echo "the key must be 8-63 characters or 64 hex digits (got $len characters)" >&2
+	exit 1
+fi
+
+default_conf=/etc/wpa_supplicant/wpa_supplicant-wlan0.conf
+conf=${CONF:-$default_conf}
+[ "$conf" != "$default_conf" ] || [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
+
+umask 077
+mkdir -p "$(dirname "$conf")"
+tmp=$(mktemp "$conf.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+{
+	printf 'ctrl_interface=DIR=/run/wpa_supplicant GROUP=netdev\nupdate_config=1\n\n'
+	pr=$#
+	for s in "$@"; do
+		if [ "$hex" = 1 ]; then
+			printf 'network={\n\tssid="%s"\n\tpsk=%s\n\tpriority=%d\n}\n' "$s" "$P" "$pr"
+		else
+			# wpa_passphrase reads the passphrase from stdin when it is not
+			# given as an argument; drop the plain-text comment it prints.
+			printf '%s\n' "$P" | wpa_passphrase "$s" | grep -v '^[[:space:]]*#psk=' |
+				sed "s/^}/\tpriority=$pr\n}/"
+		fi
+		pr=$((pr - 1))
+	done
+} >"$tmp"
+unset P
+mv "$tmp" "$conf"
+trap - EXIT
+chmod 600 "$conf"
+
+[ "$conf" = "$default_conf" ] || { echo "wrote $conf"; exit 0; }
+
+# iwd and wpa_supplicant must not both drive wlan0.
+systemctl disable --now iwd.service 2>/dev/null || true
+systemctl enable wpa_supplicant@wlan0.service >/dev/null 2>&1
+systemctl restart wpa_supplicant@wlan0.service
+
+i=0
+state=
+while [ $i -lt 40 ]; do
+	state=$(wpa_cli -i wlan0 status 2>/dev/null | sed -n 's/^wpa_state=//p')
+	[ "$state" = COMPLETED ] && break
+	sleep 1
+	i=$((i + 1))
+done
+wpa_cli -i wlan0 status 2>/dev/null | grep -E '^(ssid|bssid|freq|wpa_state|key_mgmt)='
+if [ "$state" != COMPLETED ]; then
+	echo "not associated after 40 s (wrong key, or out of range?)" >&2
+	journalctl -u wpa_supplicant@wlan0 -n 15 --no-pager >&2 || true
+	exit 1
+fi
+i=0
+while [ $i -lt 20 ] && ! ip -4 -o addr show wlan0 | grep -q inet; do
+	sleep 1
+	i=$((i + 1))
+done
+ip -br addr show wlan0
+ip route show default dev wlan0 2>/dev/null || true

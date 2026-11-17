@@ -1,0 +1,56 @@
+From aa61410e2abcf9a9081afeed53fb8956a8620db0 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 08:12:32 +0100
+Subject: [PATCH 5/6] ipa: simple: agc: Converge faster from far off
+
+The proportional controller steps by at most 10% per update, and with
+the sensor's exposure and gain delays an update comes every few frames.
+A scene change by a factor of a few hundred (from a phone lying face
+down into daylight, the state the sensor keeps between two sessions)
+took more than ten seconds of a wrong exposure. Triple the proportional
+gain, up to 30% per update; near the target the steps stay small.
+
+The AGC is reworked upstream after v0.7.2 (ported to libipa); this is a
+local tuning of the 0.7.2 controller for duo2-os.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/ipa/simple/algorithms/agc.cpp | 17 ++++++++++-------
+ 1 file changed, 10 insertions(+), 7 deletions(-)
+
+diff --git a/src/ipa/simple/algorithms/agc.cpp b/src/ipa/simple/algorithms/agc.cpp
+index a13a7552..827483a6 100644
+--- a/src/ipa/simple/algorithms/agc.cpp
++++ b/src/ipa/simple/algorithms/agc.cpp
+@@ -45,21 +45,24 @@ static constexpr float kExposureSatisfactory = 0.2;
+  *
+  *   factor = 1.0 + kExpProportionalGain * error
+  *
+- * With kExpProportionalGain = 0.04:
+- *   - max error ~2.5 -> factor 1.10 (~10% step, same as before)
+- *   - error 1.0      -> factor 1.04 (~4% step)
+- *   - error 0.3      -> factor 1.012 (~1.2% step)
++ * With kExpProportionalGain = 0.12:
++ *   - max error ~2.5 -> factor 1.30 (~30% step)
++ *   - error 1.0      -> factor 1.12 (~12% step)
++ *   - error 0.3      -> factor 1.036 (~3.6% step)
+  *
+  * This replaces the fixed 10% bang-bang step with a proportional correction
+- * that converges smoothly and avoids overshooting near the target.
++ * that converges smoothly and avoids overshooting near the target. With the
++ * sensor's control delays an update happens every few frames only: at 10%
++ * per update, coming from a dark scene into daylight (a factor of a few
++ * hundred) took more than ten seconds.
+  */
+-static constexpr float kExpProportionalGain = 0.04;
++static constexpr float kExpProportionalGain = 0.12;
+ 
+ /*
+  * Maximum multiplicative step per frame, to bound the correction when the
+  * scene changes dramatically.
+  */
+-static constexpr float kExpMaxStep = 0.15;
++static constexpr float kExpMaxStep = 0.3;
+ 
+ Agc::Agc()
+ {

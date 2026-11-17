@@ -1,0 +1,201 @@
+From ab344bb9f7a4aedfadb2fe1168ee04b3d9d7c930 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 05:55:48 +0100
+Subject: [PATCH 057/137] arm64: dts: qcom: sm8350-microsoft-surface-duo2: Add
+ the camera PMICs
+
+The four cameras take their analog, digital and I/O rails from two
+PM8008 PMICs on QUP SE18 (I2C): PM8008i at 0x8/0x9 (reset gpio33) and
+PM8008j at 0xc/0xd (reset gpio35). Describe both with the input rails
+and the voltages of the vendor device tree; nothing consumes them yet.
+
+  PM8008i: L1 front DVDD 1.048 V, L2 ultrawide DVDD 1.048 V,
+           L3 front AVDD, L4 ultrawide AVDD, L6 wide AVDD (2.8 V),
+           L5 wide 1.8 V, L7 time-of-flight VDD
+  PM8008j: L1 wide DVDD 1.104 V, L2 tele DVDD 1.048 V,
+           L3 DOVDD of all cameras 1.8 V, L5 tele AVDD 2.8 V,
+           L6/L7 AF/OIS drivers (wide 2.8 V, tele 2.808 V), L4 unused
+
+The vendor DT wires no PM8008 interrupt (needs "mfd: qcom-pm8008: Make
+the interrupt optional"). Enable QUP wrapper 2 and its GPI DMA for SE18.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../qcom/sm8350-microsoft-surface-duo2.dts    | 153 ++++++++++++++++++
+ 1 file changed, 153 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+index ca1d03e4258b..deffad5a6ddb 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+@@ -761,10 +761,149 @@ &pon_resin {
+ 	status = "okay";
+ };
+ 
++&gpi_dma2 {
++	status = "okay";
++};
++
++/*
++ * SE18 runs as I2C on this board (the boot chain loads the I2C protocol):
++ * the two PM8008 camera PMICs. The vendor DT wires no PM8008 interrupt.
++ */
++&i2c18 {
++	clock-frequency = <400000>;
++	status = "okay";
++
++	pm8008i: pmic@8 {
++		compatible = "qcom,pm8008";
++		reg = <0x8>;
++
++		reset-gpios = <&tlmm 33 GPIO_ACTIVE_LOW>;
++
++		vdd-l1-l2-supply = <&vreg_s12b_1p25>;
++		vdd-l3-l4-supply = <&vreg_bob>;
++		vdd-l5-supply = <&vreg_s1c_1p86>;
++		vdd-l6-supply = <&vreg_bob>;
++		vdd-l7-supply = <&vreg_bob>;
++
++		pinctrl-0 = <&pm8008i_reset_default>;
++		pinctrl-names = "default";
++
++		regulators {
++			/* front IMX481 DVDD */
++			vreg_l1i_1p05: ldo1 {
++				regulator-name = "vreg_l1i_1p05";
++				regulator-min-microvolt = <1048000>;
++				regulator-max-microvolt = <1048000>;
++			};
++			/* ultrawide IMX481 DVDD */
++			vreg_l2i_1p05: ldo2 {
++				regulator-name = "vreg_l2i_1p05";
++				regulator-min-microvolt = <1048000>;
++				regulator-max-microvolt = <1048000>;
++			};
++			/* front IMX481 AVDD (stock range 2.7-3.0 V) */
++			vreg_l3i_2p8: ldo3 {
++				regulator-name = "vreg_l3i_2p8";
++				regulator-min-microvolt = <2800000>;
++				regulator-max-microvolt = <2800000>;
++			};
++			/* ultrawide IMX481 AVDD (stock range 2.7-2.9 V) */
++			vreg_l4i_2p8: ldo4 {
++				regulator-name = "vreg_l4i_2p8";
++				regulator-min-microvolt = <2800000>;
++				regulator-max-microvolt = <2800000>;
++			};
++			/* wide IMX563 second 1.8 V rail (stock range 1.696-1.8 V) */
++			vreg_l5i_1p8: ldo5 {
++				regulator-name = "vreg_l5i_1p8";
++				regulator-min-microvolt = <1800000>;
++				regulator-max-microvolt = <1800000>;
++			};
++			/* wide IMX563 AVDD (stock range 2.7-2.9 V) */
++			vreg_l6i_2p8: ldo6 {
++				regulator-name = "vreg_l6i_2p8";
++				regulator-min-microvolt = <2800000>;
++				regulator-max-microvolt = <2800000>;
++			};
++			/* TMF8801 time-of-flight VDD */
++			vreg_l7i_2p8: ldo7 {
++				regulator-name = "vreg_l7i_2p8";
++				regulator-min-microvolt = <2700000>;
++				regulator-max-microvolt = <3000000>;
++			};
++		};
++	};
++
++	pm8008j: pmic@c {
++		compatible = "qcom,pm8008";
++		reg = <0xc>;
++
++		reset-gpios = <&tlmm 35 GPIO_ACTIVE_LOW>;
++
++		vdd-l1-l2-supply = <&vreg_s12b_1p25>;
++		vdd-l3-l4-supply = <&vreg_s1c_1p86>;
++		vdd-l5-supply = <&vreg_bob>;
++		vdd-l6-supply = <&vreg_bob>;
++		vdd-l7-supply = <&vreg_bob>;
++
++		pinctrl-0 = <&pm8008j_reset_default>;
++		pinctrl-names = "default";
++
++		regulators {
++			/* wide IMX563 DVDD */
++			vreg_l1j_1p1: ldo1 {
++				regulator-name = "vreg_l1j_1p1";
++				regulator-min-microvolt = <1104000>;
++				regulator-max-microvolt = <1104000>;
++			};
++			/* tele IMX481 DVDD */
++			vreg_l2j_1p05: ldo2 {
++				regulator-name = "vreg_l2j_1p05";
++				regulator-min-microvolt = <1048000>;
++				regulator-max-microvolt = <1048000>;
++			};
++			/* DOVDD of all four cameras (stock range 1.728-1.8 V) */
++			vreg_l3j_1p8: ldo3 {
++				regulator-name = "vreg_l3j_1p8";
++				regulator-min-microvolt = <1800000>;
++				regulator-max-microvolt = <1800000>;
++			};
++			/* no consumer in the stock DT */
++			vreg_l4j_1p8: ldo4 {
++				regulator-name = "vreg_l4j_1p8";
++				regulator-min-microvolt = <1728000>;
++				regulator-max-microvolt = <1800000>;
++			};
++			/* tele IMX481 AVDD (stock range 2.7-2.9 V) */
++			vreg_l5j_2p8: ldo5 {
++				regulator-name = "vreg_l5j_2p8";
++				regulator-min-microvolt = <2800000>;
++				regulator-max-microvolt = <2800000>;
++			};
++			/* wide LC898129 AF/OIS driver */
++			vreg_l6j_2p8: ldo6 {
++				regulator-name = "vreg_l6j_2p8";
++				regulator-min-microvolt = <2800000>;
++				regulator-max-microvolt = <2800000>;
++			};
++			/* tele LC898129 AF/OIS driver (the stock consumers ask 2.808 V) */
++			vreg_l7j_2p8: ldo7 {
++				regulator-name = "vreg_l7j_2p8";
++				regulator-min-microvolt = <2808000>;
++				regulator-max-microvolt = <2808000>;
++			};
++		};
++	};
++};
++
+ &qupv3_id_0 {
+ 	status = "okay";
+ };
+ 
++&qupv3_id_2 {
++	status = "okay";
++};
++
+ &qupv3_id_1 {
+ 	status = "okay";
+ 
+@@ -884,6 +1023,20 @@ earpiece: speaker@0,3 {
+ &tlmm {
+ 	gpio-reserved-ranges = <4 4>, <12 4>, <56 4>, <76 4>;
+ 
++	pm8008i_reset_default: pm8008i-reset-default-state {
++		pins = "gpio33";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	pm8008j_reset_default: pm8008j-reset-default-state {
++		pins = "gpio35";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
+ 	/* BT UART on SE13 (stock: gpio0 CTS, gpio1 RTS, gpio2 RX, gpio3 TX). */
+ 	qup_uart13_default: qup-uart13-default-state {
+ 		cts-rx-pins {

@@ -1,0 +1,61 @@
+From ee63307f6d552d4dbc69a77a4cd0f4e7d01fec5a Mon Sep 17 00:00:00 2001
+From: duo2 <duo2@localhost>
+Date: Sat, 7 Nov 2026 00:23:17 +0100
+Subject: [PATCH 2/2] diag-router: answer a restarted DSP at its new port;
+ SET_ALL_MSG_MASK without a crash
+
+---
+ router/peripheral-qrtr.c | 11 +++++++++--
+ router/peripheral.c      |  6 +++++-
+ 2 files changed, 14 insertions(+), 3 deletions(-)
+
+diff --git a/router/peripheral-qrtr.c b/router/peripheral-qrtr.c
+index 6b87a99..7db50d5 100644
+--- a/router/peripheral-qrtr.c
++++ b/router/peripheral-qrtr.c
+@@ -93,11 +93,18 @@ static int qrtr_cntl_recv(int fd, void *data)
+ 	case QRTR_TYPE_DEL_CLIENT:
+ 		break;
+ 	case QRTR_TYPE_DATA:
++		/*
++		 * A restarted DSP talks from a new port: answer it there, not
++		 * at the old one (no BYE reaches this socket when it went down).
++		 */
++		connect(perif->cntl_fd, (struct sockaddr *)&sq, sizeof(sq));
+ 		if (!perif->cntl_open) {
+-			connect(perif->cntl_fd, (struct sockaddr *)&sq, sizeof(sq));
+ 			perif->cntl_open = true;
+ 			watch_add_writeq(perif->cntl_fd, &perif->cntlq);
+ 		}
++		if (getenv("DIAG_DEBUG"))
++			fprintf(stderr, "[%s] cntl from %d:%d, %zd bytes, cmd %u\n", perif->name,
++				sq.sq_node, sq.sq_port, n, n >= 4 ? *(uint32_t *)pkt.data : 0);
+ 
+ 		return diag_cntl_recv(perif, pkt.data, pkt.data_len);
+ 	case QRTR_TYPE_BYE:
+@@ -225,8 +232,8 @@ static int qrtr_data_recv(int fd, void *data)
+ 	case QRTR_TYPE_DEL_CLIENT:
+ 		break;
+ 	case QRTR_TYPE_DATA:
++		connect(perif->data_fd, (struct sockaddr *)&sq, sizeof(sq));
+ 		if (!perif->data_open) {
+-			connect(perif->data_fd, (struct sockaddr *)&sq, sizeof(sq));
+ 			perif->data_open = true;
+ 			watch_add_writeq(perif->data_fd, &perif->dataq);
+ 		}
+diff --git a/router/peripheral.c b/router/peripheral.c
+index 1b63a58..afba09e 100644
+--- a/router/peripheral.c
++++ b/router/peripheral.c
+@@ -101,6 +101,10 @@ void peripheral_broadcast_msg_mask(struct diag_ssid_range_t *range)
+ 	list_for_each(item, &peripherals) {
+ 		peripheral = container_of(item, struct peripheral, node);
+ 
+-		diag_cntl_send_msg_mask(peripheral, range);
++		/* SET_ALL_MSG_MASK passes no range: every range then */
++		if (range)
++			diag_cntl_send_msg_mask(peripheral, range);
++		else
++			diag_cntl_send_masks(peripheral);
+ 	}
+ }

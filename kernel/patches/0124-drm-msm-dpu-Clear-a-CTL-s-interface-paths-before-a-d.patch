@@ -1,0 +1,139 @@
+From 84a25090201ce4348200789fa0fcb5655eb0157b Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 12:48:00 +0100
+Subject: [PATCH 124/137] drm/msm/dpu: Clear a CTL's interface paths before a
+ display sets it up
+
+On DPU 5.0 and later, ->setup_intf_cfg() adds the interface, DSC and 3D
+merge of a phys encoder to the ones already set in the CTL
+(CTL_INTF_ACTIVE, CTL_DSC_ACTIVE, CTL_MERGE_3D_ACTIVE), so that several
+phys encoders and a writeback can share one CTL. Taking them out again
+is left to the disable path: video mode and writeback do it in
+dpu_encoder_helper_phys_cleanup(), command mode does not, and its CTL
+keeps the interface of a panel that has been switched off.
+
+The resource manager gives each modeset the lowest free CTL. With two
+command-mode panels (the Surface Duo 2) that are switched one off and
+the other on and back, the panels swap CTLs: one CTL is left with the
+old panel's interface when the other panel takes it, and the same
+happens to the second CTL when the first panel comes back. Each CTL then
+drives both interfaces: the kickoff of one panel also starts the other
+panel's DSI host, which has no data, and both pipelines stop on the
+first frames after the second panel lights up (frame done timeouts on
+both encoders, DSI command FIFO and MDP FIFO underflow, a corrupted
+picture until both panels are switched off).
+
+Clear the CTL when a display encoder is enabled, before its phys encoders
+set it up. At that point the CTL belongs to the encoder's CRTC alone. Doing
+it in the command-mode disable path instead would race with the new owner:
+the disable of the old panel may run in a non-blocking commit while the
+other panel's modeset programs the CTL, and the two commits share no CRTC,
+so nothing orders them. A CRTC in clone mode shares its CTL with a
+writeback encoder that sets its own paths in it; it is left as it is.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c | 32 +++++++++++++++++++++
+ drivers/gpu/drm/msm/disp/dpu1/dpu_hw_ctl.c  | 11 +++++++
+ drivers/gpu/drm/msm/disp/dpu1/dpu_hw_ctl.h  |  9 ++++++
+ 3 files changed, 52 insertions(+)
+
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
+index 1f20695f81e3..13ccea806689 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
+@@ -1333,6 +1333,36 @@ void dpu_encoder_virt_runtime_resume(struct drm_encoder *drm_enc)
+ 	mutex_unlock(&dpu_enc->enc_lock);
+ }
+ 
++/*
++ * The CTL of a modeset may have driven another display before: the resource
++ * manager gives a CTL released by one CRTC to the next one that needs it,
++ * and a command-mode encoder leaves its interface and DSC paths set in its
++ * CTL when it is disabled. ->setup_intf_cfg() only adds to them, so such a
++ * CTL would drive both interfaces. The CTL now belongs to this encoder's
++ * CRTC alone: clear it before the phys encoders set it up. A CRTC in clone
++ * mode shares its CTL with a writeback encoder, which sets its own paths in
++ * it; leave that CTL as it is.
++ */
++static void _dpu_encoder_clear_ctl_paths(struct dpu_encoder_virt *dpu_enc)
++{
++	struct dpu_hw_ctl *cleared = NULL;
++	int i;
++
++	if (dpu_enc->disp_info.intf_type == INTF_WB ||
++	    drm_crtc_in_clone_mode(dpu_enc->base.crtc->state))
++		return;
++
++	for (i = 0; i < dpu_enc->num_phys_encs; i++) {
++		struct dpu_hw_ctl *ctl = dpu_enc->phys_encs[i]->hw_ctl;
++
++		if (!ctl || ctl == cleared || !ctl->ops.clear_intf_paths)
++			continue;
++
++		ctl->ops.clear_intf_paths(ctl);
++		cleared = ctl;
++	}
++}
++
+ static void dpu_encoder_virt_atomic_enable(struct drm_encoder *drm_enc,
+ 					struct drm_atomic_commit *state)
+ {
+@@ -1358,6 +1388,8 @@ static void dpu_encoder_virt_atomic_enable(struct drm_encoder *drm_enc,
+ 	trace_dpu_enc_enable(DRMID(drm_enc), cur_mode->hdisplay,
+ 			     cur_mode->vdisplay);
+ 
++	_dpu_encoder_clear_ctl_paths(dpu_enc);
++
+ 	/* always enable slave encoder before master */
+ 	if (dpu_enc->cur_slave && dpu_enc->cur_slave->ops.enable)
+ 		dpu_enc->cur_slave->ops.enable(dpu_enc->cur_slave);
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_ctl.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_ctl.c
+index e8729fe1cfef..f658f779d2fd 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_ctl.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_ctl.c
+@@ -735,6 +735,16 @@ static void dpu_hw_ctl_reset_intf_cfg_v1(struct dpu_hw_ctl *ctx,
+ 	}
+ }
+ 
++static void dpu_hw_ctl_clear_intf_paths_v1(struct dpu_hw_ctl *ctx)
++{
++	struct dpu_hw_blk_reg_map *c = &ctx->hw;
++
++	DPU_REG_WRITE(c, CTL_INTF_ACTIVE, 0);
++	DPU_REG_WRITE(c, CTL_INTF_MASTER, 0);
++	DPU_REG_WRITE(c, CTL_DSC_ACTIVE, 0);
++	DPU_REG_WRITE(c, CTL_MERGE_3D_ACTIVE, 0);
++}
++
+ static void dpu_hw_ctl_set_active_fetch_pipes(struct dpu_hw_ctl *ctx,
+ 					      unsigned long *fetch_active)
+ {
+@@ -819,6 +829,7 @@ struct dpu_hw_ctl *dpu_hw_ctl_init(struct drm_device *dev,
+ 		c->ops.trigger_flush = dpu_hw_ctl_trigger_flush_v1;
+ 		c->ops.setup_intf_cfg = dpu_hw_ctl_intf_cfg_v1;
+ 		c->ops.reset_intf_cfg = dpu_hw_ctl_reset_intf_cfg_v1;
++		c->ops.clear_intf_paths = dpu_hw_ctl_clear_intf_paths_v1;
+ 		c->ops.update_pending_flush_intf =
+ 			dpu_hw_ctl_update_pending_flush_intf_v1;
+ 
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_ctl.h b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_ctl.h
+index e535bf013825..864bc4894a4f 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_ctl.h
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_ctl.h
+@@ -240,6 +240,15 @@ struct dpu_hw_ctl_ops {
+ 	void (*reset_intf_cfg)(struct dpu_hw_ctl *ctx,
+ 			struct dpu_hw_intf_cfg *cfg);
+ 
++	/**
++	 * @clear_intf_paths: clear every interface, interface master, DSC
++	 * and 3D merge path of the ctl_path. @setup_intf_cfg adds a path to
++	 * the ones the CTL already has, so a CTL that another display used
++	 * before has to be cleared before it is set up.
++	 * @ctx    : ctl path ctx pointer
++	 */
++	void (*clear_intf_paths)(struct dpu_hw_ctl *ctx);
++
+ 	/**
+ 	 * @reset: reset function for this ctl type
+ 	 */

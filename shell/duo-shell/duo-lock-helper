@@ -1,0 +1,415 @@
+#!/usr/bin/python3 -I
+"""duo-lock-helper: the one door to the lock screen's PIN (duoshell/lockstore.py).
+
+    duo-lock-helper verify            the PIN on stdin: exit 0 right, 1 wrong,
+                                      3 wait (prints "wait SECONDS"), 4 no PIN set
+    duo-lock-helper set               stdin: the current PIN (an empty line when
+                                      none is set), then the new one
+    duo-lock-helper clear             stdin: the current PIN (lock_on_blank goes off)
+    duo-lock-helper policy KEY on|off lock_on_blank | lock_on_close; making the
+                                      phone less safe needs the current PIN on stdin
+                                      (when one is set); lock_on_blank on needs a PIN
+    duo-lock-helper status            the policy (no secret)
+    duo-lock-helper home status       the home's encryption (JSON, no secret)
+    duo-lock-helper home enable recovery|norecovery
+                                      stdin: the PIN; the home is encrypted at
+                                      the next start (homecrypt/README.md); with
+                                      `recovery` prints the recovery key once
+    duo-lock-helper home disable      stdin: the PIN; decrypted at the next start
+    duo-lock-helper home cancel       stdin: the PIN or the recovery key; a change
+                                      waiting for the next start is dropped
+    duo-lock-helper home recovery-key stdin: the PIN or the recovery key; prints
+                                      a new recovery key (the old one stops working)
+    duo-lock-helper migrate PATH      root only, at install: a user's old lock.conf
+                                      (pin, lock_on_blank, lock_on_close) into the
+                                      store, the pin line taken out of it
+
+Run as `sudo -n duo-lock-helper ...` (duo-lock, Duo Settings, `duo-lock
+--set-pin`); install.sh puts a sudoers rule for exactly this file. Any app
+of the user can run it too (they all are the same user): so it never shows
+the hash, changes nothing without the current PIN, and its back-off (five
+wrong PINs, then 30 s, doubling to 15 min) is root's own.
+
+With the home encrypted (homecrypt/, duohomecrypt.lockside) the PIN is
+checked by unwrapping the home's key (/var/lib/duo2-lock/home.key): there
+is no other copy of it then (the pin file says only "homekey"), and the
+recovery key works wherever the current PIN is asked for (it is typed like
+one). The right PIN on a locked home also starts the first unlock's step.
+The PIN cannot be removed while the home is encrypted: decrypt it first
+(exit 5).
+"""
+
+import fcntl
+import os
+import sys
+import time
+
+here = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, here)
+
+from duoshell import lockpad  # noqa: E402
+from duoshell import lockstore as ls  # noqa: E402
+
+for _p in ("/usr/local/lib/duo2-homecrypt", os.path.join(here, "..", "..", "homecrypt")):
+    if os.path.isdir(os.path.join(_p, "duohomecrypt")):
+        sys.path.insert(0, os.path.realpath(_p))
+        break
+try:
+    from duohomecrypt import keys as hk  # noqa: E402
+    from duohomecrypt import lockside  # noqa: E402
+    from duohomecrypt import store as hs  # noqa: E402
+except ImportError:  # an installation without homecrypt/: no encryption
+    hk = lockside = hs = None
+
+ENCRYPTED, REFUSED = 5, 6
+HOME_KEY_MARK = "homekey"  # the pin file's text while the home's key file checks the PIN
+
+
+def read(path):
+    try:
+        with open(path) as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def write(path, text, mode):
+    tmp = path + ".new"
+    # Never through a link someone left at the temporary name (migrate writes
+    # into a user's directory as root).
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def store():
+    os.makedirs(ls.STORE, mode=0o755, exist_ok=True)
+    os.chmod(ls.STORE, 0o755)
+
+
+def policy():
+    return ls.parse_policy(read(ls.POLICY_FILE) or "")
+
+
+def save_policy(p):
+    store()
+    write(ls.POLICY_FILE, ls.format_policy(p), 0o644)
+
+
+def stored_pin():
+    text = (read(ls.PIN_FILE) or "").strip()
+    return text or None
+
+
+class Tries:
+    """The back-off, under a lock (two helpers at once count both)."""
+
+    def __enter__(self):
+        store()
+        self.fd = os.open(ls.TRIES_FILE, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        os.lseek(self.fd, 0, 0)
+        self.failures, self.until = ls.parse_tries(os.read(self.fd, 4096).decode(errors="replace"))
+        return self
+
+    def save(self):
+        os.lseek(self.fd, 0, 0)
+        os.ftruncate(self.fd, 0)
+        os.write(self.fd, ls.format_tries(self.failures, self.until).encode())
+        os.fsync(self.fd)
+
+    def __exit__(self, *_exc):
+        fcntl.flock(self.fd, fcntl.LOCK_UN)
+        os.close(self.fd)
+
+
+def home_encrypted():
+    return lockside is not None and lockside.encrypted()
+
+
+def matches(pin, stored):
+    """The PIN is right: (True, the home's key or None) or (False, None).
+    With the home encrypted its key file decides (and takes the recovery
+    key too)."""
+    if home_encrypted():
+        master = lockside.opens(pin)
+        return master is not None, master
+    return lockpad.check_pin(pin, stored), None
+
+
+def check(pin, opened=None):
+    """The PIN against the stored one with the back-off: an exit code.
+    `opened` (a list) gets the home's key when the PIN opened it."""
+    stored = stored_pin()
+    if not stored:
+        return ls.NO_PIN
+    with Tries() as tries:
+        now = time.time()
+        if now < tries.until:
+            print("wait %d" % int(tries.until - now + 0.999))
+            return ls.WAIT
+        right, master = matches(pin, stored)
+        if right:
+            tries.failures, tries.until = 0, 0.0
+            tries.save()
+            if opened is not None and master is not None:
+                opened.append(master)
+            return ls.OK
+        tries.failures += 1
+        wait = ls.wait_after(tries.failures)
+        tries.until = now + wait if wait else 0.0
+        tries.save()
+        if wait:
+            print("wait %d" % wait)
+            return ls.WAIT
+        return ls.WRONG
+
+
+def migratable(path):
+    """migrate takes only a user's own lock.conf (a plain file, not a link,
+    not root's): the sudoers rule leaves migrate out for the user anyway."""
+    import stat
+
+    if not path.endswith("/.config/duo-shell/lock.conf") or os.path.realpath(path) != path:
+        return False
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and st.st_uid != 0
+
+
+def stdin_lines(n):
+    lines = sys.stdin.read(4096).split("\n")
+    lines += [""] * n
+    return [line.strip() for line in lines[:n]]
+
+
+def current_ok(current, opened=None):
+    """The current PIN, when one is set (an exit code; OK without a PIN)."""
+    if not stored_pin():
+        return ls.OK
+    return check(current, opened)
+
+
+def pin_text(pin):
+    """What the pin file keeps for this PIN: its hash, or only the mark
+    while the home's key file checks it (no second, faster copy of the PIN
+    to try offline)."""
+    if home_encrypted() and hs.state()["state"] != "decrypt-pending":
+        return HOME_KEY_MARK + "\n"
+    return lockpad.hash_pin(pin) + "\n"
+
+
+def replace_pin_file(text):
+    """The pin file's new text; the old one is overwritten first."""
+    store()
+    if hs is not None:
+        hs.remove(ls.PIN_FILE)
+    write(ls.PIN_FILE, text, 0o600)
+
+
+def caller_user():
+    """(name, home) of the GUI user who ran this through sudo."""
+    import pwd
+
+    uid = os.environ.get("SUDO_UID", "")
+    if not (uid.isascii() and uid.isdigit()) or int(uid) == 0:
+        return None
+    try:
+        pw = pwd.getpwuid(int(uid))
+    except KeyError:
+        return None
+    return pw.pw_name, os.path.normpath(pw.pw_dir)
+
+
+def home_command(args):
+    """duo-lock-helper home ...: an exit code."""
+    import json
+
+    if lockside is None:
+        print("this system has no home encryption")
+        return REFUSED
+    if args == ["status"]:
+        s = hs.state()
+        s["locked"] = os.path.exists(hs.PATHS.locked)
+        from duohomecrypt import fscrypt
+
+        s["supported"] = fscrypt.fs_supports_encryption()
+        print(json.dumps(s, sort_keys=True))
+        return ls.OK
+    if len(args) == 2 and args[0] == "enable" and args[1] in ("recovery", "norecovery"):
+        (pin,) = stdin_lines(1)
+        if not stored_pin():
+            print("set a PIN first")
+            return ls.NO_PIN
+        if not lockpad.valid_pin(pin):
+            print("the PIN, not the recovery key")
+            return ls.INVALID
+        code = check(pin)
+        if code != ls.OK:
+            return code
+        who = caller_user()
+        if who is None:
+            print("run it as the person whose home it is (sudo from their session)")
+            return REFUSED
+        try:
+            digits = lockside.enable(who[0], who[1], pin, args[1] == "recovery")
+        except lockside.Refused as e:
+            print(e)
+            return REFUSED
+        replace_pin_file(HOME_KEY_MARK + "\n")
+        if digits:
+            print("recovery %s" % hk.format_recovery_key(digits))
+        return ls.OK
+    if args in (["disable"], ["cancel"], ["recovery-key"]):
+        (text,) = stdin_lines(1)
+        was = hs.state()["state"]
+        if (args == ["disable"] or (args == ["cancel"] and was == "encrypt-pending")) and (
+            not lockpad.valid_pin(text)
+        ):
+            # the pin file gets this PIN's hash: the PIN itself is needed
+            print("the PIN, not the recovery key (set a new PIN with it first)")
+            return ls.INVALID
+        opened = []
+        code = check(text, opened)
+        if code != ls.OK:
+            return code
+        if not opened:
+            print("the home is not encrypted")
+            return REFUSED
+        try:
+            if args == ["disable"]:
+                lockside.disable(opened[0])
+                replace_pin_file(lockpad.hash_pin(text) + "\n")
+            elif args == ["cancel"]:
+                lockside.cancel(opened[0])
+                if was == "encrypt-pending":
+                    replace_pin_file(lockpad.hash_pin(text) + "\n")
+                    lockside.forget()
+                elif was == "decrypt-pending":
+                    replace_pin_file(HOME_KEY_MARK + "\n")
+            else:
+                digits = lockside.new_recovery(opened[0])
+                print("recovery %s" % hk.format_recovery_key(digits))
+        except lockside.Refused as e:
+            print(e)
+            return REFUSED
+        return ls.OK
+    print(__doc__.strip(), file=sys.stderr)
+    return ls.INVALID
+
+
+def main(argv):
+    if argv == ["verify"]:
+        (pin,) = stdin_lines(1)
+        opened = []
+        code = check(pin, opened)
+        if code == ls.OK and opened:
+            # The right PIN on a home that waits for its key: the first
+            # unlock's step takes it from here (duo2-home-settle).
+            lockside.after_unlock(opened[0])
+        return code
+    if argv == ["set"]:
+        current, new = stdin_lines(2)
+        if not lockpad.valid_pin(new):
+            print("a PIN is %d to %d digits" % (lockpad.MIN_LEN, lockpad.MAX_LEN))
+            return ls.INVALID
+        opened = []
+        code = current_ok(current, opened)
+        if code != ls.OK:
+            return code
+        if opened:
+            # The home's key gets the new PIN (it was opened with the old
+            # one or the recovery key).
+            lockside.rewrap(opened[0], new)
+        elif home_encrypted():
+            return ls.WRONG
+        replace_pin_file(pin_text(new))
+        p = policy()
+        p["pin"] = "yes"
+        save_policy(p)
+        return ls.OK
+    if argv == ["clear"]:
+        if home_encrypted() and hs.state()["state"] != "plain":
+            print("the home is encrypted with this PIN: turn off Encrypt my data first")
+            return ENCRYPTED
+        (current,) = stdin_lines(1)
+        code = current_ok(current)
+        if code not in (ls.OK, ls.NO_PIN):
+            return code
+        if home_encrypted():
+            lockside.forget()  # a failed try's key file: it checked this PIN
+        try:
+            os.unlink(ls.PIN_FILE)
+        except FileNotFoundError:
+            pass
+        p = policy()
+        p["pin"] = "no"
+        p["lock_on_blank"] = "off"
+        save_policy(p)
+        return ls.OK
+    if (
+        len(argv) == 3
+        and argv[0] == "policy"
+        and argv[1] in ls.POLICY_KEYS
+        and argv[2] in ("on", "off")
+    ):
+        p = policy()
+        key, value = argv[1], argv[2]
+        if key == "lock_on_blank" and value == "on" and not stored_pin():
+            print("lock_on_blank needs a PIN")
+            return ls.INVALID
+        if ls.weakens(key, value, p) and stored_pin():
+            (current,) = stdin_lines(1)
+            code = check(current)
+            if code != ls.OK:
+                return code
+        p[key] = value
+        p["pin"] = "yes" if stored_pin() else "no"
+        save_policy(p)
+        return ls.OK
+    if argv == ["status"]:
+        sys.stdout.write(ls.format_policy(policy()))
+        return ls.OK
+    if argv[:1] == ["home"]:
+        return home_command(argv[1:])
+    if len(argv) == 2 and argv[0] == "migrate" and migratable(argv[1]):
+        old = lockpad.parse_conf(read(argv[1]) or "")
+        p = policy()
+        if old.get("pin") and not stored_pin():
+            store()
+            write(ls.PIN_FILE, old["pin"].strip() + "\n", 0o600)
+            p["pin"] = "yes"
+            for key in ls.POLICY_KEYS:
+                if old.get(key) in ("on", "off"):
+                    p[key] = old[key]
+        elif old.get("lock_on_close") in ("on", "off") and read(ls.POLICY_FILE) is None:
+            p["lock_on_close"] = old["lock_on_close"]
+        p["pin"] = "yes" if stored_pin() else "no"
+        save_policy(p)
+        if old.get("pin"):
+            # The hash leaves the user's file (any app could read it there).
+            text = "".join(
+                line
+                for line in (read(argv[1]) or "").splitlines(True)
+                if line.split("=", 1)[0].strip() != "pin"
+            )
+            st = os.stat(argv[1])
+            write(argv[1], text, 0o600)
+            os.chown(argv[1], st.st_uid, st.st_gid)
+        return ls.OK
+    print(__doc__.strip(), file=sys.stderr)
+    return ls.INVALID
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,26 @@
+#!/usr/bin/python3 -sE
+"""duo-lock: duo2-os's lock screen (see duoshell/lockclient.py).
+
+duo-lock              lock now (a swipe up unlocks when no PIN is set;
+                      refused while duo-wc's session_lock is off)
+duo-lock --set-pin    set the PIN (~/.config/duo-shell/lock.conf)
+"""
+
+import os
+import sys
+
+here = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, here)
+
+# The shell starts the lock with a trusted Wayland connection (WAYLAND_SOCKET;
+# only trusted clients see ext-session-lock). Nobody else of the user may
+# attach to the lock while it holds the session (duoshell/trust.py).
+from duoshell import trust  # noqa: E402
+
+trust.make_undumpable()
+trust.take()
+
+from duoshell.lockclient import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

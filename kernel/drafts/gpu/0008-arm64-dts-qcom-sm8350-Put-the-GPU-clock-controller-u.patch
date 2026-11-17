@@ -1,0 +1,41 @@
+From b47883bf22777be6de4a8f737c28aabcc25662ca Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 08:49:12 +0100
+Subject: [PATCH 8/8] arm64: dts: qcom: sm8350: Put the GPU clock controller
+ under CX
+
+Nothing on the Linux side votes a CX level for the GPU subsystem: the
+GPU clock controller has no power domain, so GPU_CX_GDSC (the GMU, its
+200 MHz clock, the GPU SMMU) and GPU_GX_GDSC have no parent, and the
+GMU's own CX vote only exists once its firmware runs. The GMU OPP
+table asks for MIN_SVS at 200 MHz, but that level is only sent to the
+GMU as data; CX itself is whatever the other APPS consumers vote,
+which after the rpmhpd sync_state can be nothing while the phone is
+idle. The downstream Lahaina DT supplies the GPU clock controller
+from CX and MX and parents the CX GDSC on the CX level (and the GX
+GDSC on GFX).
+
+With the clock controller in the CX domain both GDSCs become CX
+subdomains, so a powered GPU_CX_GDSC votes CX at its first active
+level (MIN_SVS), the GMU OPP's level. MX follows CX in rpmhpd.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm64/boot/dts/qcom/sm8350.dtsi | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350.dtsi b/arch/arm64/boot/dts/qcom/sm8350.dtsi
+index ad7b5e462..dd9bc8ada 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8350.dtsi
+@@ -2403,6 +2403,7 @@ gpucc: clock-controller@3d90000 {
+ 			clock-names = "bi_tcxo",
+ 				      "gcc_gpu_gpll0_clk_src",
+ 				      "gcc_gpu_gpll0_div_clk_src";
++			power-domains = <&rpmhpd RPMHPD_CX>;
+ 			#clock-cells = <1>;
+ 			#reset-cells = <1>;
+ 			#power-domain-cells = <1>;
+-- 
+2.43.0
+

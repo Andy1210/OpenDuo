@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Ask geoclue for the phone's position as an app would (as the GUI user) and
+# print how good each fix is and when it came: never the position itself.
+#
+#   scripts/duo2-location-test [LEVEL [SECONDS [DESKTOP_ID]]]
+#
+#   LEVEL   geoclue's accuracy level: 4 city, 5 neighbourhood (the mobile
+#           network), 8 exact (also the modem's GNSS engine); default 8
+#   SECONDS how long to listen; default 120 (a first satellite fix outdoors
+#           without assistance takes 30 s to a few minutes)
+#
+# Shows whether the modem's GNSS engine ran (ModemManager's enabled location
+# sources) while asking and after (geoclue switches it off when no app asks).
+set -euo pipefail
+. "$(dirname "$0")/lib/remote.sh"
+level=${1:-8}
+secs=${2:-120}
+app=${3:-org.gnome.Weather}
+case "$level$secs" in *[!0-9]*) echo "usage: $0 [LEVEL [SECONDS [DESKTOP_ID]]]" >&2; exit 2 ;; esac
+gnss() { duo2_ssh "sudo mmcli -m any --location-status | sed -n 's/.*enabled: //p'"; }
+echo "modem location sources before: $(gnss)"
+( sleep 10; echo "modem location sources while asking: $(gnss)" ) &
+duo2_user "timeout $((secs + 20)) python3 -I - $app $level $secs <<'PY'
+import sys, time
+from gi.repository import Gio, GLib
+app, level, secs = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+GC = 'org.freedesktop.GeoClue2'
+t0 = time.monotonic()
+path = bus.call_sync(GC, '/org/freedesktop/GeoClue2/Manager', GC + '.Manager', 'GetClient', None,
+                     GLib.VariantType('(o)'), 0, 10000, None).unpack()[0]
+for prop, val in (('DesktopId', GLib.Variant('s', app)), ('RequestedAccuracyLevel', GLib.Variant('u', level))):
+    bus.call_sync(GC, path, 'org.freedesktop.DBus.Properties', 'Set',
+                  GLib.Variant('(ssv)', (GC + '.Client', prop, val)), None, 0, 5000, None)
+best = [None]
+times = []
+def updated(_c, _s, _p, _i, _n, params):
+    new = params.unpack()[1]
+    get = lambda p: bus.call_sync(GC, new, 'org.freedesktop.DBus.Properties', 'Get',
+                                  GLib.Variant('(ss)', (GC + '.Location', p)), None, 0, 5000, None).unpack()[0]
+    acc, desc = get('Accuracy'), get('Description')
+    times.append(time.monotonic())
+    first = best[0] is None or acc < best[0]
+    best[0] = acc if best[0] is None else min(best[0], acc)
+    print('%6.1f s  accuracy %8.0f m  %s%s' % (time.monotonic() - t0, acc, desc, '  (best so far)' if first else ''), flush=True)
+bus.signal_subscribe(GC, GC + '.Client', 'LocationUpdated', path, None, 0, updated)
+try:
+    bus.call_sync(GC, path, GC + '.Client', 'Start', None, None, 0, 30000, None)
+except GLib.Error as e:
+    print('refused: ' + e.message); sys.exit(1)
+print('asking as %s, level %d, for %d s' % (app, level, secs), flush=True)
+loop = GLib.MainLoop()
+GLib.timeout_add_seconds(secs, loop.quit)
+loop.run()
+bus.call_sync(GC, path, GC + '.Client', 'Stop', None, None, 0, 5000, None)
+print('stopped; best accuracy: %s' % ('%.0f m' % best[0] if best[0] is not None else 'no fix'))
+gaps = sorted(b - a for a, b in zip(times, times[1:]))
+if gaps:
+    # navigation wants about one fix a second (geoclue asks ModemManager for every NMEA update)
+    print('updates: %d, interval median %.1f s, longest %.1f s' % (len(times), gaps[len(gaps) // 2], gaps[-1]))
+PY"
+wait
+sleep 3
+echo "modem location sources after: $(gnss)"

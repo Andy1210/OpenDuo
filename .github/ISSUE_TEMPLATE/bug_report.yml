@@ -1,0 +1,87 @@
+name: Bug report
+description: Something on OpenDuo does not work as it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please do not post identifiers: IMEI, serial
+        numbers, phone numbers, MAC addresses, network or operator names,
+        your location. The bug report from Settings masks the usual ones;
+        look through it before you attach it.
+  - type: dropdown
+    id: device
+    attributes:
+      label: Device
+      options:
+        - Surface Duo 2
+        - Other (say which in the description)
+    validations:
+      required: true
+  - type: input
+    id: build
+    attributes:
+      label: OpenDuo version and build
+      description: Settings > About, or `cat /etc/duo2-release` (the `openduo=` and `build=` lines).
+      placeholder: "0.1.0-dev, build 20261116.71fc19a"
+    validations:
+      required: true
+  - type: input
+    id: kernel
+    attributes:
+      label: Kernel release
+      description: Settings > About, or `uname -r`.
+      placeholder: "7.3.4-duo2-g..."
+    validations:
+      required: true
+  - type: input
+    id: area
+    attributes:
+      label: Area
+      description: The part that misbehaves (touch, pen, calls, WiFi, sleep, compositor, Settings, an app...).
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: What you did, step by step, from a known state (for example "after a restart").
+      placeholder: |
+        1. Open the phone in book posture
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead
+      description: Include how often it happens (always, sometimes, once).
+    validations:
+      required: true
+  - type: textarea
+    id: bugreport
+    attributes:
+      label: Bug report file
+      description: |
+        Settings > Developer > Collect a bug report writes
+        `openduo-bugreport-DATE-TIME.tar.gz` into Downloads (over SSH:
+        `sudo duo-devmode bugreport --out DIR`). Drag it here after you
+        have looked through it. Without one, paste the relevant log lines.
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Screenshots (without personal data), what changed recently, whether it worked in an earlier build.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy
+      options:
+        - label: I checked that nothing I attached shows identifiers, phone numbers, network names or my location.
+          required: true

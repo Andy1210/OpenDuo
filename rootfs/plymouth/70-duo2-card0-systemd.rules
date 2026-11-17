@@ -1,0 +1,3 @@
+# duo2-os: msm's KMS node card0 as a systemd device (dev-dri-card0.device):
+# the boot splash starts once it is there (rootfs/plymouth/install-files.sh).
+SUBSYSTEM=="drm", KERNEL=="card0", TAG+="systemd"

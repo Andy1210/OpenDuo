@@ -1,0 +1,73 @@
+#!/usr/bin/python3 -I
+"""The screenshot gate: `grim` as xdg-desktop-portal-wlr runs it.
+
+xdg-desktop-portal-wlr's Screenshot portal runs `grim` by name, with no
+question to the user of its own (and the portal frontend asks only the
+first time, for every unsandboxed app at once). This `grim` comes first in
+the portal's PATH (shell/duo-screencast/portal): it asks the user every time
+(the chooser, `--screenshot`: a panel, both, or Cancel), then runs the real
+grim (/usr/bin/grim) with a Wayland connection that may capture the screen
+(`duoctl exec-trusted --capture`, from the portal's capture factory). grim
+on a plain connection sees no capture protocol at all (duo-wc guards it).
+
+Exit 1 = cancelled or refused (the app gets no picture).
+"""
+
+import json
+import os
+import subprocess
+import sys
+import time
+
+here = os.path.dirname(os.path.realpath(__file__))
+lib = os.path.dirname(here) if os.path.basename(here) == "bin" else here
+sys.path.insert(0, lib)
+
+from duoscreencast import grimargs, panels  # noqa: E402
+
+CHOOSER = os.path.join(lib, "chooser")
+# The chooser's window is gone from the panel a frame or two after it exits.
+SETTLE_S = 0.3
+
+
+def scale_of(outputs, answer):
+    for o in outputs:
+        if answer in (o.get("name"), panels.ALL) and isinstance(o.get("scale"), (int, float)):
+            return o["scale"]
+    return None
+
+
+def main(argv):
+    try:
+        grimargs.real_command(argv[1:], "DSI-1")  # refuse early, before asking
+    except grimargs.Refused as e:
+        print("grim (duo2-os): %s" % e, file=sys.stderr)
+        return 1
+    # The chooser must not hold the portal's factory; it drops it itself,
+    # but it is not passed on either.
+    env = dict(os.environ)
+    env.pop("DUO_WC_TRUST_FD", None)
+    try:
+        chosen = subprocess.run(
+            [CHOOSER, "--screenshot"],
+            env=env,
+            stdout=subprocess.PIPE,
+            text=True,
+            timeout=120,
+            pass_fds=(),
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as e:
+        print("grim (duo2-os): no chooser: %s" % e, file=sys.stderr)
+        return 1
+    outputs = panels.query_outputs()
+    if not chosen or not panels.valid_answer(chosen, outputs, screenshot=True):
+        print("grim (duo2-os): cancelled", file=sys.stderr)
+        return 1
+    cmd = grimargs.real_command(argv[1:], chosen, scale_of(outputs, chosen))
+    time.sleep(SETTLE_S)
+    print("grim (duo2-os): %s" % json.dumps(cmd), file=sys.stderr)
+    os.execvp("duoctl", ["duoctl", "exec-trusted", "--capture", "--"] + cmd)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

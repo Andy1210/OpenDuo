@@ -1,0 +1,37 @@
+From 61726ebf3a68f1da0de9af9c2b6fdbc400fe17a7 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Fri, 6 Nov 2026 00:04:02 +0100
+Subject: [PATCH 006/137] arm64: dts: qcom: sm8350-microsoft-surface-duo2: Keep
+ S2E at the bootloader's 1.012 V
+
+Its max was 0.976 V, so the regulator core pulled the rail down at probe
+and both panels went black. Use the stock 0.95-1.02 V range.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../boot/dts/qcom/sm8350-microsoft-surface-duo2.dts      | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+index f462e514c430..8f87aad76bd7 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+@@ -428,11 +428,16 @@ regulators-2 {
+ 		vdd-s2-supply = <&vph_pwr>;
+ 		vdd-l7-bob-supply = <&vreg_bob>;
+ 
+-		/* WCN6855 aon/mx rail (stock: 0.95 V) */
++		/*
++		 * WCN6855 aon/mx rail, also the input of the pmr735a LDOs. The
++		 * bootloader leaves it at 1.012 V and the stock range is up to
++		 * 1.02 V: a max below 1.012 V makes the core pull it down at probe,
++		 * which blanks both panels on the way into the kernel.
++		 */
+ 		vreg_s2e_0p95: smps2 {
+ 			regulator-name = "vreg_s2e_0p95";
+ 			regulator-min-microvolt = <950000>;
+-			regulator-max-microvolt = <976000>;
++			regulator-max-microvolt = <1020000>;
+ 		};
+ 
+ 		/*

@@ -1,0 +1,18 @@
+# Lint and format settings for this component (the same as maint's:
+# maint/ruff.toml). From the repository root:
+#   scripts/lint-services [--fix] COMPONENT   (ruff format + ruff check, shellcheck,
+#                                              clang-format; extensionless scripts too)
+line-length = 100
+target-version = "py311"
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    "E501",   # long user-facing strings, log lines and tables: the formatter does not split them
+    "UP031",  # printf-style % formatting is the house style
+    "B905",   # zip() without strict=: the pairs are same-length by construction
+]
+
+[lint.per-file-ignores]
+# Tests put the component's path on sys.path before importing it.
+"tests/*" = ["E402", "E741", "B007", "B023"]

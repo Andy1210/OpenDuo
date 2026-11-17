@@ -1,0 +1,27 @@
+#!/bin/sh
+# duo2-esp rw|ro: the ESP (/boot/efi, FAT) is mounted read-only (fstab), so a
+# hard reset while it is mounted cannot leave its dirty bit set. Whatever
+# writes it (scripts/duo2-try, duo2-promote) remounts it read-write for the
+# write and read-only again right after:
+#
+#   duo2-esp rw && cp ... /boot/efi/...; duo2-esp ro
+#
+# rw triggers the automount first; ro syncs and remounts read-only, and does
+# nothing when the ESP is not mounted (the automount let it go: clean).
+set -eu
+case "${1:-}" in
+rw)
+    ls /boot/efi/ >/dev/null
+    mount -o remount,rw /boot/efi
+    ;;
+ro)
+    sync
+    if findmnt -n -t vfat /boot/efi >/dev/null; then
+        mount -o remount,ro /boot/efi
+    fi
+    ;;
+*)
+    echo "usage: duo2-esp rw|ro" >&2
+    exit 2
+    ;;
+esac

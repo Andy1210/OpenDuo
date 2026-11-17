@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Measure the panels' refresh without looking at them: the page-flip rate of
+# each CRTC with frames flowing, blank/wake cycles, and the kernel log.
+#
+#   scripts/duo2-refresh-check [SECONDS] [CYCLES]      (default 10 s, 10 cycles)
+#
+# Runs against the duo-wc that is running. For the measurement it lights both
+# panels, sets the idle timeout to 0 and opens a terminal on each panel that
+# rewrites a clock every 3 ms (so every vblank has a new frame: foot draws at
+# most once per frame callback). Then:
+#   - frames_presented (duo-wc's page-flip counter) per output over SECONDS:
+#     with a client drawing continuously this is the TE rate of the panel
+#     (60 or 90 per second), or less if a frame misses its TE;
+#   - the DPU's own count of TE read-pointer interrupts per encoder over the
+#     same time (debugfs encoder-N/status "vsync", counted while vblank
+#     interrupts are on, i.e. while frames flow) and its underrun counter;
+#   - the mode the CRTC runs (DRM debugfs state);
+#   - CYCLES times both panels off and on (duoctl set_power all off/on), and
+#     whether each output presented frames again after every wake;
+#   - every kernel line since the start except spi_hid chatter: DSI / DPU
+#     errors (frame done timeouts, underruns, TE timeouts) would show there;
+#   - the battery current (only meaningful off the charger).
+# At the end the terminals are closed and the idle timeout is set back.
+set -eu
+. "$(dirname "$0")/lib/remote.sh"
+secs=${1:-10}
+cycles=${2:-10}
+
+duo2_ssh "bash -s" <<EOF
+set -u
+# duoctl as the administrator reaches duo-wc's admin socket; apps start as
+# the GUI user inside the session (docs/hardware/security.md).
+as_user() { sudo -u $DUO2_USER sh -c '. /run/duo-wc/session.env; exec "\$@"' sh "\$@"; }
+conf_idle=\$(sed -n "s/^[[:space:]]*idle_timeout[[:space:]]*=[[:space:]]*\([0-9]*\).*/\1/p" /etc/duo-wc/duo-wc.conf 2>/dev/null)
+conf_idle=\${conf_idle:-60}
+pids=
+cleanup() {
+    for p in \$pids; do sudo kill \$p 2>/dev/null; done
+    duoctl set_idle_timeout \$conf_idle >/dev/null
+}
+trap cleanup EXIT
+start=\$(date "+%Y-%m-%d %H:%M:%S")
+field() { duoctl get_outputs | python3 -c "import json,sys; print(' '.join(str(o[\"\$1\"]) for o in json.load(sys.stdin)[\"ok\"][\"outputs\"]))"; }
+B=/sys/class/power_supply/qcom-battmgr-bat
+enc() { for e in 0 1; do sudo cat /sys/kernel/debug/dri/0/encoder-\$e/status | sed -n "s/.*\$1: *\([0-9]*\).*/\1/p"; done | tr "\n" " "; }
+
+duoctl set_idle_timeout 0 >/dev/null
+duoctl set_power all on >/dev/null
+sleep 2
+for out in DSI-1 DSI-2; do
+    duoctl expect_window \$out 3000 >/dev/null
+    as_user foot -a duo2-refresh-check python3 -c '
+import sys, time
+while True:
+    sys.stdout.write("\r%.6f   " % time.time()); sys.stdout.flush(); time.sleep(0.003)
+' >/dev/null 2>&1 &
+    pids="\$pids \$!"
+    sleep 2
+done
+sleep 2
+echo "outputs: \$(field name), modes (mHz): \$(duoctl get_outputs | python3 -c "import json,sys; print(' '.join(str(o['mode']['refresh']) for o in json.load(sys.stdin)['ok']['outputs']))")"
+sudo cat /sys/kernel/debug/dri/0/state | grep -E "^crtc\[|mode: " | paste - - || true
+
+a=(\$(field frames_presented)); va=(\$(enc vsync)); t0=\$(date +%s.%N)
+c0=0; n=0
+for k in \$(seq 1 $secs); do sleep 1; c0=\$((c0 + \$(cat \$B/current_now))); n=\$((n + 1)); done
+b=(\$(field frames_presented)); vb=(\$(enc vsync)); t1=\$(date +%s.%N)
+python3 -c "
+a=[int(x) for x in '\${a[*]}'.split()]; b=[int(x) for x in '\${b[*]}'.split()]
+dt=\$t1-\$t0
+print('page flips per second over %.1f s: ' % dt + ', '.join('%.2f' % ((y - x) / dt) for x, y in zip(a, b)))
+a=[int(x) for x in '\${va[*]}'.split()]; b=[int(x) for x in '\${vb[*]}'.split()]
+print('DPU TE interrupts per second (encoder 0, 1): ' + ', '.join('%.2f' % ((y - x) / dt) for x, y in zip(a, b)))"
+echo "DPU underruns since the last enable (encoder 0, 1): \$(enc underrun)"
+echo "battery: mean current \$((c0 / n / 1000)) mA (negative = discharging), \$(cat \$B/status), \$(cat \$B/capacity)%"
+
+fail=0
+for k in \$(seq 1 $cycles); do
+    duoctl set_power all off >/dev/null; sleep 2
+    before=(\$(field frames_presented))
+    duoctl set_power all on >/dev/null; sleep 3
+    after=(\$(field frames_presented)); act=\$(field crtc_active)
+    for i in 0 1; do
+        if [ \${after[\$i]} -le \${before[\$i]} ]; then echo "cycle \$k: output \$i presented nothing after the wake (active: \$act)"; fail=1; fi
+    done
+done
+[ \$fail = 0 ] && echo "$cycles blank/wake cycles: every output presented frames again after each wake"
+a=(\$(field frames_presented)); sleep 5; b=(\$(field frames_presented))
+echo "after the cycles, flips in 5 s: \${a[*]} -> \${b[*]}"
+
+echo "--- kernel log since \$start (spi_hid filtered):"
+sudo journalctl -k --since "\$start" --no-pager -o short-monotonic | grep -v spi_hid | grep -v "^-- " || echo "(nothing)"
+EOF

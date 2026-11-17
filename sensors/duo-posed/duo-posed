@@ -1,0 +1,898 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""duo-posed: the Surface Duo 2's sensors drive duo-wc (poses, rotation).
+
+Reads the SLPI's sensors (SSC, through duo2_ssc) and calls duo-wc's control
+socket:
+  - the pose, from the best source there is: Microsoft's posture sensor, else
+    its hinge_angle sensor, else a hinge angle estimated from the two
+    accelerometers (one per half): closed -> both panels off; book / flat ->
+    dual; tent, brochure, folded back -> single (the panel facing up, else
+    the one touched last);
+  - the rotation of the lit panel(s) from the accelerometer behind each panel,
+    with hysteresis and a settle time.
+It acts on CHANGES only: a pose or rotation set by hand (duoctl) stays until
+the sensors change their mind. While the screen is dark (idle, power key) it
+lights nothing; the pose wanted meanwhile is applied when the screen comes
+back. The accelerometers stream only while a panel is lit.
+
+  duo-posed [--config /etc/duo-posed.conf] [--dry-run] [--debug] [--monitor] [--fake]
+
+--monitor prints what the sensors say once a second (hinge estimate, tilt,
+rotation candidates, halls), for checking the policy by hand.
+--fake reads the sensors from stdin instead of the SSC, one per line:
+  posture closed | peek_left | open_dpm | flip_p_right | ...
+  hinge 120                      (with pose_source = hinge)
+  accel left|right X Y Z         (m/s^2 in that panel's frame)
+and runs the same policy (acting on duo-wc unless --dry-run or enabled =
+off): the way to test poses, rotation, the closed phone's lock and its
+ambient screens without moving the phone. EOF ends it.
+The posture (or the hinge class) also goes to duo-wc (`set_posture`): a
+closed phone is locked by the shell, peeking at it shows the peek screen,
+its power key the glance strip.
+duo2-touchd gets what Android tells the stock touch HAL: the lit panels,
+the hinge angle (the hinge_angle sensor), the orientation, in
+/run/duo-posed/touch (touch_pose; docs/hardware/touch.md); the
+heat processor picks its geometry from them (stitched or one panel).
+SIGHUP (systemctl reload duo-posed) reads the configuration again.
+Configuration: /etc/duo-posed.conf (see duo-posed.conf.dist).
+"""
+
+import argparse
+import json
+import os
+import select
+import signal
+import socket
+import sys
+import threading
+import time
+
+sys.path.insert(0, "/usr/local/lib/duo-posed")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import duo2_ssc as ssc  # noqa: E402
+import posepolicy as pp  # noqa: E402
+
+DEFAULTS = {
+    "enabled": "off",  # off: read and log, never call duo-wc (dry run)
+    "auto_pose": "on",
+    "panels": "both",  # both | left | right: the user's panel choice over the sensors
+    "auto_rotate": "on",
+    "pose_source": "auto",  # auto | posture | hinge | accel
+    "closed_action": "blank",  # blank | none
+    "wake_on_open": "on",  # opening a closed phone lights the panels
+    "left_output": "DSI-1",
+    "right_output": "DSI-2",
+    "accel_left": "1",  # hw_id of the accelerometer behind the left panel (verified 2026-11-07)
+    "accel_rate": "26",  # Hz (26 is the LSM6DST's lowest rate)
+    "accel_batch_ms": "100",  # SSC batching: the AP wakes for a batch, not a sample
+    "rotation_settle_ms": "350",
+    "rotation_hysteresis_deg": "15",
+    "rotation_min_tilt": "0.45",
+    "pose_settle_ms": "500",
+    "hinge_margin_deg": "6",
+    "hinge_min_proj": "0.5",  # accel hinge: gravity across the hinge, in g
+    "state_poll_s": "3",  # only while duo-wc's event stream is not there
+    "forward_posture": "on",  # tell duo-wc the posture (lock on close, peek, glance)
+    "flip_facing": "posture",  # folded back: which panel faces the user (posture | accel)
+    # duo-wc's admin socket: it answers duo-posed's user (sensor_users in
+    # duo-wc.conf) with the posture, pose, rotation and power requests
+    # (docs/hardware/security.md); the user's socket would refuse them.
+    "socket": "/run/duo-wc/admin.sock",
+    # duo2-touchd: the lit panels, the hinge angle, the orientation (and the
+    # handedness, if set: left | right) as Android tells the stock touch HAL;
+    # written whenever they change (off: not written).
+    "touch_pose": "on",
+    "touch_pose_file": "/run/duo-posed/touch",
+    "touch_handedness": "",
+    # The sensors whose events the SSC sends while the phone sleeps (opening
+    # or closing it wakes it, if the kernel lets the sensor DSP wake it:
+    # qrtr.wake_services with 400); the others are held back until it wakes.
+    "wake_sensors": "hall,posture",
+    # always: opening and closing a sleeping phone wake it (closing then only
+    # blanks and locks, and it sleeps again); closed: only while it is closed
+    # (or nearly) are they sent, so closing an open sleeping phone does not
+    # wake it, but then opening it again does not either.
+    "wake_sensors_when": "always",
+}
+
+
+SENSORS_RETRY_S = 5.0  # the SSC answers but has no sensors yet: ask again this often
+SENSORS_WAIT_MAX_S = 180.0  # ... for this long, then go on with what there is
+_incomplete_since = None
+
+
+class SensorsNotYet(Exception):
+    """The SSC service is there, its sensors are not (yet)."""
+
+
+def log(*a):
+    print(*a, flush=True)
+
+
+def read_config(path):
+    cfg = dict(DEFAULTS)
+    try:
+        with open(path) as f:
+            for n, line in enumerate(f, 1):
+                line = line.split("#", 1)[0].strip()
+                if not line:
+                    continue
+                k, sep, v = line.partition("=")
+                k, v = k.strip(), v.strip()
+                if not sep or (k not in DEFAULTS and not k.startswith("posture.")):
+                    log("%s:%d: ignored: %s" % (path, n, line))
+                    continue
+                cfg[k] = v
+    except FileNotFoundError:
+        log("no %s: defaults" % path)
+    return cfg
+
+
+def on(v):
+    return str(v).lower() in ("on", "1", "yes", "true")
+
+
+class DuoWc:
+    def __init__(self, path, dry_run):
+        self.path = path
+        self.dry_run = dry_run
+        self.id = 0
+
+    def call(self, req, **kw):
+        self.id += 1
+        s = socket.socket(socket.AF_UNIX)
+        s.settimeout(3.0)
+        try:
+            s.connect(self.path)
+            s.sendall((json.dumps(dict(id=self.id, request=req, **kw)) + "\n").encode())
+            buf = b""
+            while not buf.endswith(b"\n"):
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                buf += chunk
+        finally:
+            s.close()
+        resp = json.loads(buf or b"{}")
+        if "error" in resp:
+            raise RuntimeError("duo-wc %s: %s" % (req, resp["error"]))
+        return resp.get("ok")
+
+    def act(self, req, **kw):
+        what = " ".join([req] + ["%s=%s" % kv for kv in kw.items()])
+        if self.dry_run:
+            log("would: " + what)
+            return None
+        log("do: " + what)
+        return self.call(req, **kw)
+
+    def state(self):
+        try:
+            return self.call("get_state")
+        except (OSError, ValueError, RuntimeError) as e:
+            log("duo-wc not reachable: %s" % e)
+            return None
+
+
+class StateStream(threading.Thread):
+    """duo-wc's event stream (`subscribe`): the state as soon as it changes
+    (power, pose, rotation, focus), instead of polling get_state. `state` is
+    the latest snapshot (pose, lit, blanked, active_output, ...), None while
+    not connected; it reconnects when duo-wc restarts."""
+
+    daemon = True
+
+    def __init__(self, path):
+        super().__init__(name="duo-wc-events")
+        self.path = path
+        self.state = None
+        self.generation = 0  # +1 each time a (re)connected stream delivers its first state
+        self.wake = None
+
+    def run(self):
+        while True:
+            try:
+                s = socket.socket(socket.AF_UNIX)
+                s.connect(self.path)
+                s.sendall(b'{"id":1,"request":"subscribe"}\n')
+                buf = b""
+                while True:
+                    chunk = s.recv(65536)
+                    if not chunk:
+                        break
+                    buf += chunk
+                    while b"\n" in buf:
+                        line, buf = buf.split(b"\n", 1)
+                        msg = json.loads(line or b"{}")
+                        st = pp.stream_state(msg)
+                        if st is not None:
+                            if self.state is None:
+                                self.generation += 1
+                            self.state = st
+                s.close()
+            except (OSError, ValueError):
+                pass
+            if self.state is not None:
+                log("duo-wc event stream lost; polling until it is back")
+            self.state = None
+            time.sleep(2.0)
+
+
+_STREAMS = {}
+
+
+def state_stream(path):
+    """One event stream per process (Posed is made again after an SSC error)."""
+    if path not in _STREAMS:
+        _STREAMS[path] = StateStream(path)
+        _STREAMS[path].start()
+    return _STREAMS[path]
+
+
+def first(sensors):
+    return sensors[0] if sensors else None
+
+
+class Posed:
+    def __init__(self, cfg, dry_run=False, debug=False, monitor=False, fake=False):
+        self.cfg = cfg
+        self.debug = debug
+        self.monitor = monitor
+        self.fake = fake
+        self.sent_posture = None
+        self.seen_generation = 0  # of the duo-wc event stream (a new one = duo-wc restarted)
+        self.reload = False
+        self.wc = DuoWc(cfg["socket"], dry_run or not on(cfg["enabled"]))
+        self.left, self.right = cfg["left_output"], cfg["right_output"]
+        self.outputs = {"left": self.left, "right": self.right}
+        self.posture_over = {
+            k[len("posture.") :]: v for k, v in cfg.items() if k.startswith("posture.")
+        }
+        self.hinge = pp.HingeClassifier(margin=float(cfg["hinge_margin_deg"]))
+        self.pose_db = pp.Debounce(float(cfg["pose_settle_ms"]) / 1000.0)
+        self.rot_db = pp.Debounce(float(cfg["rotation_settle_ms"]) / 1000.0)
+        self.posture = None
+        self.held_posture = None  # a first posture at hinge 0, before any angle
+        self.wake_delivery = True  # the wake sensors' SSC delivery is the wakeup one
+        self.angle = None  # from the SLPI's hinge_angle sensor
+        self.hall = {}
+        self.acc = {self.left: None, self.right: None}
+        self.smooth = {self.left: pp.Smooth(), self.right: pp.Smooth()}
+        self.rotation = {}
+        self.wanted_pose = None
+        self.applied_pose = None
+        self.wc_state = None
+        self.last_poll = 0.0
+        self.stream = state_stream(cfg["socket"])
+        self.last_monitor = 0.0
+        self.streaming = False
+        self.touch_sent = None
+        self.touch_failed = False
+
+    # -- sensors ---------------------------------------------------------------
+
+    def open_sensors(self):
+        self.cli = c = ssc.SscClient()
+        self.s_posture = first(c.sensors("posture"))
+        self.s_hinge = first(c.sensors("hinge_angle"))
+        self.s_hall = c.sensors("hall")
+        accs = [s for s in c.sensors("accel") if s.stream_type == "streaming"]
+        missing = [
+            n
+            for n, ok in (
+                ("posture", self.s_posture),
+                ("hinge_angle", self.s_hinge),
+                ("two accelerometers", len(accs) >= 2),
+            )
+            if not ok
+        ]
+        global _incomplete_since
+        if missing:
+            # The SSC service answers about a minute before its sensors are
+            # back (an SLPI restart, e.g. its crash after a resume): running
+            # on without them would leave the pose and the rotation dead
+            # until a reload. main() asks again in a few seconds; after
+            # SENSORS_WAIT_MAX_S it takes what there is.
+            now = time.monotonic()
+            if _incomplete_since is None:
+                _incomplete_since = now
+            if now - _incomplete_since < SENSORS_WAIT_MAX_S:
+                c.close()
+                raise SensorsNotYet("no %s on the SSC yet (SLPI starting?)" % ", ".join(missing))
+            log(
+                "still no %s on the SSC after %.0f s: going on without"
+                % (", ".join(missing), now - _incomplete_since)
+            )
+        _incomplete_since = None
+        left_hw = int(self.cfg["accel_left"])
+        self.s_acc = {}
+        for s in accs:
+            o = self.left if s.hw_id == left_hw else self.right
+            if o not in self.s_acc:
+                self.s_acc[o] = s
+        src = self.cfg["pose_source"]
+        if src == "auto":
+            src = "posture" if self.s_posture else "hinge" if self.s_hinge else "accel"
+        if src == "posture" and not self.s_posture or src == "hinge" and not self.s_hinge:
+            log("pose source %s: no such sensor on the SSC, using the accelerometers" % src)
+            src = "accel"
+        if src == "accel" and len(self.s_acc) < 2:
+            log("fewer than two accelerometers: no automatic pose")
+            src = None
+        self.pose_source = src
+        # Wakeup delivery for the wake sensors starts on (a phone closed at
+        # start); the first posture says whether it stays (update_wake_delivery).
+        wake = self.wake_sensors()
+        self.wake_delivery = True
+        for s in [self.s_posture, self.s_hinge] + self.s_hall:
+            if s is not None:
+                c.enable(s, wakeup=s.data_type in wake)
+                log(
+                    "on-change sensor%s: %s"
+                    % (" (may wake the phone)" if s.data_type in wake else "", s.describe())
+                )
+        for o, s in self.s_acc.items():
+            log("accelerometer behind %s: %s" % (o, s.describe()))
+        self.by_suid = {
+            s.suid: s
+            for s in [self.s_posture, self.s_hinge] + self.s_hall + list(self.s_acc.values())
+            if s is not None
+        }
+        self.acc_output = {s.suid: o for o, s in self.s_acc.items()}
+
+    def wake_sensors(self):
+        return {w.strip() for w in self.cfg["wake_sensors"].split(",") if w.strip()}
+
+    def update_wake_delivery(self):
+        """The wake sensors are sent while the phone sleeps (and so may wake
+        it) only while it is closed or nearly so: opening a closed sleeping
+        phone wakes it, closing an open one does not (closing it while it is
+        awake blanks and locks as always: delivery only matters in sleep)."""
+        if self.fake or self.posture is None:
+            return
+        want = (
+            self.cfg["wake_sensors_when"] != "closed"
+            or self.posture == "closed"
+            or self.posture.startswith("peek")
+        )
+        if want == self.wake_delivery:
+            return
+        wake = self.wake_sensors()
+        for s in [self.s_posture] + self.s_hall:
+            if s is None or s.data_type not in wake:
+                continue
+            try:
+                self.cli.disable(s)
+                self.cli.enable(s, wakeup=want)
+            except (ssc.SscError, OSError) as e:
+                log("wake delivery %s: %s" % (s.name, e))
+                return
+        self.wake_delivery = want
+        log(
+            "wake sensors: %s"
+            % (
+                "sent while asleep (closed: opening wakes the phone)"
+                if want
+                else "held while asleep (open: closing does not wake it)"
+            )
+        )
+
+    def want_accels(self):
+        """Stream while a panel is lit (rotation, and the accel hinge), or while
+        duo-posed itself blanked a closed phone (to see it open again). Not
+        while the screen is dark for any other reason: the SLPI sleeps then."""
+        lit = bool(self.wc_state and self.wc_state.get("lit"))
+        need_rot = on(self.cfg["auto_rotate"]) and lit
+        need_pose = (
+            on(self.cfg["auto_pose"])
+            and self.pose_source == "accel"
+            and (lit or self.applied_pose == "blank")
+        )
+        return bool(self.s_acc) and (need_rot or need_pose or self.monitor)
+
+    def open_fake(self):
+        """--fake: no SSC; the readings come from stdin (fake_line)."""
+        self.cli = None
+        self.s_posture = self.s_hinge = None
+        self.s_hall, self.s_acc, self.by_suid, self.acc_output = [], {}, {}, {}
+        src = self.cfg["pose_source"]
+        self.pose_source = "posture" if src == "auto" else src
+        self.streaming = True
+        log("fake sensors from stdin (pose from %s)" % self.pose_source)
+
+    def fake_line(self, line):
+        words = line.split()
+        if not words or words[0].startswith("#"):
+            return
+        try:
+            if words[0] == "posture" and len(words) == 2:
+                if words[1] != self.posture:
+                    log("posture %s (fake)" % words[1])
+                self.posture = words[1]
+            elif words[0] == "hinge" and len(words) == 2:
+                self.angle = float(words[1])
+            elif words[0] == "accel" and len(words) == 5 and words[1] in self.outputs:
+                o = self.outputs[words[1]]
+                self.acc[o] = tuple(float(w) for w in words[2:5])
+            else:
+                log("fake: not understood: %s" % line.strip())
+        except ValueError:
+            log("fake: not understood: %s" % line.strip())
+
+    def set_streaming(self, want):
+        if self.fake:
+            return
+        if want == self.streaming:
+            return
+        rate = float(self.cfg["accel_rate"])
+        batch = int(float(self.cfg["accel_batch_ms"]) * 1000)
+        for o, s in self.s_acc.items():
+            if want:
+                self.cli.enable(s, rate_hz=rate, batch_period_us=batch or None)
+            else:
+                self.cli.disable(s)
+                self.acc[o] = None
+                self.smooth[o].reset()
+        self.streaming = want
+        log(
+            "accelerometers %s"
+            % ("streaming %.0f Hz, batches of %d ms" % (rate, batch // 1000) if want else "off")
+        )
+
+    def close_sensors(self):
+        try:
+            for s in self.by_suid.values():
+                self.cli.disable(s)
+        except (ssc.SscError, OSError):
+            pass
+        self.cli.close()
+
+    def handle(self, suid, msg_id, payload):
+        s = self.by_suid.get(suid)
+        if s is None:
+            return
+        if msg_id == ssc.MSG_POSTURE_EVENT:
+            st = ssc.state_event(payload)
+            self.posture = ssc.POSTURES.get(st, "state%d" % st)
+            log("posture %s" % self.posture)
+        elif msg_id == ssc.MSG_HALL_EVENT:
+            near, _ = ssc.hall_event(payload)
+            key = "hall%s" % s.hw_id
+            if self.hall.get(key) != near:
+                log("%s: %s" % (key, "near" if near else "far"))
+            self.hall[key] = near
+        elif msg_id == ssc.MSG_STD_SENSOR_EVENT:
+            data, _ = ssc.std_event(payload)
+            if s is self.s_posture and data:
+                # The posture sensor reports as a standard event: data[0] is
+                # the posture (sns_posture_event_type), data[5] the hinge
+                # angle it used. Right after it is enabled it sends one event
+                # of all zeros before it has an angle: that is not "closed".
+                if not any(data):
+                    return
+                st = int(round(data[0]))
+                posture = ssc.POSTURES.get(st, "state%d" % st)
+                # Sometimes the first one is "closed" at hinge 0, sent before
+                # the hinge has an angle (the open posture follows 200 ms
+                # later); duo-wc would lock the session on it.
+                # A phone that really is closed is told by the first hinge
+                # angle (below), which takes the held posture then.
+                if self.angle is None and self.posture is None and (len(data) <= 5 or data[5] == 0):
+                    log("posture %s (hinge 0) before any hinge angle: held" % posture)
+                    self.held_posture = posture
+                    return
+                self.held_posture = None
+                if posture != self.posture:
+                    log("posture %s (hinge %.0f)" % (posture, data[5] if len(data) > 5 else -1))
+                self.posture = posture
+            elif s is self.s_hinge and data:
+                prev, self.angle = self.angle, data[0]
+                if self.debug or prev is None or abs(prev - self.angle) >= 10:
+                    log("hinge sensor %.1f" % self.angle)
+                if self.held_posture is not None and self.posture is None:
+                    if self.angle < 15:
+                        log(
+                            "posture %s (held, the hinge says %.0f)"
+                            % (self.held_posture, self.angle)
+                        )
+                        self.posture = self.held_posture
+                    self.held_posture = None
+            elif suid in self.acc_output and len(data) >= 3:
+                o = self.acc_output[suid]
+                self.acc[o] = self.smooth[o].feed(data[:3])
+
+    # -- policy ------------------------------------------------------------------
+
+    def hinge_estimate(self):
+        if self.pose_source == "hinge":
+            return self.angle
+        return pp.hinge_from_accels(
+            self.acc[self.left], self.acc[self.right], float(self.cfg["hinge_min_proj"])
+        )
+
+    def front_output(self):
+        st = self.wc_state or {}
+        active = st.get("active_output") or self.left
+        return pp.facing_output(self.acc, active)
+
+    def posture_name(self):
+        """What duo-wc is told: Microsoft's posture, or the hinge class from
+        the other sources (closed, peek, open, convex, flipped)."""
+        if self.pose_source == "posture":
+            return self.posture if self.posture not in (None, "unknown", "undetermined") else None
+        if self.pose_source in ("hinge", "accel"):
+            return self.hinge.current
+        return None
+
+    def forward_posture(self, now):
+        if not on(self.cfg["forward_posture"]):
+            return
+        name = self.posture_name()
+        if name is None:
+            return
+        st = self.wc_state or {}
+        # Again after duo-wc restarted (its state no longer has it).
+        lost = (
+            not self.wc.dry_run
+            and self.stream.state is not None
+            and st.get("posture") != name
+            and self.sent_posture == name
+        )
+        if name == self.sent_posture and not lost:
+            return
+        try:
+            self.wc.act("set_posture", posture=name)
+            self.sent_posture = name
+        except (OSError, RuntimeError, ValueError) as e:
+            log("posture: %s" % e)
+
+    def sensor_pose(self):
+        if self.pose_source == "posture":
+            if self.posture is None:
+                return None
+            over = {k: (None if v == "keep" else v) for k, v in self.posture_over.items()}
+            outputs = dict(self.outputs)
+            active = (self.wc_state or {}).get("active_output")
+            if active:
+                outputs["active"] = active
+            pose = pp.pose_from_posture(self.posture, outputs, over)
+            if (
+                pose
+                and pose.startswith("single ")
+                and self.posture.startswith("flip")
+                and self.cfg["flip_facing"] == "accel"
+            ):
+                # Folded back: the panel whose face points up, if the
+                # accelerometers can tell (held vertically they cannot).
+                pose = "single " + pp.facing_output(self.acc, pose.split()[1])
+        elif self.pose_source in ("hinge", "accel"):
+            cls = self.hinge.classify(self.hinge_estimate())
+            pose = pp.pose_from_hinge(cls, self.front_output())
+        else:
+            return None
+        if pose == "blank" and self.cfg["closed_action"] != "blank":
+            pose = None
+        # The user chose one panel (Duo Settings, the quick menu).
+        return pp.panel_override(pose, self.cfg.get("panels", "both"), self.outputs)
+
+    def touch_pose(self):
+        """What duo2-touchd is told now (posepolicy.touch_pose)."""
+        st = self.wc_state or {}
+        lit = st.get("lit") or []
+        display = pp.touch_display(
+            lit, st.get("blanked"), self.left, self.right, self.posture_name()
+        )
+        hinge = self.angle
+        if hinge is None and self.pose_source == "accel":
+            hinge = self.hinge_estimate()
+        ref = lit[0] if len(lit) == 1 else self.left
+        hand = self.cfg["touch_handedness"].strip() or None
+        return pp.touch_pose(display, hinge, self.rotation.get(ref), hand)
+
+    def update_touch(self):
+        """Write the pose file for duo2-touchd when it changed (whole, then
+        renamed: the daemon never reads half a file)."""
+        if not on(self.cfg["touch_pose"]) or self.monitor:
+            return
+        pose = self.touch_pose()
+        if not pp.touch_pose_changed(self.touch_sent, pose):
+            return
+        if self.touch_sent is not None:
+            # unknown now (the screen went dark): keep what was said
+            pose = {k: (v if v is not None else self.touch_sent.get(k)) for k, v in pose.items()}
+        path = self.cfg["touch_pose_file"]
+        try:
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                f.write(pp.touch_pose_text(pose))
+            os.replace(tmp, path)
+        except OSError as e:
+            if not self.touch_failed:
+                log("touch pose: %s" % e)
+                self.touch_failed = True
+            return
+        if (
+            self.touch_failed
+            or self.touch_sent is None
+            or pose.get("display") != self.touch_sent.get("display")
+        ):
+            log(
+                "touch pose: %s"
+                % pp.touch_pose_text(pose).split("\n", 1)[1].strip().replace("\n", ", ")
+            )
+        self.touch_failed = False
+        self.touch_sent = pose
+
+    def poll_state(self, now, force=False):
+        streamed = self.stream.state
+        if streamed is not None and not force:
+            self.wc_state = streamed
+            return self.wc_state
+        if force or now - self.last_poll >= float(self.cfg["state_poll_s"]):
+            self.last_poll = now
+            st = self.wc.state()
+            if st is not None:
+                self.wc_state = st
+        return self.wc_state
+
+    def apply_pose(self, pose, now):
+        st = self.poll_state(now, force=True)
+        if st is None:
+            return
+        blanked = st.get("blanked")
+        if pose == "blank":
+            if not blanked:
+                self.wc.act("set_power", output="all", power="off")
+            self.applied_pose = pose
+            return
+        was_closed = self.applied_pose == "blank"
+        if blanked and not (was_closed and on(self.cfg["wake_on_open"])):
+            log("screen dark: pose %s waits for the screen" % pose)
+            return
+        kind, _, out = pose.partition(" ")
+        if st.get("pose") != pose:
+            self.wc.act("set_pose", pose=kind, **({"output": out} if out else {}))
+        elif blanked:
+            self.wc.act("set_power", output="all", power="on")
+        self.applied_pose = pose
+        self.poll_state(now, force=True)
+
+    def update_rotation(self, now):
+        st = self.wc_state
+        if not st or not st.get("lit"):
+            return
+        name = self.posture_name() or ""
+        if st.get("ambient") or name == "closed" or name.startswith("peek"):
+            # A closed or nearly closed phone (its glance / peek strip): the
+            # way it is held says nothing about how it will be read open, and
+            # the strip must stay on its physical edge: back to the panels'
+            # own orientation (opening the phone turns them again).
+            for o in (self.left, self.right):
+                if self.rotation.get(o, 0) != 0:
+                    try:
+                        self.wc.act("set_rotation", output=o, rotation=0)
+                        self.rotation[o] = 0
+                        log("rotation 0 on %s (closed / peek)" % o)
+                    except (OSError, RuntimeError, ValueError) as e:
+                        log("rotation reset: %s" % e)
+            return
+        pose = st.get("pose") or "dual"
+        src = pp.rotation_source(pose, self.acc)
+        if src is None:
+            return
+        want = pp.rotation_candidate(
+            self.acc.get(src),
+            self.rotation.get(src),
+            min_tilt=float(self.cfg["rotation_min_tilt"]),
+            hysteresis_deg=float(self.cfg["rotation_hysteresis_deg"]),
+        )
+        got = self.rot_db.feed((pose, want) if want is not None else None, now)
+        if got is None:
+            return
+        rot = got[1]
+        # one panel in its own frame; in dual/span both panels turn together
+        # (duo-wc lays them out by the device when both are turned alike)
+        targets = [pose.split()[1]] if pose.startswith("single ") else [self.left, self.right]
+        log("rotation %d from %s (tilt %.2f)" % (rot, src, pp.tilt(self.acc[src])))
+        for o in targets:
+            if self.rotation.get(o) != rot:
+                try:
+                    self.wc.act("set_rotation", output=o, rotation=rot)
+                    self.rotation[o] = rot
+                except (OSError, RuntimeError, ValueError) as e:
+                    log("rotation %s: %s" % (o, e))
+
+    def print_monitor(self, now):
+        if now - self.last_monitor < 1.0:
+            return
+        self.last_monitor = now
+
+        def fa(a):
+            return "-" if a is None else "(%5.2f %5.2f %5.2f)" % a
+
+        h = self.hinge_estimate()
+        cand = {o: pp.rotation_candidate(a, None) for o, a in self.acc.items()}
+        # hinge = the estimate from the accelerometers, sensor = the hinge_angle sensor
+        log(
+            "monitor: hinge %s sensor %s class %s | %s %s tilt %s rot %s | %s %s tilt %s rot %s | "
+            "halls %s | posture %s | would pose %s"
+            % (
+                "-" if h is None else "%.0f" % h,
+                "-" if self.angle is None else "%.0f" % self.angle,
+                self.hinge.current,
+                self.left,
+                fa(self.acc[self.left]),
+                "-" if self.acc[self.left] is None else "%.2f" % pp.tilt(self.acc[self.left]),
+                cand[self.left],
+                self.right,
+                fa(self.acc[self.right]),
+                "-" if self.acc[self.right] is None else "%.2f" % pp.tilt(self.acc[self.right]),
+                cand[self.right],
+                self.hall or "-",
+                self.posture,
+                self.sensor_pose(),
+            )
+        )
+
+    def resend_all(self):
+        """duo-wc is a new process with default state (rotation 0, no posture,
+        its own pose): forget everything this daemon believes it has sent, so
+        each part is sent again once. Rotation goes through the debounce again
+        (and only when auto_rotate is on: locked, nothing is sent)."""
+        self.sent_posture = None
+        self.applied_pose = None
+        self.rotation = {}
+        self.rot_db = pp.Debounce(float(self.cfg["rotation_settle_ms"]) / 1000.0)
+        self.wc_state = None
+        log("duo-wc restarted: sending the state again")
+
+    def tick(self, now):
+        self.update_wake_delivery()
+        self.seen_generation, fresh = pp.fresh_session(self.seen_generation, self.stream.generation)
+        if fresh:
+            self.resend_all()
+        st = self.poll_state(now)
+        self.forward_posture(now)
+        self.update_touch()
+        if on(self.cfg["auto_pose"]) and self.pose_source:
+            pose = self.sensor_pose()
+            got = self.pose_db.feed(pose, now)
+            if got is not None:
+                self.wanted_pose = got
+                h = self.hinge_estimate()
+                log(
+                    "sensors say: %s (source %s, posture %s, hinge %s)"
+                    % (got, self.pose_source, self.posture, "-" if h is None else "%.0f" % h)
+                )
+                try:
+                    self.apply_pose(got, now)
+                except (OSError, RuntimeError, ValueError) as e:
+                    log("pose: %s" % e)
+            elif (
+                self.wanted_pose not in (None, "blank")
+                and st
+                and not st.get("blanked")
+                and self.applied_pose != self.wanted_pose
+            ):
+                try:  # the screen came back (power key): the pose that waited
+                    self.apply_pose(self.wanted_pose, now)
+                except (OSError, RuntimeError, ValueError) as e:
+                    log("pose: %s" % e)
+        self.set_streaming(self.want_accels())
+        if self.streaming and on(self.cfg["auto_rotate"]):
+            self.update_rotation(now)
+        if self.monitor:
+            self.print_monitor(now)
+
+    def run(self):
+        """Until SIGTERM / SIGINT (returns "stop"), SIGHUP (returns "reload":
+        main reads the configuration again) or, with --fake, the end of stdin."""
+        stop = []
+        signal.signal(signal.SIGTERM, lambda *a: stop.append("stop"))
+        signal.signal(signal.SIGINT, lambda *a: stop.append("stop"))
+        signal.signal(signal.SIGHUP, lambda *a: stop.append("reload"))
+        self.poll_state(time.monotonic(), force=True)
+        if self.fake:
+            self.open_fake()
+        else:
+            self.open_sensors()
+        log(
+            "duo-posed: %s, pose from %s, auto_pose %s, auto_rotate %s"
+            % (
+                "dry run (enabled = off)" if self.wc.dry_run else "ACTING",
+                self.pose_source,
+                self.cfg["auto_pose"],
+                self.cfg["auto_rotate"],
+            )
+        )
+        try:
+            eof_at = None
+            pending = b""
+            while not stop:
+                if self.fake:
+                    if eof_at is None:
+                        # Unbuffered: sys.stdin's buffer would hide lines that
+                        # already arrived from select().
+                        r, _, _ = select.select([sys.stdin.fileno()], [], [], 0.2)
+                        if r:
+                            chunk = os.read(sys.stdin.fileno(), 4096)
+                            if chunk:
+                                pending += chunk
+                                while b"\n" in pending:
+                                    line, pending = pending.split(b"\n", 1)
+                                    self.fake_line(line.decode(errors="replace"))
+                            else:
+                                eof_at = time.monotonic()
+                    else:
+                        time.sleep(0.2)
+                        # Let the last readings settle (pose_settle_ms) first.
+                        if time.monotonic() - eof_at > 2.0:
+                            return "stop"
+                else:
+                    for ev in self.cli.events(0.5):
+                        self.handle(ev[0], ev[1], ev[3])
+                self.tick(time.monotonic())
+        finally:
+            if not self.fake:
+                self.close_sensors()
+        return stop[0] if stop else "stop"
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument("--config", default="/etc/duo-posed.conf")
+    ap.add_argument("--dry-run", action="store_true", help="never call duo-wc, only log")
+    ap.add_argument("--debug", action="store_true", help="log every hinge sample")
+    ap.add_argument("--monitor", action="store_true", help="print the sensors' view once a second")
+    ap.add_argument("--fake", action="store_true", help="read the sensors from stdin (see above)")
+    args = ap.parse_args()
+    cfg = read_config(args.config)
+    delay = 2.0
+    waiting = False
+
+    def pause(seconds):
+        """Between tries no sensor is open: SIGTERM / SIGINT simply end the
+        daemon (run()'s handlers are gone), SIGHUP reads the configuration."""
+        hup = []
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        signal.signal(signal.SIGHUP, lambda *a: hup.append(1))
+        time.sleep(seconds)
+        return bool(hup)
+
+    while True:
+        started = time.monotonic()
+        try:
+            how = Posed(
+                cfg, args.dry_run or args.monitor, args.debug, args.monitor, args.fake
+            ).run()
+            if how == "reload":
+                cfg = read_config(args.config)
+                log("configuration read again (SIGHUP)")
+                continue
+            return 0
+        except SensorsNotYet as e:
+            # logged once; the sensors come back by themselves
+            if not waiting:
+                log("SSC: %s; asking again every %.0f s" % (e, SENSORS_RETRY_S))
+            waiting = True
+            if pause(SENSORS_RETRY_S):
+                cfg = read_config(args.config)
+            continue
+        except ssc.SscError as e:
+            log("SSC: %s; again in %.0f s" % (e, delay))
+        except OSError as e:
+            log("error: %s; again in %.0f s" % (e, delay))
+        waiting = False
+        if time.monotonic() - started > 60:
+            delay = 2.0  # it had been running: the backoff starts anew
+        if pause(delay):
+            cfg = read_config(args.config)
+        delay = min(delay * 2, 60.0)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

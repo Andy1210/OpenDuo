@@ -1,0 +1,10 @@
+[Unit]
+Description=duo2-os: save the RTC offset hourly (the RTC's drift)
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=1h
+Unit=duo2-rtc-time-save.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,103 @@
+#!/bin/bash
+# The colour and exposure of a camera's processed picture, as NUMBERS only
+# (docs/hardware/camera.md). Run ON THE PHONE as the GUI user (video group)
+# or root, with nothing else streaming from the camera (Snapshot closed):
+#
+#   duo2-camera-colour CAMERA [FRAMES [WIDTHxHEIGHT]]
+#       CAMERA uw, front, tele or wide; FRAMES (default 60) gives the AGC and
+#       the AWB time to settle; the size picks the sensor mode (default the
+#       binned 1536x864 one: 1528x864 after the CPU SoftISP's border).
+#       LIBCAMERA_SOFTISP_MODE=cpu|gpu picks the SoftISP's debayering.
+#
+# libcamera's simple pipeline + SoftISP produce XRGB8888 frames (both the CPU
+# and the GPU path offer it). cam writes one file per frame into a private
+# directory under /dev/shm; all but the newest two are deleted while it runs,
+# so only the last frame is left at the end. It is reduced to numbers
+# (per-channel mean over a sparse sample, the grey-world ratios R/G and B/G,
+# the share of clipped and of near-black pixels, the mean of the brightest and
+# the darkest tenth) and deleted at once; nothing is shown, kept or copied.
+# The metadata of the last frame (exposure, gains, colour gains, black level)
+# is printed too.
+set -u
+cam_name=${1:-}
+frames=${2:-60}
+size=${3:-1528x864}
+case $cam_name in
+    uw) path='cci@ac50000/i2c-bus@0/camera@10' ;;
+    front) path='cci@ac50000/i2c-bus@1/camera@1a' ;;
+    tele) path='cci@ac4f000/i2c-bus@0/camera@1a' ;;
+    wide) path='cci@ac4f000/i2c-bus@1/camera@1a' ;;
+    *) echo "usage: $0 uw|front|tele|wide [FRAMES [WxH]]" >&2; exit 2 ;;
+esac
+command -v cam >/dev/null || { echo "needs cam (libcamera-tools)" >&2; exit 1; }
+id=$(cam -l 2>/dev/null | sed -n "s|^\([0-9]*\): .*/$path).*|\1|p")
+[ -n "$id" ] || { echo "no libcamera camera at $path" >&2; exit 1; }
+W=${size%x*} H=${size#*x}
+
+dir=$(mktemp -d /dev/shm/duo2-colour.XXXXXX)
+# the frames cam wrote, oldest first (the file names end in the frame number)
+# shellcheck disable=SC2012 # cam's own names, from its -F pattern
+frame_files() { ls "$dir/f" | sort -t- -k3; }
+trap 'rm -rf "$dir"' EXIT
+log=$dir/log
+mkdir "$dir/f"
+cam -c "$id" -I -C"$frames" -s width="$W",height="$H",pixelformat=XRGB8888 \
+    --metadata -F"$dir/f/#.bin" >"$log" 2>&1 &
+pid=$!
+# keep the newest two frames only (the file names end in the frame number)
+while kill -0 $pid 2>/dev/null; do
+    frame_files | head -n -2 | sed "s|^|$dir/f/|" | xargs -r rm -f
+    sleep 0.2
+done
+wait $pid
+st=$?
+last=$(frame_files | tail -1)
+frame_files | head -n -1 | sed "s|^|$dir/f/|" | xargs -r rm -f
+clean() { sed 's/\x1b\[[0-9;]*m//g' "$log"; }
+clean | grep -E "WARN|ERROR|FATAL" | sed 's/^\[[^]]*\] \[[0-9]*\] *//' | sort -u | head -12
+[ $st = 0 ] && [ -n "$last" ] || { echo "cam failed ($st)"; clean | tail -5; exit 1; }
+# the stream as configured (the pipeline may adjust it): "0: 1528x864-XRGB8888/sRGB"
+cfg=$(clean | sed -n 's/^0: \([0-9]*\)x\([0-9]*\)-\([A-Z0-9]*\).*/\1 \2 \3/p' | head -1)
+read -r W H fmt <<<"$cfg"
+echo "== camera $id ($cam_name), $frames frames, ${W}x${H} $fmt, mode ${LIBCAMERA_SOFTISP_MODE:-default}"
+echo "== metadata of the last frame"
+clean | grep -E "^\s*(ExposureTime|AnalogueGain|DigitalGain|ColourGains|ColourTemperature|SensorBlackLevels|Lux|FrameDuration|Saturation|Contrast|Gamma|ColourCorrectionMatrix) " |
+    tail -n 40 | awk '{k=$1; v[k]=$0} END {for (k in v) print "  " v[k]}' | sort
+python3 -I - "$dir/f/$last" "$W" "$H" "$fmt" <<'EOF'
+import sys
+path, w, h, fmt = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
+# byte offsets of R, G, B (DRM fourcc order, little endian) and bytes per pixel
+layout = {'XRGB8888': (2, 1, 0, 4), 'ARGB8888': (2, 1, 0, 4),
+          'XBGR8888': (0, 1, 2, 4), 'ABGR8888': (0, 1, 2, 4),
+          'RGB888': (2, 1, 0, 3), 'BGR888': (0, 1, 2, 3)}
+if fmt not in layout:
+    sys.exit('unexpected format %s' % fmt)
+ro, go, bo, bpp = layout[fmt]
+d = open(path, 'rb').read()
+stride = len(d) // h if h else 0
+if stride < bpp * w:
+    sys.exit('frame size %d does not fit %dx%d %s' % (len(d), w, h, fmt))
+s = [[], [], []]          # R, G, B samples on a sparse grid; nothing spatial is kept
+lum = []
+for y in range(2, h - 2, max(1, h // 96)):
+    row = d[y * stride:y * stride + bpp * w]
+    for x in range(2, w - 2, max(1, w // 128)):
+        p = bpp * x
+        r, g, b = row[p + ro], row[p + go], row[p + bo]
+        s[0].append(r); s[1].append(g); s[2].append(b)
+        lum.append(0.299 * r + 0.587 * g + 0.114 * b)
+n = len(lum)
+mr, mg, mb = (sum(c) / n for c in s)
+clip = sum(1 for i in range(n) if max(s[0][i], s[1][i], s[2][i]) >= 250) / n
+dark = sum(1 for v in lum if v < 8) / n
+order = sorted(range(n), key=lambda i: lum[i])
+def mean_rgb(idx):
+    return tuple(sum(s[c][i] for i in idx) / len(idx) for c in range(3))
+lo, hi = order[:n // 10], order[-(n // 10):]
+print('== the last frame, %d samples' % n)
+print('  mean R %.1f  G %.1f  B %.1f   R/G %.3f  B/G %.3f   luma %.1f' % (
+    mr, mg, mb, mr / mg if mg else 0, mb / mg if mg else 0, sum(lum) / n))
+print('  brightest tenth RGB %.1f %.1f %.1f   darkest tenth RGB %.1f %.1f %.1f' % (
+    mean_rgb(hi) + mean_rgb(lo)))
+print('  clipped %.1f %%   near black %.1f %%' % (100 * clip, 100 * dark))
+EOF

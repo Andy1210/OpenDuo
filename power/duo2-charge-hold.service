@@ -1,0 +1,13 @@
+[Unit]
+Description=duo2-os: the battery charge hold as set in Duo Settings (/etc/duo2/charge-hold)
+ConditionPathExists=/etc/duo2/charge-hold
+After=sysinit.target
+
+[Service]
+Type=oneshot
+# the battery manager registers its supplies once the ADSP is up
+ExecStartPre=/bin/sh -c 'for i in $(seq 60); do [ -e /sys/class/power_supply/qcom-battmgr-bat ] && exit 0; sleep 1; done; exit 0'
+ExecStart=/usr/local/sbin/duo2-charge-hold apply
+
+[Install]
+WantedBy=multi-user.target

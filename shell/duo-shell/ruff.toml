@@ -1,0 +1,17 @@
+# Lint and format settings for this component (run `ruff check` and
+# `ruff format` from this directory).
+line-length = 100
+target-version = "py311"
+extend-exclude = ["po", "lock/protocols"]
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    "E501",   # long user-facing strings, D-Bus XML and shell lines: the formatter does not split them
+    "UP031",  # printf-style % formatting is the house style (and what gettext extraction expects)
+    "B905",   # zip() without strict=: the pairs are same-length by construction
+]
+
+[lint.per-file-ignores]
+# Tests put the package path on sys.path before importing it.
+"tests/*" = ["E402", "E741", "B007", "B023"]

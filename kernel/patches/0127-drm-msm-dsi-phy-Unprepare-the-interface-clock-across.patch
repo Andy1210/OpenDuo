@@ -1,0 +1,150 @@
+From ec5995a8e3881caaac2c08940c41975d71c14329 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 17:42:41 +0100
+Subject: [PATCH 127/137] drm/msm/dsi/phy: Unprepare the interface clock across
+ system sleep
+
+The PHY's interface clock (the display clock controller's MDSS AHB clock)
+came through pm_clk, which prepares it at probe and keeps it prepared for
+good: runtime PM only enables and disables it. A prepared clock keeps its
+parents prepared, and that clock's source runs from RPMh's XO, whose vote
+the clk-rpmh driver holds as soon as it is prepared, in the sleep set as
+well. On the Surface Duo 2 (SM8350, two DSI PHYs) it was the last clock
+prepared when the system entered suspend, so the APSS voted the XO on in
+the sleep set (xo.lvl 3), and the SoC never reached AOSS sleep or CX
+collapse while suspended.
+
+Keep the clock prepared while the system runs (the PHY provides clocks,
+so the clock framework resumes it with its prepare lock held: its runtime
+PM must not prepare, which is why pm_clk was used), but unprepare it in
+the late system suspend phase and prepare it again in the early resume
+phase, restoring the enable when the PHY was runtime active.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/gpu/drm/msm/dsi/phy/dsi_phy.c | 75 +++++++++++++++++++++++----
+ drivers/gpu/drm/msm/dsi/phy/dsi_phy.h |  2 +
+ 2 files changed, 67 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/gpu/drm/msm/dsi/phy/dsi_phy.c b/drivers/gpu/drm/msm/dsi/phy/dsi_phy.c
+index 1fb3899b88bf..381707d26e90 100644
+--- a/drivers/gpu/drm/msm/dsi/phy/dsi_phy.c
++++ b/drivers/gpu/drm/msm/dsi/phy/dsi_phy.c
+@@ -3,9 +3,9 @@
+  * Copyright (c) 2015, The Linux Foundation. All rights reserved.
+  */
+ 
++#include <linux/clk.h>
+ #include <linux/clk-provider.h>
+ #include <linux/platform_device.h>
+-#include <linux/pm_clock.h>
+ #include <linux/pm_runtime.h>
+ #include <dt-bindings/phy/phy.h>
+ 
+@@ -681,20 +681,16 @@ static int dsi_phy_driver_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		return ret;
+ 
++	phy->ahb_clk = devm_clk_get_prepared(dev, "iface");
++	if (IS_ERR(phy->ahb_clk))
++		return dev_err_probe(dev, PTR_ERR(phy->ahb_clk), "Unable to get iface clk\n");
++
+ 	platform_set_drvdata(pdev, phy);
+ 
+ 	ret = devm_pm_runtime_enable(dev);
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = devm_pm_clk_create(dev);
+-	if (ret)
+-		return ret;
+-
+-	ret = pm_clk_add(dev, "iface");
+-	if (ret < 0)
+-		return dev_err_probe(dev, ret, "Unable to get iface clk\n");
+-
+ 	if (phy->cfg->ops.pll_init) {
+ 		ret = phy->cfg->ops.pll_init(phy);
+ 		if (ret)
+@@ -711,8 +707,67 @@ static int dsi_phy_driver_probe(struct platform_device *pdev)
+ 	return 0;
+ }
+ 
++/*
++ * The interface clock stays prepared while the system runs: the PHY provides
++ * clocks, so the clock framework resumes it with its prepare lock held, and
++ * its runtime PM may only enable and disable (what pm_clk did before). Across
++ * system sleep it is unprepared, though: a prepared clock keeps its parents
++ * prepared, and the display clock controller's AHB clock runs from RPMh's XO,
++ * whose vote a prepare holds in the sleep set too, so the SoC could never
++ * shut the XO down while suspended.
++ */
++static int dsi_phy_runtime_suspend(struct device *dev)
++{
++	struct msm_dsi_phy *phy = dev_get_drvdata(dev);
++
++	clk_disable(phy->ahb_clk);
++
++	return 0;
++}
++
++static int dsi_phy_runtime_resume(struct device *dev)
++{
++	struct msm_dsi_phy *phy = dev_get_drvdata(dev);
++
++	return clk_enable(phy->ahb_clk);
++}
++
++static int dsi_phy_suspend_late(struct device *dev)
++{
++	struct msm_dsi_phy *phy = dev_get_drvdata(dev);
++
++	/* runtime PM is off by now: the status stays as it is */
++	phy->ahb_on_in_sleep = !pm_runtime_status_suspended(dev);
++	if (phy->ahb_on_in_sleep)
++		clk_disable(phy->ahb_clk);
++	clk_unprepare(phy->ahb_clk);
++
++	return 0;
++}
++
++static int dsi_phy_resume_early(struct device *dev)
++{
++	struct msm_dsi_phy *phy = dev_get_drvdata(dev);
++	int ret;
++
++	ret = clk_prepare(phy->ahb_clk);
++	if (ret)
++		return ret;
++
++	if (phy->ahb_on_in_sleep) {
++		ret = clk_enable(phy->ahb_clk);
++		if (ret) {
++			clk_unprepare(phy->ahb_clk);
++			return ret;
++		}
++	}
++
++	return 0;
++}
++
+ static const struct dev_pm_ops dsi_phy_pm_ops = {
+-	SET_RUNTIME_PM_OPS(pm_clk_suspend, pm_clk_resume, NULL)
++	SET_RUNTIME_PM_OPS(dsi_phy_runtime_suspend, dsi_phy_runtime_resume, NULL)
++	SET_LATE_SYSTEM_SLEEP_PM_OPS(dsi_phy_suspend_late, dsi_phy_resume_early)
+ };
+ 
+ static struct platform_driver dsi_phy_platform_driver = {
+diff --git a/drivers/gpu/drm/msm/dsi/phy/dsi_phy.h b/drivers/gpu/drm/msm/dsi/phy/dsi_phy.h
+index f5d3e806f8fd..9c591da37e0f 100644
+--- a/drivers/gpu/drm/msm/dsi/phy/dsi_phy.h
++++ b/drivers/gpu/drm/msm/dsi/phy/dsi_phy.h
+@@ -107,6 +107,8 @@ struct msm_dsi_phy {
+ 	int id;
+ 
+ 	struct regulator_bulk_data *supplies;
++	struct clk *ahb_clk;
++	bool ahb_on_in_sleep;
+ 
+ 	struct msm_dsi_dphy_timing timing;
+ 	const struct msm_dsi_phy_cfg *cfg;

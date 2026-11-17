@@ -1,0 +1,88 @@
+From ae87065cf5cd317d57aef3d278dbfb912c593ef0 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Fri, 6 Nov 2026 14:22:31 +0100
+Subject: [PATCH 015/137] BRING-UP: arm64: dts: qcom:
+ sm8350-microsoft-surface-duo2: Add bring-up variant J with dispcc
+
+Variant J is variant I with the display clock controller enabled, for
+the display driver: Linux drives the panels from here on, so the UEFI's
+picture no longer has to be kept alive.
+
+Not for upstream: a bring-up variant, built next to the main DTB.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ ...m8350-microsoft-surface-duo2-bringup-j.dts | 64 +++++++++++++++++++
+ 1 file changed, 64 insertions(+)
+ create mode 100644 arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup-j.dts
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup-j.dts b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup-j.dts
+new file mode 100644
+index 000000000000..88cda4197381
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup-j.dts
+@@ -0,0 +1,64 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/*
++ * Bring-up variant J (display): variant I with dispcc and the panels on.
++ * Variant I was: the main Duo 2 DTS with only what the first boots
++ * showed is needed to keep the UEFI's picture and a USB console alive:
++ *  - MDSS marked okay without its driver (providers keep the display votes)
++ *  - dispcc off (its probe reprograms the display PLLs)
++ *  - the display / DSI PHY rails always on
++ *  - USB 2.0 only, fixed peripheral; the pmic_glink connector stays (battery,
++ *    charger, UCSI) but without the graph links to dwc3 / QMP for now
++ *  - usb_2 off (usb30_sec_gdsc stuck off)
++ * PCIe0 / WiFi are back on. Not for upstream.
++ */
++#include "sm8350-microsoft-surface-duo2.dts"
++
++&mdss {
++	status = "okay";
++};
++
++&vreg_l5b_0p88 {
++	regulator-always-on;
++};
++
++&vreg_l6b_1p2 {
++	regulator-always-on;
++};
++
++&vreg_l2b_3p07 {
++	regulator-always-on;
++};
++
++&vreg_l12c_1p8 {
++	regulator-always-on;
++};
++
++&vreg_l13c_3p0 {
++	regulator-always-on;
++};
++
++&usb_1_dwc3 {
++	maximum-speed = "high-speed";
++	phys = <&usb_1_hsphy>;
++	phy-names = "usb2-phy";
++};
++
++&usb_1_dwc3_hs {
++	/delete-property/ remote-endpoint;
++};
++
++&usb_1_qmpphy_out {
++	/delete-property/ remote-endpoint;
++};
++
++&pmic_glink_hs_in {
++	/delete-property/ remote-endpoint;
++};
++
++&pmic_glink_ss_in {
++	/delete-property/ remote-endpoint;
++};
++
++&usb_2 {
++	status = "disabled";
++};

@@ -1,0 +1,9 @@
+# duo2-os: duo2-callaudio offers the call audio interface callaudiod has
+# (GNOME Calls uses it), switching the card's PipeWire profile for the
+# speaker (callaudiod switches sink ports, which PipeWire 1.4 does not give
+# this card: the earpiece and the speakers share a PCM). This file shadows
+# callaudiod's /usr/share one (/usr/local/share comes first).
+[D-BUS Service]
+Name=org.mobian_project.CallAudio
+Exec=/bin/false
+SystemdService=duo2-callaudio.service

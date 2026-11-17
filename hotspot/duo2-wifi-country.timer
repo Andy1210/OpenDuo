@@ -1,0 +1,13 @@
+# duo2-os: check the WiFi country two minutes after boot (the modem has
+# registered by then) and every ten minutes (a border crossed). Not enabled
+# by the installer: hotspot/README.md "Regulatory domain" says when.
+[Unit]
+Description=duo2-os WiFi country check
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

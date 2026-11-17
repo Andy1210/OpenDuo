@@ -1,0 +1,11 @@
+# duo2-os: Chromium on duo-wc (Wayland only, no X server). Sourced by
+# /usr/bin/chromium like the other files here.
+#   --ozone-platform=wayland        native Wayland (fractional scale 2.5, touch)
+#   --enable-wayland-ime
+#   --wayland-text-input-version=3  text fields bring up the on-screen keyboard
+#                                   (squeekboard, through text-input-v3)
+#   --touch-events=enabled          web pages get touch events (scrolling and
+#                                   pinch-zoom are Chromium's own either way)
+#   --password-store=basic          no keyring daemon on the phone: do not wait
+#                                   for one
+export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --ozone-platform=wayland --enable-wayland-ime --wayland-text-input-version=3 --touch-events=enabled --password-store=basic"

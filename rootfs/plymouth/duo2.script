@@ -1,0 +1,71 @@
+# OpenDuo boot splash (Plymouth script plugin). Black, the phone (open like
+# a book, make-theme.py) in the middle, the name "OpenDuo" under it in the
+# system font (Cantarell Light, soft white like the logo's rim), then three
+# dots that brighten one after the other. The text needs Plymouth's label
+# plugin (the plymouth-label package). The plugin draws the same scene on every panel (both are
+# 1344 x 1892), centred.
+
+Window.SetBackgroundTopColor(0, 0, 0);
+Window.SetBackgroundBottomColor(0, 0, 0);
+
+logo.image = Image("logo.png");
+logo.sprite = Sprite(logo.image);
+logo.x = Window.GetX() + Window.GetWidth() / 2 - logo.image.GetWidth() / 2;
+logo.y = Window.GetY() + Window.GetHeight() / 2 - logo.image.GetHeight() / 2 - 40;
+logo.sprite.SetPosition(logo.x, logo.y, 10);
+
+# 40 pt = 53 px at 96 dpi: about 60 % of the logo's width, light strokes.
+name.image = Image.Text("OpenDuo", 0.90, 0.91, 0.93, 1, "Cantarell Light 40", "center");
+name.sprite = Sprite(name.image);
+name.y = logo.y + logo.image.GetHeight() + 24;
+name.sprite.SetPosition(Window.GetX() + Window.GetWidth() / 2 - name.image.GetWidth() / 2, name.y, 10);
+
+dot_image = Image("dot.png");
+spacing = 34;
+row_y = name.y + name.image.GetHeight() + 70;
+for (i = 0; i < 3; i++) {
+    dots[i] = Sprite(dot_image);
+    dots[i].SetPosition(Window.GetX() + Window.GetWidth() / 2 + (i - 1) * spacing - dot_image.GetWidth() / 2,
+                        row_y, 10);
+    dots[i].SetOpacity(0.2);
+}
+
+tick = 0;
+fun refresh_callback () {
+    tick++;
+    for (i = 0; i < 3; i++) {
+        phase = Math.Sin(tick * 0.06 - i * 0.9);
+        if (phase < 0) phase = 0;
+        dots[i].SetOpacity(0.2 + 0.6 * phase);
+    }
+}
+Plymouth.SetRefreshFunction(refresh_callback);
+
+# No prompts: the boot has nothing to ask (the encrypted home is unlocked on
+# the lock screen, not here). A message and a progress bar only while the
+# home is encrypted or decrypted at start (homecrypt/README.md: "Encrypting
+# your data: 42 %"); the text needs Plymouth's label plugin, the bar is the
+# dot image stretched and works without it.
+message_sprite = Sprite();
+fun message_callback (text) {
+    message_image = Image.Text(text, 0.85, 0.85, 0.85);
+    message_sprite.SetImage(message_image);
+    message_sprite.SetPosition(Window.GetX() + Window.GetWidth() / 2 - message_image.GetWidth() / 2,
+                               row_y + 80, 10);
+}
+Plymouth.SetMessageFunction(message_callback);
+
+bar_width = 360;
+bar_x = Window.GetX() + Window.GetWidth() / 2 - bar_width / 2;
+bar_back = Sprite(dot_image.Scale(bar_width, 6));
+bar_back.SetPosition(bar_x, row_y + 50, 10);
+bar_back.SetOpacity(0);
+bar = Sprite();
+fun progress_callback (progress) {
+    bar_back.SetOpacity(0.2);
+    w = bar_width * progress / 100;
+    if (w < 6) w = 6;
+    bar.SetImage(dot_image.Scale(w, 6));
+    bar.SetPosition(bar_x, row_y + 50, 11);
+}
+Plymouth.SetSystemUpdateFunction(progress_callback);

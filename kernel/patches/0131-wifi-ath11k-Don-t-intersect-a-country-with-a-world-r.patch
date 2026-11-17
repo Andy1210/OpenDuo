@@ -1,0 +1,139 @@
+From a4f0bce60d5b8ed4e060bbe39c490932cbac1c61 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Thu, 12 Nov 2026 16:27:04 +0100
+Subject: [PATCH 131/137] wifi: ath11k: Don't intersect a country with a world
+ roaming default
+
+The first channel list the firmware sends after WMI init becomes the
+default regdomain, and every later country (11d, a user hint) is
+intersected with it, unless the default is the world ("00" or "na"). The
+WCN6851 mobile firmware (WLAN.HSP.1.1.c3) boots a board without a country
+of its own in a world roaming domain (a WORLD_6x one: channels 12-13 and
+all of 5 GHz no-IR, 20 dBm) but reports it with a country code instead of
+"00". The intersection then OR'ed its no-IR into every country set later:
+with Germany from 11d the phy showed DE, yet every 5 GHz channel stayed
+no-IR (and every power capped at 20 dBm), so an access point could start
+on no 5 GHz channel. The firmware's own rules for DE have no no-IR at all.
+
+A world roaming domain is the safe subset of every country, not a limit
+of the board: take the default as one when its alpha2 is a world one, when
+its domain code is one of the firmware's world roaming pairs (0x60-0x6f),
+or when none of its 5 GHz rules allows initiating radiation, and do not
+intersect later countries with it.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/net/wireless/ath/ath11k/core.h |  4 ++
+ drivers/net/wireless/ath/ath11k/reg.c  | 52 ++++++++++++++++++++++++--
+ 2 files changed, 52 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/net/wireless/ath/ath11k/core.h b/drivers/net/wireless/ath/ath11k/core.h
+index 29727ee94bfc..58911a73d4e1 100644
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -1001,6 +1001,10 @@ struct ath11k_base {
+ 	 * by the firmware during initialization
+ 	 */
+ 	struct ieee80211_regdomain *default_regd[MAX_RADIOS];
++	/* The default regd is a world roaming domain: a later country is
++	 * not intersected with it
++	 */
++	bool default_regd_roaming[MAX_RADIOS];
+ 	/* This regd is set during dynamic country setting
+ 	 * This may or may not be used during the runtime
+ 	 */
+diff --git a/drivers/net/wireless/ath/ath11k/reg.c b/drivers/net/wireless/ath/ath11k/reg.c
+index 0879a132b67c..6bae8d1906c9 100644
+--- a/drivers/net/wireless/ath/ath11k/reg.c
++++ b/drivers/net/wireless/ath/ath11k/reg.c
+@@ -854,6 +854,42 @@ static bool ath11k_reg_is_world_alpha(char *alpha)
+ 	return false;
+ }
+ 
++/* The firmware's world roaming regulatory domains, WORLD_60 ... WORLD_6F */
++#define ATH11K_REG_WORLD_ROAMING_MASK	0xfff0
++#define ATH11K_REG_WORLD_ROAMING	0x0060
++
++/* Whether the firmware's regulatory domain is a world roaming one: what a
++ * board without a country of its own runs with until a country is set. It
++ * limits nothing a country allows (it is the safe subset of all of them), so
++ * a country set later must not be intersected with it. Some firmware reports
++ * it with a country code instead of "00" (the WCN6851 mobile firmware: its
++ * domain is a WORLD_6x one, all of 5 GHz no-IR), and the intersection kept
++ * every 5 GHz channel no-IR for whatever country 11d or the user set.
++ * A domain that lets nothing initiate radiation anywhere on 5 GHz is taken
++ * as a roaming one too, whatever its name.
++ */
++static bool ath11k_reg_is_world_roaming(struct cur_regulatory_info *reg_info)
++{
++	u32 i;
++
++	if (ath11k_reg_is_world_alpha((char *)reg_info->alpha2))
++		return true;
++
++	if ((reg_info->reg_dmn_pair & ATH11K_REG_WORLD_ROAMING_MASK) ==
++	    ATH11K_REG_WORLD_ROAMING)
++		return true;
++
++	if (!reg_info->num_5ghz_reg_rules || !reg_info->reg_rules_5ghz_ptr)
++		return false;
++
++	for (i = 0; i < reg_info->num_5ghz_reg_rules; i++)
++		if (!(reg_info->reg_rules_5ghz_ptr[i].flags &
++		      REGULATORY_CHAN_NO_IR))
++			return false;
++
++	return true;
++}
++
+ static enum wmi_vdev_type ath11k_reg_get_ar_vdev_type(struct ath11k *ar)
+ {
+ 	struct ath11k_vif *arvif;
+@@ -876,7 +912,7 @@ int ath11k_reg_handle_chan_list(struct ath11k_base *ab,
+ 				enum ieee80211_ap_reg_power power_type)
+ {
+ 	struct ieee80211_regdomain *regd;
+-	bool intersect = false;
++	bool intersect = false, roaming = false;
+ 	int pdev_idx;
+ 	struct ath11k *ar;
+ 	enum wmi_vdev_type vdev_type;
+@@ -933,13 +969,15 @@ int ath11k_reg_handle_chan_list(struct ath11k_base *ab,
+ 
+ 	/* Intersect new rules with default regd if a new country setting was
+ 	 * requested, i.e a default regd was already set during initialization
+-	 * and the regd coming from this event has a valid country info.
++	 * and the regd coming from this event has a valid country info. A
++	 * world roaming default limits nothing: no intersection with it.
+ 	 */
+ 	if (ab->default_regd[pdev_idx] &&
+-	    !ath11k_reg_is_world_alpha((char *)
+-		ab->default_regd[pdev_idx]->alpha2) &&
++	    !ab->default_regd_roaming[pdev_idx] &&
+ 	    !ath11k_reg_is_world_alpha((char *)reg_info->alpha2))
+ 		intersect = true;
++	else if (!ab->default_regd[pdev_idx])
++		roaming = ath11k_reg_is_world_roaming(reg_info);
+ 
+ 	ar = ab->pdevs[pdev_idx].ar;
+ 	vdev_type = ath11k_reg_get_ar_vdev_type(ar);
+@@ -977,6 +1015,11 @@ int ath11k_reg_handle_chan_list(struct ath11k_base *ab,
+ 		 * held constant throughout for regd intersection purpose
+ 		 */
+ 		ab->default_regd[pdev_idx] = regd;
++		ab->default_regd_roaming[pdev_idx] = roaming;
++		ath11k_dbg(ab, ATH11K_DBG_REG,
++			   "default regd %c%c country %u domain 0x%x%s\n",
++			   regd->alpha2[0], regd->alpha2[1], reg_info->ctry_code,
++			   reg_info->reg_dmn_pair, roaming ? " world roaming" : "");
+ 	}
+ 	ab->dfs_region = reg_info->dfs_region;
+ 	spin_unlock_bh(&ab->base_lock);
+@@ -1056,6 +1099,7 @@ void ath11k_reg_free(struct ath11k_base *ab)
+ 	for (i = 0; i < ab->hw_params.max_radios; i++) {
+ 		kfree(ab->default_regd[i]);
+ 		kfree(ab->new_regd[i]);
++		ab->default_regd_roaming[i] = false;
+ 	}
+ }
+ 

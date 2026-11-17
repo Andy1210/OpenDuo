@@ -1,0 +1,116 @@
+From 8ccb915c62caa20e8ce997e26d16fda754b0aa68 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 08:47:12 +0100
+Subject: [PATCH 042/137] BRING-UP: drm/msm/a6xx: Log the OOB latency, add a
+ timeout knob and a GMU dump
+
+A diagnostic for the A660 "Timeout waiting for GMU OOB set GPU_SET:
+0x0" on the Surface Duo 2, not for upstream:
+
+- msm.gmu_oob_timeout_ms (default 10, as mainline): a longer wait tells
+  a slow GX power-up from a GMU that never answers.
+- every new maximum of the OOB acknowledgment latency is logged, so a
+  run shows how close the normal case comes to the 10 ms limit.
+- on a timeout the GMU-side state is dumped once per request: pending
+  host requests, the RPMh power state the GMU reports, the GX
+  SPTPRAC/GDSC/clamp status, AO interrupts, the AHB fence, the CX busy
+  bits, the CM3 init/busy words, the GMU log write index and the GPU
+  RSC (sequencer busy, TCS0, RSC status).
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/gpu/drm/msm/adreno/a6xx_gmu.c | 51 +++++++++++++++++++++++++--
+ 1 file changed, 49 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/msm/adreno/a6xx_gmu.c b/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
+index 3ab32d5febe3..4c5a35aa4c2d 100644
+--- a/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
++++ b/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
+@@ -389,6 +389,41 @@ static const struct a6xx_gmu_oob_bits a6xx_gmu_oob_bits[] = {
+ 	},
+ };
+ 
++/*
++ * BRING-UP: how long an OOB request waits for the GMU's acknowledgment.
++ * Mainline waits 10 ms; a longer wait shows whether a GX power-up that
++ * "never" answers is only a slow one (the latency is logged below).
++ */
++static unsigned int gmu_oob_timeout_ms = 10;
++MODULE_PARM_DESC(gmu_oob_timeout_ms, "GMU OOB acknowledgment timeout in ms (default 10)");
++module_param(gmu_oob_timeout_ms, uint, 0600);
++
++/* BRING-UP: the slowest OOB acknowledgment seen so far, in us */
++static s64 gmu_oob_max_us;
++
++static void a6xx_gmu_dump_oob_state(struct a6xx_gmu *gmu)
++{
++	DRM_DEV_ERROR(gmu->dev,
++		      "GMU: h2g_raw %08x pwr_state %x sptprac %08x gx_gdscr %08x gx_misc %08x ao_irq %08x fence %08x cx_busy %08x/%08x\n",
++		gmu_read(gmu, REG_A6XX_GMU_HOST2GMU_INTR_RAW_INFO),
++		gmu_read(gmu, REG_A6XX_GPU_GMU_CX_GMU_RPMH_POWER_STATE),
++		gmu_read(gmu, REG_A6XX_GMU_SPTPRAC_PWR_CLK_STATUS),
++		gmu_read(gmu, REG_A6XX_GPU_CC_GX_GDSCR),
++		gmu_read(gmu, REG_A6XX_GPU_CC_GX_DOMAIN_MISC),
++		gmu_read(gmu, REG_A6XX_GMU_AO_HOST_INTERRUPT_STATUS),
++		gmu_read(gmu, REG_A6XX_GMU_AHB_FENCE_STATUS),
++		gmu_read(gmu, REG_A6XX_GPU_GMU_AO_GPU_CX_BUSY_STATUS),
++		gmu_read(gmu, REG_A6XX_GPU_GMU_AO_GPU_CX_BUSY_STATUS2));
++	DRM_DEV_ERROR(gmu->dev,
++		      "GMU: fw_init %08x fw_busy %08x log_wptr %08x rscc_seq_busy %08x tcs0 %08x rsc_status0 %08x\n",
++		gmu_read(gmu, REG_A6XX_GMU_CM3_FW_INIT_RESULT),
++		gmu_read(gmu, REG_A6XX_GMU_CM3_FW_BUSY),
++		gmu_read(gmu, REG_A6XX_GPU_GMU_CX_GMU_PWR_COL_CP_RESP),
++		gmu_read_rscc(gmu, REG_A6XX_RSCC_SEQ_BUSY_DRV0),
++		gmu_read_rscc(gmu, REG_A6XX_RSCC_TCS0_DRV0_STATUS),
++		gmu_read_rscc(gmu, REG_A6XX_GPU_RSCC_RSC_STATUS0_DRV0));
++}
++
+ /* Trigger a OOB (out of band) request to the GMU */
+ int a6xx_gmu_set_oob(struct a6xx_gmu *gmu, enum a6xx_gmu_oob_state state)
+ {
+@@ -397,6 +432,8 @@ int a6xx_gmu_set_oob(struct a6xx_gmu *gmu, enum a6xx_gmu_oob_state state)
+ 	int ret;
+ 	u32 val;
+ 	int request, ack;
++	ktime_t start;
++	s64 us;
+ 
+ 	WARN_ON_ONCE(!mutex_is_locked(&gmu->lock));
+ 
+@@ -422,12 +459,14 @@ int a6xx_gmu_set_oob(struct a6xx_gmu *gmu, enum a6xx_gmu_oob_state state)
+ 	}
+ 
+ 	/* Trigger the equested OOB operation */
++	start = ktime_get();
+ 	gmu_write(gmu, REG_A6XX_GMU_HOST2GMU_INTR_SET, 1 << request);
+ 
+ 	do {
+ 		/* Wait for the acknowledge interrupt */
+ 		ret = gmu_poll_timeout(gmu, REG_A6XX_GMU_GMU2HOST_INTR_INFO, val,
+-			val & (1 << ack), 100, 10000);
++			val & (1 << ack), 100,
++			READ_ONCE(gmu_oob_timeout_ms) * USEC_PER_MSEC);
+ 
+ 		if (!ret)
+ 			break;
+@@ -456,11 +495,19 @@ int a6xx_gmu_set_oob(struct a6xx_gmu *gmu, enum a6xx_gmu_oob_state state)
+ 		}
+ 	} while (true);
+ 
+-	if (ret)
++	us = ktime_us_delta(ktime_get(), start);
++
++	if (ret) {
+ 		DRM_DEV_ERROR(gmu->dev,
+ 			"Timeout waiting for GMU OOB set %s: 0x%x\n",
+ 				a6xx_gmu_oob_bits[state].name,
+ 				gmu_read(gmu, REG_A6XX_GMU_GMU2HOST_INTR_INFO));
++		a6xx_gmu_dump_oob_state(gmu);
++	} else if (us > gmu_oob_max_us) {
++		gmu_oob_max_us = us;
++		dev_info(gmu->dev, "GMU OOB %s acked after %lld us (new max)\n",
++			 a6xx_gmu_oob_bits[state].name, us);
++	}
+ 
+ 	/* Clear the acknowledge interrupt */
+ 	gmu_write(gmu, REG_A6XX_GMU_GMU2HOST_INTR_CLR, 1 << ack);

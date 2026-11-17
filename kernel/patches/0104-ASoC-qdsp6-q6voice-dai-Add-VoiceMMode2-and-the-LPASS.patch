@@ -1,0 +1,318 @@
+From b7e94aa4d20c6ddb72573a6b84d898ed342010d8 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 19:26:48 +0100
+Subject: [PATCH 104/137] ASoC: qdsp6: q6voice-dai: Add VoiceMMode2 and the
+ LPASS codec DMA ports
+
+Newer modem firmware runs a call of the first subscription on the
+VoiceMMode1 voice session and one of the second (dual SIM) on
+VoiceMMode2. Add the VoiceMMode2 front end next to VoiceMMode1.
+
+SoCs with the LPASS codec macros (SM8250 and later) have their speakers,
+earpiece and microphones on the codec DMA ports, not on MI2S. Let every
+voice front end take its uplink from the VA and TX codec DMA ports and
+play its downlink into WSA_CODEC_DMA_RX_0/1 and RX_CODEC_DMA_RX_0,
+through the same "<FE> Capture Mixer" and "<PORT> Voice Mixer" switches
+the MI2S ports use. The mixer tables are generated from one list per
+direction, so a front end can no longer miss a port the others have.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ include/dt-bindings/sound/qcom,q6voice.h |   1 +
+ sound/soc/qcom/qdsp6/q6voice-dai.c       | 236 +++++++++++++----------
+ 2 files changed, 131 insertions(+), 106 deletions(-)
+
+diff --git a/include/dt-bindings/sound/qcom,q6voice.h b/include/dt-bindings/sound/qcom,q6voice.h
+index 825bf7d47fe3..a40c814add68 100644
+--- a/include/dt-bindings/sound/qcom,q6voice.h
++++ b/include/dt-bindings/sound/qcom,q6voice.h
+@@ -4,5 +4,6 @@
+ 
+ #define	CS_VOICE        0
+ #define	VOICEMMODE1     1
++#define	VOICEMMODE2     2
+ 
+ #endif /* __DT_BINDINGS_Q6_VOICE_H__ */
+diff --git a/sound/soc/qcom/qdsp6/q6voice-dai.c b/sound/soc/qcom/qdsp6/q6voice-dai.c
+index 2468380e3b15..14eed7e55589 100644
+--- a/sound/soc/qcom/qdsp6/q6voice-dai.c
++++ b/sound/soc/qcom/qdsp6/q6voice-dai.c
+@@ -19,6 +19,8 @@ static enum q6voice_path_type q6voice_get_path(unsigned int dai_id)
+ 		return Q6VOICE_PATH_VOICE;
+ 	case VOICEMMODE1:
+ 		return Q6VOICE_PATH_VOICEMMODE1;
++	case VOICEMMODE2:
++		return Q6VOICE_PATH_VOICEMMODE2;
+ 	}
+ 
+ 	return Q6VOICE_PATH_COUNT;
+@@ -105,6 +107,29 @@ static struct snd_soc_dai_driver q6voice_dais[] = {
+ 		},
+ 		.ops = &q6voice_dai_ops,
+ 	},
++	{
++		.id = VOICEMMODE2,
++		.name = "VOICEMMODE2",
++		.playback = {
++			.stream_name =	"VOICEMMODE2 Playback",
++			.formats =	SNDRV_PCM_FMTBIT_S16_LE,
++			.rates =	SNDRV_PCM_RATE_8000,
++			.rate_min =	8000,
++			.rate_max =	8000,
++			.channels_min =	1,
++			.channels_max =	1,
++		},
++		.capture = {
++			.stream_name =	"VOICEMMODE2 Capture",
++			.formats =	SNDRV_PCM_FMTBIT_S16_LE,
++			.rates =	SNDRV_PCM_RATE_8000,
++			.rate_min =	8000,
++			.rate_max =	8000,
++			.channels_min =	1,
++			.channels_max =	1,
++		},
++		.ops = &q6voice_dai_ops,
++	},
+ };
+ 
+ /* FIXME: Use codec2codec instead */
+@@ -233,76 +258,74 @@ static const struct snd_kcontrol_new q6voice_kcontrols[] = {
+ 		       q6voice_get_topology_kctrl, q6voice_put_topology_kctrl),
+ 	SOC_SINGLE_EXT("VoiceMMode1 RX Topology", VOICEMMODE1, 0, S32_MAX, 0,
+ 		       q6voice_get_topology_kctrl, q6voice_put_topology_kctrl),
++	SOC_SINGLE_EXT("VoiceMMode2 TX Topology", VOICEMMODE2, 1, S32_MAX, 0,
++		       q6voice_get_topology_kctrl, q6voice_put_topology_kctrl),
++	SOC_SINGLE_EXT("VoiceMMode2 RX Topology", VOICEMMODE2, 0, S32_MAX, 0,
++		       q6voice_get_topology_kctrl, q6voice_put_topology_kctrl),
+ };
+ 
++/*
++ * A voice path takes its uplink from one AFE TX port and plays its downlink
++ * into one AFE RX port: the "<FE> Capture Mixer" and "<PORT> Voice Mixer"
++ * switches pick them (the last one switched on wins).
++ */
++#define Q6VOICE_TX_PORT(name, port, fe)					\
++	SOC_SINGLE_EXT(name, port, fe, 1, 0,				\
++		       q6voice_get_mixer_capture, q6voice_put_mixer_capture)
++
++#define Q6VOICE_TX_MIXER_CONTROLS(fe)					\
++	Q6VOICE_TX_PORT("PRI_MI2S_TX", PRIMARY_MI2S_TX, fe),		\
++	Q6VOICE_TX_PORT("SEC_MI2S_TX", SECONDARY_MI2S_TX, fe),		\
++	Q6VOICE_TX_PORT("TERT_MI2S_TX", TERTIARY_MI2S_TX, fe),		\
++	Q6VOICE_TX_PORT("QUAT_MI2S_TX", QUATERNARY_MI2S_TX, fe),	\
++	Q6VOICE_TX_PORT("QUIN_MI2S_TX", QUINARY_MI2S_TX, fe),		\
++	Q6VOICE_TX_PORT("VA_CODEC_DMA_TX_0", VA_CODEC_DMA_TX_0, fe),	\
++	Q6VOICE_TX_PORT("VA_CODEC_DMA_TX_1", VA_CODEC_DMA_TX_1, fe),	\
++	Q6VOICE_TX_PORT("VA_CODEC_DMA_TX_2", VA_CODEC_DMA_TX_2, fe),	\
++	Q6VOICE_TX_PORT("TX_CODEC_DMA_TX_0", TX_CODEC_DMA_TX_0, fe),	\
++	Q6VOICE_TX_PORT("TX_CODEC_DMA_TX_1", TX_CODEC_DMA_TX_1, fe),	\
++	Q6VOICE_TX_PORT("TX_CODEC_DMA_TX_2", TX_CODEC_DMA_TX_2, fe),	\
++	Q6VOICE_TX_PORT("TX_CODEC_DMA_TX_3", TX_CODEC_DMA_TX_3, fe),	\
++	Q6VOICE_TX_PORT("TX_CODEC_DMA_TX_4", TX_CODEC_DMA_TX_4, fe)
++
++#define Q6VOICE_RX_MIXER_CONTROLS(port)					\
++	SOC_SINGLE_EXT("CS-Voice", port, CS_VOICE, 1, 0,		\
++		       q6voice_get_mixer_playback, q6voice_put_mixer_playback), \
++	SOC_SINGLE_EXT("VoiceMMode1", port, VOICEMMODE1, 1, 0,		\
++		       q6voice_get_mixer_playback, q6voice_put_mixer_playback), \
++	SOC_SINGLE_EXT("VoiceMMode2", port, VOICEMMODE2, 1, 0,		\
++		       q6voice_get_mixer_playback, q6voice_put_mixer_playback)
++
+ static const struct snd_kcontrol_new cs_voice_tx_mixer_controls[] = {
+-	SOC_SINGLE_EXT("PRI_MI2S_TX", PRIMARY_MI2S_TX, CS_VOICE, 1, 0,
+-		       q6voice_get_mixer_capture, q6voice_put_mixer_capture),
+-	SOC_SINGLE_EXT("SEC_MI2S_TX", SECONDARY_MI2S_TX, CS_VOICE, 1, 0,
+-		       q6voice_get_mixer_capture, q6voice_put_mixer_capture),
+-	SOC_SINGLE_EXT("TERT_MI2S_TX", TERTIARY_MI2S_TX, CS_VOICE, 1, 0,
+-		       q6voice_get_mixer_capture, q6voice_put_mixer_capture),
+-	SOC_SINGLE_EXT("QUAT_MI2S_TX", QUATERNARY_MI2S_TX, CS_VOICE, 1, 0,
+-		       q6voice_get_mixer_capture, q6voice_put_mixer_capture),
+-	SOC_SINGLE_EXT("QUIN_MI2S_TX", QUINARY_MI2S_TX, CS_VOICE, 1, 0,
+-		       q6voice_get_mixer_capture, q6voice_put_mixer_capture),
++	Q6VOICE_TX_MIXER_CONTROLS(CS_VOICE),
+ };
+ 
+ static const struct snd_kcontrol_new voicemmode1_tx_mixer_controls[] = {
+-	SOC_SINGLE_EXT("PRI_MI2S_TX", PRIMARY_MI2S_TX, VOICEMMODE1, 1, 0,
+-		       q6voice_get_mixer_capture, q6voice_put_mixer_capture),
+-	SOC_SINGLE_EXT("SEC_MI2S_TX", SECONDARY_MI2S_TX, VOICEMMODE1, 1, 0,
+-		       q6voice_get_mixer_capture, q6voice_put_mixer_capture),
+-	SOC_SINGLE_EXT("TERT_MI2S_TX", TERTIARY_MI2S_TX, VOICEMMODE1, 1, 0,
+-		       q6voice_get_mixer_capture, q6voice_put_mixer_capture),
+-	SOC_SINGLE_EXT("QUAT_MI2S_TX", QUATERNARY_MI2S_TX, VOICEMMODE1, 1, 0,
+-		       q6voice_get_mixer_capture, q6voice_put_mixer_capture),
+-	SOC_SINGLE_EXT("QUIN_MI2S_TX", QUINARY_MI2S_TX, VOICEMMODE1, 1, 0,
+-		       q6voice_get_mixer_capture, q6voice_put_mixer_capture),
+-	SOC_SINGLE_EXT("TX_CODEC_DMA_TX_1", TX_CODEC_DMA_TX_1, VOICEMMODE1, 1, 0,
+-		       q6voice_get_mixer_capture, q6voice_put_mixer_capture),
+-	SOC_SINGLE_EXT("TX_CODEC_DMA_TX_2", TX_CODEC_DMA_TX_2, VOICEMMODE1, 1, 0,
+-		       q6voice_get_mixer_capture, q6voice_put_mixer_capture),
+-	SOC_SINGLE_EXT("TX_CODEC_DMA_TX_3", TX_CODEC_DMA_TX_3, VOICEMMODE1, 1, 0,
+-		       q6voice_get_mixer_capture, q6voice_put_mixer_capture),
+-	SOC_SINGLE_EXT("TX_CODEC_DMA_TX_4", TX_CODEC_DMA_TX_4, VOICEMMODE1, 1, 0,
+-		       q6voice_get_mixer_capture, q6voice_put_mixer_capture),
++	Q6VOICE_TX_MIXER_CONTROLS(VOICEMMODE1),
+ };
+ 
+-static const struct snd_kcontrol_new primary_mi2s_rx_mixer_controls[] = {
+-	SOC_SINGLE_EXT("CS-Voice", PRIMARY_MI2S_RX, CS_VOICE, 1, 0,
+-		       q6voice_get_mixer_playback, q6voice_put_mixer_playback),
+-	SOC_SINGLE_EXT("VoiceMMode1", PRIMARY_MI2S_RX, VOICEMMODE1, 1, 0,
+-		       q6voice_get_mixer_playback, q6voice_put_mixer_playback),
++static const struct snd_kcontrol_new voicemmode2_tx_mixer_controls[] = {
++	Q6VOICE_TX_MIXER_CONTROLS(VOICEMMODE2),
+ };
+ 
+-static const struct snd_kcontrol_new secondary_mi2s_rx_mixer_controls[] = {
+-	SOC_SINGLE_EXT("CS-Voice", SECONDARY_MI2S_RX, CS_VOICE, 1, 0,
+-		       q6voice_get_mixer_playback, q6voice_put_mixer_playback),
+-	SOC_SINGLE_EXT("VoiceMMode1", SECONDARY_MI2S_RX, VOICEMMODE1, 1, 0,
+-		       q6voice_get_mixer_playback, q6voice_put_mixer_playback),
+-};
++#define Q6VOICE_RX_MIXER(name, port)					\
++static const struct snd_kcontrol_new name##_rx_mixer_controls[] = {	\
++	Q6VOICE_RX_MIXER_CONTROLS(port),				\
++}
+ 
+-static const struct snd_kcontrol_new tertiary_mi2s_rx_mixer_controls[] = {
+-	SOC_SINGLE_EXT("CS-Voice", TERTIARY_MI2S_RX, CS_VOICE, 1, 0,
+-		       q6voice_get_mixer_playback, q6voice_put_mixer_playback),
+-	SOC_SINGLE_EXT("VoiceMMode1", TERTIARY_MI2S_RX, VOICEMMODE1, 1, 0,
+-		       q6voice_get_mixer_playback, q6voice_put_mixer_playback),
+-};
++Q6VOICE_RX_MIXER(primary_mi2s, PRIMARY_MI2S_RX);
++Q6VOICE_RX_MIXER(secondary_mi2s, SECONDARY_MI2S_RX);
++Q6VOICE_RX_MIXER(tertiary_mi2s, TERTIARY_MI2S_RX);
++Q6VOICE_RX_MIXER(quaternary_mi2s, QUATERNARY_MI2S_RX);
++Q6VOICE_RX_MIXER(quinary_mi2s, QUINARY_MI2S_RX);
++Q6VOICE_RX_MIXER(wsa_codec_dma_rx_0, WSA_CODEC_DMA_RX_0);
++Q6VOICE_RX_MIXER(wsa_codec_dma_rx_1, WSA_CODEC_DMA_RX_1);
++Q6VOICE_RX_MIXER(rx_codec_dma_rx_0, RX_CODEC_DMA_RX_0);
+ 
+-static const struct snd_kcontrol_new quaternary_mi2s_rx_mixer_controls[] = {
+-	SOC_SINGLE_EXT("CS-Voice", QUATERNARY_MI2S_RX, CS_VOICE, 1, 0,
+-		       q6voice_get_mixer_playback, q6voice_put_mixer_playback),
+-	SOC_SINGLE_EXT("VoiceMMode1", QUATERNARY_MI2S_RX, VOICEMMODE1, 1, 0,
+-		       q6voice_get_mixer_playback, q6voice_put_mixer_playback),
+-};
+-
+-static const struct snd_kcontrol_new quinary_mi2s_rx_mixer_controls[] = {
+-	SOC_SINGLE_EXT("CS-Voice", QUINARY_MI2S_RX, CS_VOICE, 1, 0,
+-		       q6voice_get_mixer_playback, q6voice_put_mixer_playback),
+-	SOC_SINGLE_EXT("VoiceMMode1", QUINARY_MI2S_RX, VOICEMMODE1, 1, 0,
+-		       q6voice_get_mixer_playback, q6voice_put_mixer_playback),
+-};
++#define Q6VOICE_RX_MIXER_WIDGET(wname, name)				\
++	SND_SOC_DAPM_MIXER(wname " Voice Mixer", SND_SOC_NOPM, 0, 0,	\
++			   name##_rx_mixer_controls,			\
++			   ARRAY_SIZE(name##_rx_mixer_controls))
+ 
+ static const struct snd_soc_dapm_widget q6voice_dapm_widgets[] = {
+ 	SND_SOC_DAPM_AIF_IN("CS-VOICE_DL1", "CS-VOICE Playback", 0, SND_SOC_NOPM, 0, 0),
+@@ -315,57 +338,58 @@ static const struct snd_soc_dapm_widget q6voice_dapm_widgets[] = {
+ 	SND_SOC_DAPM_MIXER("VoiceMMode1 Capture Mixer", SND_SOC_NOPM, 0, 0,
+ 			   voicemmode1_tx_mixer_controls,
+ 			   ARRAY_SIZE(voicemmode1_tx_mixer_controls)),
+-	SND_SOC_DAPM_MIXER("PRI_MI2S_RX Voice Mixer", SND_SOC_NOPM, 0, 0,
+-			   primary_mi2s_rx_mixer_controls,
+-			   ARRAY_SIZE(primary_mi2s_rx_mixer_controls)),
+-	SND_SOC_DAPM_MIXER("SEC_MI2S_RX Voice Mixer", SND_SOC_NOPM, 0, 0,
+-			   secondary_mi2s_rx_mixer_controls,
+-			   ARRAY_SIZE(secondary_mi2s_rx_mixer_controls)),
+-	SND_SOC_DAPM_MIXER("TERT_MI2S_RX Voice Mixer", SND_SOC_NOPM, 0, 0,
+-			   tertiary_mi2s_rx_mixer_controls,
+-			   ARRAY_SIZE(tertiary_mi2s_rx_mixer_controls)),
+-	SND_SOC_DAPM_MIXER("QUAT_MI2S_RX Voice Mixer", SND_SOC_NOPM, 0, 0,
+-			   quaternary_mi2s_rx_mixer_controls,
+-			   ARRAY_SIZE(quaternary_mi2s_rx_mixer_controls)),
+-	SND_SOC_DAPM_MIXER("QUIN_MI2S_RX Voice Mixer", SND_SOC_NOPM, 0, 0,
+-			   quinary_mi2s_rx_mixer_controls,
+-			   ARRAY_SIZE(quinary_mi2s_rx_mixer_controls)),
++	SND_SOC_DAPM_AIF_IN("VOICEMMODE2_DL1", "VOICEMMODE2 Playback", 0, SND_SOC_NOPM, 0, 0),
++	SND_SOC_DAPM_AIF_OUT("VOICEMMODE2_UL1", "VOICEMMODE2 Capture", 0, SND_SOC_NOPM, 0, 0),
++	SND_SOC_DAPM_MIXER("VoiceMMode2 Capture Mixer", SND_SOC_NOPM, 0, 0,
++			   voicemmode2_tx_mixer_controls,
++			   ARRAY_SIZE(voicemmode2_tx_mixer_controls)),
++	Q6VOICE_RX_MIXER_WIDGET("PRI_MI2S_RX", primary_mi2s),
++	Q6VOICE_RX_MIXER_WIDGET("SEC_MI2S_RX", secondary_mi2s),
++	Q6VOICE_RX_MIXER_WIDGET("TERT_MI2S_RX", tertiary_mi2s),
++	Q6VOICE_RX_MIXER_WIDGET("QUAT_MI2S_RX", quaternary_mi2s),
++	Q6VOICE_RX_MIXER_WIDGET("QUIN_MI2S_RX", quinary_mi2s),
++	Q6VOICE_RX_MIXER_WIDGET("WSA_CODEC_DMA_RX_0", wsa_codec_dma_rx_0),
++	Q6VOICE_RX_MIXER_WIDGET("WSA_CODEC_DMA_RX_1", wsa_codec_dma_rx_1),
++	Q6VOICE_RX_MIXER_WIDGET("RX_CODEC_DMA_RX_0", rx_codec_dma_rx_0),
+ };
+ 
++#define Q6VOICE_TX_ROUTES(mixer)					\
++	{ mixer, "PRI_MI2S_TX", "PRI_MI2S_TX" },			\
++	{ mixer, "SEC_MI2S_TX", "SEC_MI2S_TX" },			\
++	{ mixer, "TERT_MI2S_TX", "TERT_MI2S_TX" },			\
++	{ mixer, "QUAT_MI2S_TX", "QUAT_MI2S_TX" },			\
++	{ mixer, "QUIN_MI2S_TX", "QUIN_MI2S_TX" },			\
++	{ mixer, "VA_CODEC_DMA_TX_0", "VA_CODEC_DMA_TX_0" },		\
++	{ mixer, "VA_CODEC_DMA_TX_1", "VA_CODEC_DMA_TX_1" },		\
++	{ mixer, "VA_CODEC_DMA_TX_2", "VA_CODEC_DMA_TX_2" },		\
++	{ mixer, "TX_CODEC_DMA_TX_0", "TX_CODEC_DMA_TX_0" },		\
++	{ mixer, "TX_CODEC_DMA_TX_1", "TX_CODEC_DMA_TX_1" },		\
++	{ mixer, "TX_CODEC_DMA_TX_2", "TX_CODEC_DMA_TX_2" },		\
++	{ mixer, "TX_CODEC_DMA_TX_3", "TX_CODEC_DMA_TX_3" },		\
++	{ mixer, "TX_CODEC_DMA_TX_4", "TX_CODEC_DMA_TX_4" }
++
++#define Q6VOICE_RX_ROUTES(port)						\
++	{ port " Voice Mixer", "CS-Voice", "CS-VOICE_DL1" },		\
++	{ port " Voice Mixer", "VoiceMMode1", "VOICEMMODE1_DL1" },	\
++	{ port " Voice Mixer", "VoiceMMode2", "VOICEMMODE2_DL1" },	\
++	{ port, NULL, port " Voice Mixer" }
++
+ static const struct snd_soc_dapm_route q6voice_dapm_routes[] = {
+-	{ "CS-Voice Capture Mixer",	"PRI_MI2S_TX",	"PRI_MI2S_TX" },
+-	{ "CS-Voice Capture Mixer",	"SEC_MI2S_TX",	"SEC_MI2S_TX" },
+-	{ "CS-Voice Capture Mixer",	"TERT_MI2S_TX",	"TERT_MI2S_TX" },
+-	{ "CS-Voice Capture Mixer",	"QUAT_MI2S_TX",	"QUAT_MI2S_TX" },
+-	{ "CS-Voice Capture Mixer",	"QUIN_MI2S_TX",	"QUIN_MI2S_TX" },
+-	{ "CS-VOICE_UL1",		NULL,		"CS-Voice Capture Mixer" },
+-	{ "VoiceMMode1 Capture Mixer",	"PRI_MI2S_TX",	"PRI_MI2S_TX" },
+-	{ "VoiceMMode1 Capture Mixer",	"SEC_MI2S_TX",	"SEC_MI2S_TX" },
+-	{ "VoiceMMode1 Capture Mixer",	"TERT_MI2S_TX",	"TERT_MI2S_TX" },
+-	{ "VoiceMMode1 Capture Mixer",	"QUAT_MI2S_TX",	"QUAT_MI2S_TX" },
+-	{ "VoiceMMode1 Capture Mixer",	"QUIN_MI2S_TX",	"QUIN_MI2S_TX" },
+-	{ "VoiceMMode1 Capture Mixer",	"TX_CODEC_DMA_TX_1",	"TX_CODEC_DMA_TX_1" },
+-	{ "VoiceMMode1 Capture Mixer",	"TX_CODEC_DMA_TX_2",	"TX_CODEC_DMA_TX_2" },
+-	{ "VoiceMMode1 Capture Mixer",	"TX_CODEC_DMA_TX_3",	"TX_CODEC_DMA_TX_3" },
+-	{ "VoiceMMode1 Capture Mixer",	"TX_CODEC_DMA_TX_4",	"TX_CODEC_DMA_TX_4" },
+-	{ "VOICEMMODE1_UL1",		NULL,		"VoiceMMode1 Capture Mixer" },
+-
+-	{ "PRI_MI2S_RX Voice Mixer",	"CS-Voice",	"CS-VOICE_DL1" },
+-	{ "SEC_MI2S_RX Voice Mixer",	"CS-Voice",	"CS-VOICE_DL1" },
+-	{ "TERT_MI2S_RX Voice Mixer",	"CS-Voice",	"CS-VOICE_DL1" },
+-	{ "QUAT_MI2S_RX Voice Mixer",	"CS-Voice",	"CS-VOICE_DL1" },
+-	{ "QUIN_MI2S_RX Voice Mixer",	"CS-Voice",	"CS-VOICE_DL1" },
+-	{ "PRI_MI2S_RX Voice Mixer",	"VoiceMMode1",	"VOICEMMODE1_DL1" },
+-	{ "SEC_MI2S_RX Voice Mixer",	"VoiceMMode1",	"VOICEMMODE1_DL1" },
+-	{ "TERT_MI2S_RX Voice Mixer",	"VoiceMMode1",	"VOICEMMODE1_DL1" },
+-	{ "QUAT_MI2S_RX Voice Mixer",	"VoiceMMode1",	"VOICEMMODE1_DL1" },
+-	{ "QUIN_MI2S_RX Voice Mixer",	"VoiceMMode1",	"VOICEMMODE1_DL1" },
+-
+-	{ "PRI_MI2S_RX",		NULL,		"PRI_MI2S_RX Voice Mixer" },
+-	{ "SEC_MI2S_RX",		NULL,		"SEC_MI2S_RX Voice Mixer" },
+-	{ "TERT_MI2S_RX",		NULL,		"TERT_MI2S_RX Voice Mixer" },
+-	{ "QUAT_MI2S_RX",		NULL,		"QUAT_MI2S_RX Voice Mixer" },
+-	{ "QUIN_MI2S_RX",		NULL,		"QUIN_MI2S_RX Voice Mixer" },
++	Q6VOICE_TX_ROUTES("CS-Voice Capture Mixer"),
++	{ "CS-VOICE_UL1", NULL, "CS-Voice Capture Mixer" },
++	Q6VOICE_TX_ROUTES("VoiceMMode1 Capture Mixer"),
++	{ "VOICEMMODE1_UL1", NULL, "VoiceMMode1 Capture Mixer" },
++	Q6VOICE_TX_ROUTES("VoiceMMode2 Capture Mixer"),
++	{ "VOICEMMODE2_UL1", NULL, "VoiceMMode2 Capture Mixer" },
++
++	Q6VOICE_RX_ROUTES("PRI_MI2S_RX"),
++	Q6VOICE_RX_ROUTES("SEC_MI2S_RX"),
++	Q6VOICE_RX_ROUTES("TERT_MI2S_RX"),
++	Q6VOICE_RX_ROUTES("QUAT_MI2S_RX"),
++	Q6VOICE_RX_ROUTES("QUIN_MI2S_RX"),
++	Q6VOICE_RX_ROUTES("WSA_CODEC_DMA_RX_0"),
++	Q6VOICE_RX_ROUTES("WSA_CODEC_DMA_RX_1"),
++	Q6VOICE_RX_ROUTES("RX_CODEC_DMA_RX_0"),
+ };
+ 
+ static unsigned int q6voice_reg_read(struct snd_soc_component *component,

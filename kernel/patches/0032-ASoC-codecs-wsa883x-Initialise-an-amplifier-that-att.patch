@@ -1,0 +1,69 @@
+From 3869b7f236351af1048790c5d1f192fac7deafee Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 03:56:14 +0100
+Subject: [PATCH 032/137] ASoC: codecs: wsa883x: Initialise an amplifier that
+ attaches while suspended
+
+The codec's runtime PM starts in probe, with a 3 s autosuspend, while
+the amplifier only attaches once the bus enumerates it. On the Surface
+Duo 2 (SM8350, three WSA883x on the WSA SoundWire bus) that took 3.4 s
+after the amplifiers were released from shutdown, and an attach after
+the bus leaves clock stop comes while the codec is still suspended as
+well. Its register map is cache-only then, so the chip id read in
+wsa883x_init() fails with -EBUSY ("Update Slave status failed:-16"):
+the amplifier never gets its initial settings, and the temperature
+sensor, which needs the OTP values written there, answers -EINVAL.
+
+Hold off a suspend while the status is handled and, if the codec is
+suspended, talk to the chip directly for the initialisation (it is on
+the bus), then go back to cache-only.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ sound/soc/codecs/wsa883x.c | 28 +++++++++++++++++++++++++---
+ 1 file changed, 25 insertions(+), 3 deletions(-)
+
+diff --git a/sound/soc/codecs/wsa883x.c b/sound/soc/codecs/wsa883x.c
+index ccd4404c1644..b52f315db83e 100644
+--- a/sound/soc/codecs/wsa883x.c
++++ b/sound/soc/codecs/wsa883x.c
+@@ -1101,14 +1101,36 @@ static int wsa883x_update_status(struct sdw_slave *slave,
+ 				 enum sdw_slave_status status)
+ {
+ 	struct wsa883x_priv *wsa883x = dev_get_drvdata(&slave->dev);
++	struct device *dev = &slave->dev;
++	bool suspended;
++	int ret;
+ 
+ 	if (status == SDW_SLAVE_UNATTACHED)
+ 		wsa883x->hw_init = false;
+ 
+-	if (status == SDW_SLAVE_ATTACHED && slave->dev_num > 0)
+-		return wsa883x_init(wsa883x);
++	if (status != SDW_SLAVE_ATTACHED || slave->dev_num == 0)
++		return 0;
+ 
+-	return 0;
++	/*
++	 * The amplifier can attach (or attach again after the bus left clock
++	 * stop) while it is runtime suspended, its register map cache-only:
++	 * the chip id reads would fail with -EBUSY and leave it without its
++	 * initial settings. It is on the bus, so talk to it directly.
++	 */
++	pm_runtime_get_noresume(dev);
++	pm_runtime_barrier(dev);
++	suspended = pm_runtime_status_suspended(dev);
++	if (suspended)
++		regcache_cache_only(wsa883x->regmap, false);
++
++	ret = wsa883x_init(wsa883x);
++
++	if (suspended)
++		regcache_cache_only(wsa883x->regmap, true);
++	pm_runtime_mark_last_busy(dev);
++	pm_runtime_put_autosuspend(dev);
++
++	return ret;
+ }
+ 
+ static int wsa883x_port_prep(struct sdw_slave *slave,

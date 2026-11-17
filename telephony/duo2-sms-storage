@@ -1,0 +1,98 @@
+#!/usr/bin/python3 -I
+"""duo2-sms-storage: which SMS the modem keeps in its own storage, as root.
+
+Prints, per storage (uim = the SIM, nv = the modem's memory) and mode (gw,
+cdma), how many messages are stored and their index + tag (read, not read,
+sent...): never a message's contents, sender or number. Read-only (QMI WMS
+List Messages over QRTR, a client of its own beside ModemManager's).
+
+ModemManager reads every stored message when it enables the modem and
+offers it again (Chatty would take it again), so a message whose delete
+failed ("failed deleting SMS message ...: Couldn't delete N parts") shows
+up here if its parts stayed. Mostly nothing is stored: the modem's routes
+store only class 0/1 (nv) and class 2 (uim) messages, an ordinary SMS is
+delivered transfer-only (`qmicli -d qrtr://0 --wms-get-routes`).
+"""
+
+import socket
+import struct
+import sys
+
+AF_QIPCRTR = 42
+CTRL_PORT = 0xFFFFFFFE
+NEW_SERVER, NEW_LOOKUP = 4, 10
+WMS = 5
+LIST_MESSAGES = 0x0031
+TAGS = {0: "mt-read", 1: "mt-not-read", 2: "mo-sent", 3: "mo-not-sent"}
+
+
+def wms_port(s):
+    node = s.getsockname()[-2]
+    s.sendto(struct.pack("<5I", NEW_LOOKUP, WMS, 0, 0, 0), (node, CTRL_PORT))
+    while True:
+        data, _ = s.recvfrom(1024)
+        cmd, svc, _inst, node, port = struct.unpack("<5I", data[:20])
+        if cmd != NEW_SERVER:
+            continue
+        if svc == 0 and node == 0 and port == 0:
+            return None  # end of the list: no WMS
+        return node, port
+
+
+def request(s, dest, txn, msg_id, tlvs):
+    body = b"".join(struct.pack("<BH", t, len(v)) + v for t, v in tlvs)
+    s.sendto(struct.pack("<BHHH", 0, txn, msg_id, len(body)) + body, dest)
+    while True:
+        data, _ = s.recvfrom(65536)
+        typ, rtxn, rmsg, ln = struct.unpack("<BHHH", data[:7])
+        if typ != 2 or rmsg != msg_id or rtxn != txn:
+            continue
+        out, off = {}, 7
+        while off + 3 <= 7 + ln:
+            t, n = struct.unpack("<BH", data[off : off + 3])
+            out[t] = data[off + 3 : off + 3 + n]
+            off += 3 + n
+        return out
+
+
+def main():
+    s = socket.socket(AF_QIPCRTR, socket.SOCK_DGRAM)
+    s.settimeout(5)
+    try:
+        dest = wms_port(s)
+    except (TimeoutError, OSError) as e:
+        print("duo2-sms-storage: no answer from the modem (%s)" % e, file=sys.stderr)
+        return 1
+    if dest is None:
+        print("duo2-sms-storage: the modem offers no WMS service (is it up?)", file=sys.stderr)
+        return 1
+    txn = 1
+    for storage, sname in ((0, "uim"), (1, "nv")):
+        for mode, mname in ((1, "gw"), (0, "cdma")):
+            r = request(
+                s, dest, txn, LIST_MESSAGES, [(0x01, bytes([storage])), (0x11, bytes([mode]))]
+            )
+            txn += 1
+            res, err = struct.unpack("<HH", r.get(0x02, b"\0\0\0\0")[:4])
+            if res:
+                print("%s/%s: QMI error %d" % (sname, mname, err))
+                continue
+            lst = r.get(0x01, b"\0\0\0\0")
+            n = struct.unpack("<I", lst[:4])[0]
+            items = [struct.unpack("<IB", lst[4 + 5 * i : 9 + 5 * i]) for i in range(n)]
+            print(
+                "%s/%s: %d stored%s"
+                % (
+                    sname,
+                    mname,
+                    n,
+                    (": " + ", ".join("#%d %s" % (i, TAGS.get(t, t)) for i, t in items))
+                    if items
+                    else "",
+                )
+            )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

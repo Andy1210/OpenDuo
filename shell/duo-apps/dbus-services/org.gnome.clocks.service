@@ -1,0 +1,9 @@
+# duo2-os (shell/duo-apps): Clocks rings its alarms only while it runs. Started
+# as a D-Bus service (Debian's file adds --gapplication-service) it quits 10 s
+# after its window closes, alarms or not; started plainly it stays in the
+# background after its window closes, until the session ends. So every start,
+# also the app grid's D-Bus activation, is a plain one. Installed into
+# /usr/local/share/dbus-1/services/ (before /usr/share in the search order).
+[D-BUS Service]
+Name=org.gnome.clocks
+Exec=/usr/bin/gnome-clocks

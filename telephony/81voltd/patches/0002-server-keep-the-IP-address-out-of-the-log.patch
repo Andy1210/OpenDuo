@@ -1,0 +1,27 @@
+From d50b193ccbd29ac0f4f464fc2bae3af572f35b20 Mon Sep 17 00:00:00 2001
+From: duo2-os <duo2-os@localhost>
+Date: Thu, 12 Nov 2026 16:18:57 +0100
+Subject: [PATCH 2/5] server: keep the IP address out of the log
+
+The IMS bearer's address identifies the subscriber on the operator's
+network; the log says only whether the connection has one.
+---
+ qvd-server.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/qvd-server.c b/qvd-server.c
+index ba7500b..15c063c 100644
+--- a/qvd-server.c
++++ b/qvd-server.c
+@@ -488,8 +488,9 @@ static void connection_address_changed(QVDModem *modem,
+ 	server->outpkt.data = server->outbuf;
+ 	server->outpkt.data_len = 65536;
+ 
+-	g_info("QMI Connection Address Changed: local_id: %d, conn_id: %d, sub: %d, type: %d, addr: %s\n",
+-	       local_id, conn_id, sub_id, ip_type, addr);
++	/* The address itself is the subscriber's: not in the log. */
++	g_info("QMI Connection Address Changed: local_id: %d, conn_id: %d, sub: %d, type: %d, %s\n",
++	       local_id, conn_id, sub_id, ip_type, addr != NULL ? "address assigned" : "down");
+ 	ind.res.err_status = 0;
+ 	ind.connection = local_id;
+ 	ind.orig_conn_id = conn_id;

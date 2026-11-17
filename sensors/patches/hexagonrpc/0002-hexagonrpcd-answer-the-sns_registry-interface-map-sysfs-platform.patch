@@ -1,0 +1,360 @@
+From 86981a9d02c8af5d8a993985095c1e204c329319 Mon Sep 17 00:00:00 2001
+From: duo2 <duo2@localhost>
+Date: Fri, 6 Nov 2026 22:09:33 +0100
+Subject: [PATCH 2/3] hexagonrpcd: answer the sns_registry interface, map
+ /sys/devices/platform
+
+While the SSC sensors process builds its registry from the json
+configuration it calls back into the application processor for Android
+system properties: interface "sns_registry", one method,
+get_property(in string name, rout string value) (on Android the vendor's
+libsns_registry_skel.so, property_get()). Without it the DSP gets an
+invalid handle back, and hexagonrpcd exits on the next call.
+
+Answer it from a "name=value" file, <root>/sensors/properties; an unknown
+property is the empty string, like an unset Android property.
+
+Some sns_reg_config files also read vendor attributes below
+/sys/devices/platform (Microsoft's soc:surface_util/surface_product_id):
+map that directory to <root>/sysfs-platform/.
+---
+ hexagonrpcd/interfaces.c                |   1 +
+ hexagonrpcd/interfaces/sns_registry.def |  23 ++++
+ hexagonrpcd/meson.build                 |   1 +
+ hexagonrpcd/rpcd.c                      |  19 +++-
+ hexagonrpcd/rpcd_builder.c              |  19 +++-
+ hexagonrpcd/sns_registry.c              | 134 ++++++++++++++++++++++++
+ hexagonrpcd/sns_registry.h              |  20 ++++
+ 7 files changed, 213 insertions(+), 4 deletions(-)
+ create mode 100644 hexagonrpcd/interfaces/sns_registry.def
+ create mode 100644 hexagonrpcd/sns_registry.c
+ create mode 100644 hexagonrpcd/sns_registry.h
+
+diff --git a/hexagonrpcd/interfaces.c b/hexagonrpcd/interfaces.c
+index 5a3330f..ac23976 100644
+--- a/hexagonrpcd/interfaces.c
++++ b/hexagonrpcd/interfaces.c
+@@ -24,3 +24,4 @@
+ #include "interfaces/adsp_default_listener.def"
+ #include "interfaces/apps_std.def"
+ #include "interfaces/adsp_listener.def"
++#include "interfaces/sns_registry.def"
+diff --git a/hexagonrpcd/interfaces/sns_registry.def b/hexagonrpcd/interfaces/sns_registry.def
+new file mode 100644
+index 0000000..887cbfc
+--- /dev/null
++++ b/hexagonrpcd/interfaces/sns_registry.def
+@@ -0,0 +1,23 @@
++/*
++ * sns_registry interface method definitions
++ *
++ * Copyright (C) 2026 The duo2-os Contributors
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ */
++
++#ifndef INTERFACE_SNS_REGISTRY_DEF
++#define INTERFACE_SNS_REGISTRY_DEF
++
++#include <libhexagonrpc/interface.h>
++
++/*
++ * long get_property(in string prop_name, rout string prop_value);
++ * The first input buffer holds only the two lengths.
++ */
++HEXAGONRPC_DEFINE_REMOTE_METHOD(0, sns_registry_get_property, 0, 1, 0, 1)
++
++#endif /* INTERFACE_SNS_REGISTRY_DEF */
+diff --git a/hexagonrpcd/meson.build b/hexagonrpcd/meson.build
+index b33ddd5..f4567cb 100644
+--- a/hexagonrpcd/meson.build
++++ b/hexagonrpcd/meson.build
+@@ -11,6 +11,7 @@ executable('hexagonrpcd',
+   'localctl.c',
+   'rpcd.c',
+   'rpcd_builder.c',
++  'sns_registry.c',
+   c_args : cflags,
+   include_directories : include,
+   install : true,
+diff --git a/hexagonrpcd/rpcd.c b/hexagonrpcd/rpcd.c
+index 1331803..23db48f 100644
+--- a/hexagonrpcd/rpcd.c
++++ b/hexagonrpcd/rpcd.c
+@@ -39,6 +39,7 @@
+ #include "listener.h"
+ #include "localctl.h"
+ #include "rpcd_builder.h"
++#include "sns_registry.h"
+ 
+ static int remotectl_open(int fd, char *name, struct fastrpc_context **ctx, void (*err_cb)(const char *err))
+ {
+@@ -196,7 +197,8 @@ static void *start_reverse_tunnel(int fd, const char *device_dir, const char *ds
+ {
+ 	struct fastrpc_interface **ifaces;
+ 	struct hexagonfs_dirent *root_dir;
+-	size_t n_ifaces = 2;
++	size_t n_ifaces = 3;
++	char *props_path;
+ 	int ret;
+ 
+ 	ifaces = malloc(sizeof(struct fastrpc_interface) * n_ifaces);
+@@ -215,6 +217,20 @@ static void *start_reverse_tunnel(int fd, const char *device_dir, const char *ds
+ 	// Dynamic interfaces with no hardcoded handle
+ 	ifaces[1] = fastrpc_apps_std_init(root_dir);
+ 
++	/*
++	 * Android system properties the sensors process asks for while it
++	 * builds its registry, from <root>/sensors/properties.
++	 */
++	props_path = malloc(strlen(device_dir) + sizeof("/sensors/properties"));
++	if (props_path == NULL)
++		goto err;
++	strcpy(props_path, device_dir);
++	strcat(props_path, "/sensors/properties");
++	ifaces[2] = fastrpc_sns_registry_init(props_path);
++	free(props_path);
++	if (ifaces[2] == NULL)
++		goto err;
++
+ 	ret = register_fastrpc_listener(fd);
+ 	if (ret)
+ 		goto err;
+@@ -222,6 +238,7 @@ static void *start_reverse_tunnel(int fd, const char *device_dir, const char *ds
+ 	run_fastrpc_listener(fd, n_ifaces, ifaces);
+ 
+ 	fastrpc_localctl_deinit(ifaces[REMOTECTL_HANDLE]);
++	fastrpc_sns_registry_deinit(ifaces[2]);
+ 
+ 	free(ifaces);
+ 
+diff --git a/hexagonrpcd/rpcd_builder.c b/hexagonrpcd/rpcd_builder.c
+index f1f29ba..884b350 100644
+--- a/hexagonrpcd/rpcd_builder.c
++++ b/hexagonrpcd/rpcd_builder.c
+@@ -33,6 +33,7 @@
+ #define SNS_REG_CONFIG		"/sensors/sns_reg.conf"
+ #define SNS_REG_VERSION		"/sensors/sns_reg_version"
+ #define SYSFS_SOCINFO		"/socinfo/"
++#define SYSFS_PLATFORM		"/sysfs-platform/"
+ 
+ static struct hexagonfs_dirent *hfs_mkdir(const char *name, size_t n_ents, ...)
+ {
+@@ -113,7 +114,7 @@ static struct hexagonfs_dirent *hfs_map_or_empty(const char *name, const char *p
+ struct hexagonfs_dirent *construct_root_dir(const char *prefix, const char *dsp)
+ {
+ 	char *acdbdata, *dsp_libs, *sns_cfg, *sns_reg, *sns_reg_config,
+-	     *sns_reg_version, *socinfo;
++	     *sns_reg_version, *socinfo, *sysfs_platform;
+ 	size_t n_prefix;
+ 	struct hexagonfs_dirent *persist_dir, *vendor_dir;
+ 
+@@ -125,6 +126,7 @@ struct hexagonfs_dirent *construct_root_dir(const char *prefix, const char *dsp)
+ 	sns_reg_config = malloc(n_prefix + strlen(SNS_REG_CONFIG) + 1);
+ 	sns_reg_version = malloc(n_prefix + strlen(SNS_REG_VERSION) + 1);
+ 	socinfo = malloc(n_prefix + strlen(SYSFS_SOCINFO) + 1);
++	sysfs_platform = malloc(n_prefix + strlen(SYSFS_PLATFORM) + 1);
+ 
+ 	dsp_libs = malloc(n_prefix + strlen(DSP_LIBS) + strlen(dsp) + 1);
+ 
+@@ -158,6 +160,11 @@ struct hexagonfs_dirent *construct_root_dir(const char *prefix, const char *dsp)
+ 		strcat(socinfo, SYSFS_SOCINFO);
+ 	}
+ 
++	if (sysfs_platform != NULL) {
++		strcpy(sysfs_platform, prefix);
++		strcat(sysfs_platform, SYSFS_PLATFORM);
++	}
++
+ 	if (dsp_libs != NULL) {
+ 		strcpy(dsp_libs, prefix);
+ 		strcat(dsp_libs, DSP_LIBS);
+@@ -206,8 +213,14 @@ struct hexagonfs_dirent *construct_root_dir(const char *prefix, const char *dsp)
+ 			),
+ 			persist_dir,
+ 			hfs_mkdir("sys", 1,
+-				hfs_mkdir("devices", 1,
+-					hfs_map_or_empty("soc0", socinfo)
++				hfs_mkdir("devices", 2,
++					hfs_map_or_empty("soc0", socinfo),
++					/*
++					 * Vendor attributes some sns_reg_config
++					 * files read (Microsoft's
++					 * soc:surface_util/surface_product_id).
++					 */
++					hfs_map_or_empty("platform", sysfs_platform)
+ 				)
+ 			),
+ 			hfs_mkdir("system", 1,
+diff --git a/hexagonrpcd/sns_registry.c b/hexagonrpcd/sns_registry.c
+new file mode 100644
+index 0000000..1cbdcd0
+--- /dev/null
++++ b/hexagonrpcd/sns_registry.c
+@@ -0,0 +1,134 @@
++/*
++ * FastRPC sns_registry interface (Android system properties for the SSC)
++ *
++ * Copyright (C) 2026 The duo2-os Contributors
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * The sensors process on the DSP calls this interface on the application
++ * processor while it builds its registry from the json configuration: a
++ * configuration may select itself by an Android system property (for example
++ * "ro.build.version.release"), and sns_reg_config may name properties too.
++ * On Android the vendor's libsns_registry_skel.so answers with property_get().
++ * Here the answers come from a plain "name=value" file in the root
++ * directory (sensors/properties); an unknown property is the empty string,
++ * which is what property_get() returns for an unset property.
++ */
++
++#include <libhexagonrpc/fastrpc.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "aee_error.h"
++#include "iobuffer.h"
++#include "listener.h"
++#include "sns_registry.h"
++#include "interfaces/sns_registry.def"
++
++struct sns_registry_ctx {
++	char *props_path;
++};
++
++static void lookup_property(const char *path, const char *name,
++			    char *value, size_t size)
++{
++	char line[512];
++	size_t n_name = strlen(name);
++	FILE *f;
++
++	value[0] = '\0';
++
++	f = fopen(path, "r");
++	if (f == NULL)
++		return;
++
++	while (fgets(line, sizeof(line), f) != NULL) {
++		char *end;
++
++		if (strncmp(line, name, n_name) || line[n_name] != '=')
++			continue;
++
++		end = line + strcspn(line, "\r\n");
++		*end = '\0';
++		strncpy(value, line + n_name + 1, size - 1);
++		value[size - 1] = '\0';
++		break;
++	}
++
++	fclose(f);
++}
++
++static uint32_t sns_registry_get_property(void *data,
++					  const struct fastrpc_io_buffer *inbufs,
++					  struct fastrpc_io_buffer *outbufs)
++{
++	struct sns_registry_ctx *ctx = data;
++	const char *name = inbufs[1].p;
++
++	if (inbufs[1].s == 0 || name[inbufs[1].s - 1] != 0)
++		return AEE_EBADPARM;
++
++	if (outbufs[0].s == 0)
++		return AEE_EBADPARM;
++
++	lookup_property(ctx->props_path, name, outbufs[0].p, outbufs[0].s);
++	fprintf(stderr, "sns_registry: property %s = \"%s\"\n",
++		name, (const char *) outbufs[0].p);
++
++	return 0;
++}
++
++static const struct fastrpc_function_impl sns_registry_procs[] = {
++	{
++		.def = &sns_registry_get_property_def,
++		.impl = sns_registry_get_property,
++	},
++};
++
++const struct fastrpc_interface sns_registry_interface = {
++	.name = "sns_registry",
++	.n_procs = 1,
++	.procs = sns_registry_procs,
++};
++
++struct fastrpc_interface *fastrpc_sns_registry_init(const char *props_path)
++{
++	struct fastrpc_interface *iface;
++	struct sns_registry_ctx *ctx;
++
++	iface = malloc(sizeof(struct fastrpc_interface));
++	if (iface == NULL)
++		return NULL;
++
++	ctx = malloc(sizeof(struct sns_registry_ctx));
++	if (ctx == NULL)
++		goto err_free_iface;
++
++	ctx->props_path = strdup(props_path);
++	if (ctx->props_path == NULL)
++		goto err_free_ctx;
++
++	memcpy(iface, &sns_registry_interface, sizeof(struct fastrpc_interface));
++	iface->data = ctx;
++
++	return iface;
++
++err_free_ctx:
++	free(ctx);
++err_free_iface:
++	free(iface);
++	return NULL;
++}
++
++void fastrpc_sns_registry_deinit(struct fastrpc_interface *iface)
++{
++	struct sns_registry_ctx *ctx = iface->data;
++
++	free(ctx->props_path);
++	free(ctx);
++	free(iface);
++}
+diff --git a/hexagonrpcd/sns_registry.h b/hexagonrpcd/sns_registry.h
+new file mode 100644
+index 0000000..338722c
+--- /dev/null
++++ b/hexagonrpcd/sns_registry.h
+@@ -0,0 +1,20 @@
++/*
++ * FastRPC sns_registry interface (Android system properties for the SSC)
++ *
++ * Copyright (C) 2026 The duo2-os Contributors
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ */
++
++#ifndef SNS_REGISTRY_H
++#define SNS_REGISTRY_H
++
++#include "listener.h"
++
++struct fastrpc_interface *fastrpc_sns_registry_init(const char *props_path);
++void fastrpc_sns_registry_deinit(struct fastrpc_interface *iface);
++
++#endif
+-- 
+2.43.0
+

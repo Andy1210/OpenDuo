@@ -1,0 +1,95 @@
+From 5db1de66aacf15381e97b0bf25bd70af86e18bd6 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 08:45:19 +0100
+Subject: [PATCH 039/137] drm/msm/a6xx: Bound the GMU waits on a pending fault
+ devcoredump
+
+a6xx_gmu_set_oob() and a6xx_hfi_wait_for_msg_interrupt() wait without
+a limit for fault_coredump_done when the GMU does not answer while a
+fault devcoredump is pending. The fault handler that completes it
+first takes gpu->lock. Recovery is covered by recovery_in_progress
+(previous patch), but other gpu->lock holders also talk to the GMU:
+msm_job_run() -> msm_gpu_submit() -> msm_gpu_hw_init() sends the
+GPU_SET OOB under gpu->lock, and a CP fault that stalls the SMMU
+while that OOB times out (the GMU's own memory traffic goes through
+the same stalled SMMU) gives the same ABBA deadlock.
+
+Wait at most A6XX_GMU_FAULT_DUMP_WAIT_MS (2 s, far longer than a
+capture takes) and then report the timeout as usual. The lock holder
+then finishes and drops gpu->lock, the fault handler captures and
+completes, and the SMMU is resumed.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/gpu/drm/msm/adreno/a6xx_gmu.c | 13 ++++++++++++-
+ drivers/gpu/drm/msm/adreno/a6xx_gmu.h |  6 ++++++
+ drivers/gpu/drm/msm/adreno/a6xx_hfi.c | 13 ++++++++++++-
+ 3 files changed, 30 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/msm/adreno/a6xx_gmu.c b/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
+index a644d33243fb..3ab32d5febe3 100644
+--- a/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
++++ b/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
+@@ -441,8 +441,19 @@ int a6xx_gmu_set_oob(struct a6xx_gmu *gmu, enum a6xx_gmu_oob_state state)
+ 		 * Wait until the MMU is resumed and try again. A fault dump
+ 		 * cannot complete while recovery holds gpu->lock, so don't
+ 		 * wait for one then.
++		 *
++		 * The wait is bounded: a caller that holds gpu->lock outside
++		 * of recovery (hw_init from msm_job_run(), for one) would
++		 * otherwise deadlock against a fault handler that waits for
++		 * that lock. Give up after a generous capture time and report
++		 * the timeout.
+ 		 */
+-		wait_for_completion(&a6xx_gpu->base.fault_coredump_done);
++		if (!wait_for_completion_timeout(&a6xx_gpu->base.fault_coredump_done,
++						 msecs_to_jiffies(A6XX_GMU_FAULT_DUMP_WAIT_MS))) {
++			dev_err_ratelimited(gmu->dev,
++					    "fault devcoredump still pending, not waiting for it\n");
++			break;
++		}
+ 	} while (true);
+ 
+ 	if (ret)
+diff --git a/drivers/gpu/drm/msm/adreno/a6xx_gmu.h b/drivers/gpu/drm/msm/adreno/a6xx_gmu.h
+index 3f96b10b5f61..d38be8dc28ef 100644
+--- a/drivers/gpu/drm/msm/adreno/a6xx_gmu.h
++++ b/drivers/gpu/drm/msm/adreno/a6xx_gmu.h
+@@ -13,6 +13,12 @@
+ #include "adreno_gpu.h"
+ #include "a6xx_hfi.h"
+ 
++/*
++ * How long a GMU OOB / HFI wait that timed out waits for a pending fault
++ * devcoredump (the SMMU is stalled meanwhile) before it gives up.
++ */
++#define A6XX_GMU_FAULT_DUMP_WAIT_MS	2000
++
+ struct a6xx_gmu_bo {
+ 	struct drm_gem_object *obj;
+ 	void *virt;
+diff --git a/drivers/gpu/drm/msm/adreno/a6xx_hfi.c b/drivers/gpu/drm/msm/adreno/a6xx_hfi.c
+index c606b366037e..ad0779bca064 100644
+--- a/drivers/gpu/drm/msm/adreno/a6xx_hfi.c
++++ b/drivers/gpu/drm/msm/adreno/a6xx_hfi.c
+@@ -131,8 +131,19 @@ static int a6xx_hfi_wait_for_msg_interrupt(struct a6xx_gmu *gmu, u32 id, u32 seq
+ 		 * Wait until the MMU is resumed and try again. A fault dump
+ 		 * cannot complete while recovery holds gpu->lock, so don't
+ 		 * wait for one then.
++		 *
++		 * The wait is bounded: a caller that holds gpu->lock outside
++		 * of recovery (hw_init from msm_job_run(), for one) would
++		 * otherwise deadlock against a fault handler that waits for
++		 * that lock. Give up after a generous capture time and report
++		 * the timeout.
+ 		 */
+-		wait_for_completion(&a6xx_gpu->base.fault_coredump_done);
++		if (!wait_for_completion_timeout(&a6xx_gpu->base.fault_coredump_done,
++						 msecs_to_jiffies(A6XX_GMU_FAULT_DUMP_WAIT_MS))) {
++			dev_err_ratelimited(gmu->dev,
++					    "fault devcoredump still pending, not waiting for it\n");
++			break;
++		}
+ 	} while (true);
+ 
+ 	if (ret) {

@@ -1,0 +1,204 @@
+From 0d8535c05abf0b248a1478bacf1f4e12accae3ac Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 07:46:08 +0100
+Subject: [PATCH 083/137] media: i2c: imx48x: Fix the per-mode colour order and
+ crop, limit the IMX563's gain
+
+The colour filter order was chosen by binning alone, GBRG for every
+unbinned IMX481 mode. Measured again with the solid colour test pattern,
+a different value per site, in every mode of the three IMX481 modules,
+and checked against a real scene (its two green sites): the unbinned
+modes follow their digital crop's row offset. At 0 mod 4 (the 4032x3024
+crops of the front and tele modules) they are RGGB like the binned
+modes, at 2 mod 4 (all of the ultrawide's, the tele's 4032x2268) GBRG.
+The front and tele full-resolution modes were reported as GBRG: their
+pictures came out with the colours of the wrong sites.
+
+Report the crop of the output in the pixel array (the analogue crop
+plus the digital crop, unbinned) instead of the analogue crop, and keep
+the native size from the analogue crops.
+
+The camera modules' own gain code limits the IMX563's analogue gain to
+8x (code 896); the IMX481's stays 16x (960).
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/media/i2c/imx48x.c | 87 +++++++++++++++++++++++++++++---------
+ 1 file changed, 68 insertions(+), 19 deletions(-)
+
+diff --git a/drivers/media/i2c/imx48x.c b/drivers/media/i2c/imx48x.c
+index 1615a6cc84a0..5266692ebe75 100644
+--- a/drivers/media/i2c/imx48x.c
++++ b/drivers/media/i2c/imx48x.c
+@@ -66,6 +66,7 @@
+ #define IMX48X_CSI_DATA_FORMAT		0x0112
+ #define IMX48X_CSI_LANE_MODE		0x0114
+ #define IMX48X_BINNING_MODE		0x0900
++#define IMX48X_BINNING_TYPE		0x0901
+ #define IMX48X_VT_PIX_CLK_DIV		0x0301
+ #define IMX48X_VT_SYS_CLK_DIV		0x0303
+ #define IMX48X_PRE_PLL_CLK_DIV		0x0305
+@@ -81,13 +82,16 @@
+ #define IMX48X_Y_ADDR_END		0x034a
+ #define IMX48X_X_OUTPUT_SIZE		0x034c
+ #define IMX48X_Y_OUTPUT_SIZE		0x034e
++#define IMX48X_DIG_CROP_X_OFFSET	0x0408
++#define IMX48X_DIG_CROP_Y_OFFSET	0x040a
++#define IMX48X_DIG_CROP_WIDTH		0x040c
++#define IMX48X_DIG_CROP_HEIGHT		0x040e
+ 
+ #define IMX48X_MCLK_RATE		19200000
+ #define IMX48X_FRAME_LENGTH_MAX		0xffff
+ #define IMX48X_EXPOSURE_MIN		1
+ #define IMX48X_EXPOSURE_OFFSET		48
+ #define IMX48X_ANA_GAIN_MIN		0
+-#define IMX48X_ANA_GAIN_MAX		960	/* 16x: gain = 1024 / (1024 - code) */
+ #define IMX48X_DGTL_GAIN_MIN		0x0100
+ #define IMX48X_DGTL_GAIN_MAX		0x0fff
+ #define IMX48X_DGTL_GAIN_DEFAULT	0x0100
+@@ -123,9 +127,15 @@ struct imx48x_variant {
+ 	bool vcustom;			/* the IMX563's second 1.8 V supply */
+ 	unsigned int settle_ms;		/* from XCLR released to the first access */
+ 	const char *firmware;		/* the tables' default file name */
+-	/* the colour filter order of the output, by binning (off, on) */
+-	u32 code_full;
+-	u32 code_binned;
++	/* the analogue gain: 1024 / (1024 - code), code 0 to this */
++	unsigned int ana_gain_max;
++	/*
++	 * The colour filter order of the output. With crop_row_phase, the
++	 * full-resolution (unbinned) modes start one row later in the
++	 * pattern when bit 1 of their digital crop's row offset is set.
++	 */
++	u32 code;
++	bool crop_row_phase;
+ 	/*
+ 	 * Pixels per video timing clock cycle, and the units of the line
+ 	 * length register: the pixel rate and the line length the driver
+@@ -142,9 +152,18 @@ static const struct imx48x_variant imx481_variant = {
+ 	.model = 0x0481,
+ 	.settle_ms = 9,
+ 	.firmware = "imx481.bin",
+-	/* measured with the solid colour test pattern */
+-	.code_full = MEDIA_BUS_FMT_SGBRG10_1X10,
+-	.code_binned = MEDIA_BUS_FMT_SRGGB10_1X10,
++	/* 16x, the camera modules' own limit */
++	.ana_gain_max = 960,
++	/*
++	 * Measured with the solid colour test pattern (a different value per
++	 * site) in every mode of the three modules: the binned modes and the
++	 * unbinned ones whose digital crop starts at a row offset of 0 mod 4
++	 * (236, 356, 0) are RGGB, the unbinned ones at 2 mod 4 (2, 438, 170)
++	 * GBRG; the column offset does not matter (0, 312, 472, 582, 816,
++	 * 936). The scene's two green sites agree with it.
++	 */
++	.code = MEDIA_BUS_FMT_SRGGB10_1X10,
++	.crop_row_phase = true,
+ 	.vt_pixels = 4,
+ 	.llp_div = 1,
+ };
+@@ -156,9 +175,10 @@ static const struct imx48x_variant imx563_variant = {
+ 	.vcustom = true,
+ 	.settle_ms = 11,
+ 	.firmware = "imx563.bin",
+-	/* not measured yet */
+-	.code_full = MEDIA_BUS_FMT_SRGGB10_1X10,
+-	.code_binned = MEDIA_BUS_FMT_SRGGB10_1X10,
++	/* 8x, the camera module's own limit */
++	.ana_gain_max = 896,
++	/* measured with the solid colour test pattern: every mode */
++	.code = MEDIA_BUS_FMT_SRGGB10_1X10,
+ 	/* its line length counts in quarters of a video timing clock */
+ 	.vt_pixels = 1,
+ 	.llp_div = 4,
+@@ -176,7 +196,8 @@ struct imx48x_mode {
+ 	u32 code;
+ 	u32 width;
+ 	u32 height;
+-	struct v4l2_rect crop;
++	struct v4l2_rect analog;	/* the pixel array area read out */
++	struct v4l2_rect crop;		/* the part of it in the output */
+ 	u32 llp;			/* line length, pixel clocks (of the pixel rate) */
+ 	u32 fll;			/* the table's frame length: its fastest */
+ 	u32 lanes;
+@@ -319,6 +340,7 @@ static int imx48x_parse_mode(const struct imx48x_variant *variant,
+ 	unsigned int n = mode->num_regs;
+ 	int fmt, lanes, w, h, x0, y0, x1, y1, llp, fll;
+ 	int vt_pix, vt_sys, pre, mult, op_sys, op_pre, op_mult;
++	int binning, bin_h, bin_v, dx, dy, dw, dh;
+ 	u64 rate;
+ 
+ 	fmt = imx48x_table_reg16(r, n, IMX48X_CSI_DATA_FORMAT);
+@@ -338,6 +360,23 @@ static int imx48x_parse_mode(const struct imx48x_variant *variant,
+ 	op_sys = imx48x_table_reg(r, n, IMX48X_OP_SYS_CLK_DIV);
+ 	op_pre = imx48x_table_reg(r, n, IMX48X_OP_PRE_PLL_CLK_DIV);
+ 	op_mult = imx48x_table_reg16(r, n, IMX48X_OP_PLL_MULTIPLIER);
++	binning = imx48x_table_reg(r, n, IMX48X_BINNING_MODE) > 0;
++	bin_h = 1;
++	bin_v = 1;
++	if (binning) {
++		int type = imx48x_table_reg(r, n, IMX48X_BINNING_TYPE);
++
++		/* the horizontal factor in the high nibble, the vertical in the low */
++		if (type > 0) {
++			bin_h = max(type >> 4, 1);
++			bin_v = max(type & 0xf, 1);
++		}
++	}
++	/* the digital crop, after binning; not every table sets it */
++	dx = max(imx48x_table_reg16(r, n, IMX48X_DIG_CROP_X_OFFSET), 0);
++	dy = max(imx48x_table_reg16(r, n, IMX48X_DIG_CROP_Y_OFFSET), 0);
++	dw = imx48x_table_reg16(r, n, IMX48X_DIG_CROP_WIDTH);
++	dh = imx48x_table_reg16(r, n, IMX48X_DIG_CROP_HEIGHT);
+ 
+ 	if (llp > 0)
+ 		llp /= variant->llp_div;
+@@ -352,14 +391,24 @@ static int imx48x_parse_mode(const struct imx48x_variant *variant,
+ 	if (vt_pix <= 0)
+ 		vt_pix = 1;
+ 
+-	mode->code = imx48x_table_reg(r, n, IMX48X_BINNING_MODE) > 0 ?
+-		     variant->code_binned : variant->code_full;
++	mode->code = variant->code;
++	if (variant->crop_row_phase && !binning && (dy & 2))
++		mode->code = MEDIA_BUS_FMT_SGBRG10_1X10;
+ 	mode->width = w;
+ 	mode->height = h;
+-	mode->crop.left = x0;
+-	mode->crop.top = y0;
+-	mode->crop.width = x1 - x0 + 1;
+-	mode->crop.height = y1 - y0 + 1;
++	mode->analog.left = x0;
++	mode->analog.top = y0;
++	mode->analog.width = x1 - x0 + 1;
++	mode->analog.height = y1 - y0 + 1;
++	/* the output's area of the pixel array: the digital crop, unbinned */
++	if (dw <= 0 || dh <= 0) {
++		dw = w;
++		dh = h;
++	}
++	mode->crop.left = x0 + dx * bin_h;
++	mode->crop.top = y0 + dy * bin_v;
++	mode->crop.width = min_t(u32, dw * bin_h, mode->analog.width - dx * bin_h);
++	mode->crop.height = min_t(u32, dh * bin_v, mode->analog.height - dy * bin_v);
+ 	mode->llp = llp;
+ 	mode->fll = fll;
+ 	mode->lanes = lanes + 1;
+@@ -489,7 +538,7 @@ static int imx48x_check_modes(struct imx48x *sensor)
+ 		return dev_err_probe(sensor->dev, -EINVAL, "no usable mode\n");
+ 
+ 	for (i = 0; i < kept; i++) {
+-		const struct v4l2_rect *c = &sensor->modes[i].crop;
++		const struct v4l2_rect *c = &sensor->modes[i].analog;
+ 
+ 		sensor->native.width = max_t(u32, sensor->native.width,
+ 					     c->left + c->width);
+@@ -618,7 +667,7 @@ static int imx48x_init_controls(struct imx48x *sensor)
+ 					     fll - IMX48X_EXPOSURE_OFFSET);
+ 
+ 	v4l2_ctrl_new_std(hdl, &imx48x_ctrl_ops, V4L2_CID_ANALOGUE_GAIN,
+-			  IMX48X_ANA_GAIN_MIN, IMX48X_ANA_GAIN_MAX, 1,
++			  IMX48X_ANA_GAIN_MIN, sensor->variant->ana_gain_max, 1,
+ 			  IMX48X_ANA_GAIN_MIN);
+ 
+ 	v4l2_ctrl_new_std(hdl, &imx48x_ctrl_ops, V4L2_CID_DIGITAL_GAIN,

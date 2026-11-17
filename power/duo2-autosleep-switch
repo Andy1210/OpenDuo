@@ -1,0 +1,238 @@
+#!/usr/bin/python3 -I
+"""duo2-autosleep-switch: the switches of the automatic sleep (duo2-autosleep).
+
+  duo2-autosleep-switch on | off      automatic sleep on, or off until switched on
+  duo2-autosleep-switch status        what of these switches holds the phone awake
+  duo2-autosleep-switch hold 2h       awake for a while (remote work), then it lapses
+  duo2-autosleep-switch hold clear    end a timed hold now (for everyone)
+  duo2-autosleep-switch hold          the timed hold now
+  duo2-autosleep-switch charging [on|off]
+                                      stay awake while on external power
+
+off = the hold file /etc/duo2/autosleep-hold exists (the daemon then never
+suspends), on = it does not. Takes effect at once, no restart; survives
+reboots.
+
+hold DURATION (2h, 90m, 1h30m; 1 min to 24 h) keeps the phone awake until
+then: the end goes into /etc/duo2/autosleep-hold-until, so it survives a
+reboot within the time, and the daemon stops holding once it has passed. A
+hold only ever lengthens what is there (an agent that finishes early cannot
+put the phone to sleep under the next one); `hold clear` ends it for
+everyone. Prefer it to off / on for remote work: a forgotten hold lapses by
+itself. on / off do not touch it.
+
+charging on|off sets stay_awake_charging in /etc/duo2/autosleep.conf (the
+daemon reads it again by itself): on external power (a charger, a
+computer's USB port) the phone does not sleep, the panels still go dark.
+Without on|off it prints the setting in force.
+
+status (anyone) prints "on" or "off" on its first line, then the timed hold
+and the charging hold, each marked "(holds the phone awake)" when it does.
+The daemon's other reasons (a call, audio, an ssh session, the torch...) are
+in its log: journalctl -u duo2-autosleep.
+
+on / off / hold / charging on|off need root; the GUI user may run on, off
+and charging on|off through sudo (/etc/sudoers.d/duo2-autosleep), for Duo
+Settings.
+"""
+
+import importlib.machinery
+import importlib.util
+import os
+import re
+import sys
+import time
+
+HOLD = "/etc/duo2/autosleep-hold"
+HOLD_TEXT = (
+    "Automatic sleep is off while this file exists (duo2-autosleep-switch on removes it).\n"
+    "Switched off by duo2-autosleep-switch at %s.\n"
+)
+KEY = "stay_awake_charging"
+KEY_COMMENT = (
+    "# on external power (a charger, a computer's USB port) the phone does not\n"
+    "# sleep: on | off (duo2-autosleep-switch charging on|off, Duo Settings > Battery)\n"
+)
+USAGE = "usage: duo2-autosleep-switch on|off|status | hold DURATION|clear | charging [on|off]"
+MIN_HOLD_S = 60
+UNITS = {
+    "h": 3600,
+    "hour": 3600,
+    "hours": 3600,
+    "m": 60,
+    "min": 60,
+    "mins": 60,
+    "minute": 60,
+    "minutes": 60,
+    "s": 1,
+    "sec": 1,
+    "secs": 1,
+    "second": 1,
+    "seconds": 1,
+}
+
+
+def daemon(path=None):
+    """duo2-autosleep (next to this script) as a module: its rules and paths."""
+    path = path or os.path.join(os.path.dirname(os.path.realpath(__file__)), "duo2-autosleep")
+    loader = importlib.machinery.SourceFileLoader("duo2_autosleep", path)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def parse_duration(text):
+    """'2h', '90m', '1h30m', '45s', '1h 30min' -> seconds; None if not one
+    (a bare number has no unit: refused, minutes and hours are both likely)."""
+    t = text.strip().lower().replace(" ", "")
+    parts = re.findall(r"(\d+)([a-z]+)", t)
+    if not parts or "".join(n + u for n, u in parts) != t or any(u not in UNITS for _n, u in parts):
+        return None
+    return sum(int(n) * UNITS[u] for n, u in parts)
+
+
+def write_atomic(path, text, mode=0o644):
+    tmp = path + ".switch-tmp"
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def stamp(epoch):
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(epoch))
+
+
+def hold_until(asl, seconds, now, current):
+    """The end for `hold SECONDS`: never earlier than a hold in force."""
+    end = now + seconds
+    if asl.hold_left(current, now):
+        end = max(end, current)
+    return end
+
+
+def hold_file_text(end, now, arg):
+    return (
+        "%d\n# duo2-autosleep keeps the phone awake until %s (duo2-autosleep-switch hold %s at %s);\n"
+        "# it lapses by itself. duo2-autosleep-switch hold clear ends it.\n"
+        % (end, stamp(end), arg, stamp(now))
+    )
+
+
+def set_charging(text, value):
+    """autosleep.conf's text with stay_awake_charging = value (the line
+    replaced where it is, else appended with a comment)."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if re.match(r"\s*%s\s*=" % KEY, line):
+            lines[i] = "%s = %s" % (KEY, value)
+            return "\n".join(lines) + "\n"
+    return (
+        text
+        + ("" if not text or text.endswith("\n") else "\n")
+        + KEY_COMMENT
+        + "%s = %s\n" % (KEY, value)
+    )
+
+
+def status_lines(asl, hold_exists, until, conf, b, now):
+    """The status as lines, "on" / "off" first."""
+    out = ["off" if hold_exists else "on"]
+    if hold_exists:
+        out.append("hold file: %s exists (holds the phone awake)" % HOLD)
+    left = asl.hold_left(until, now)
+    out.append(
+        "timed hold: %s%s" % (asl.hold_text(until, now), " (holds the phone awake)" if left else "")
+    )
+    held, why = asl.charging_hold(conf, b)
+    if not asl.is_on(conf.get(KEY, "on")):
+        ch = "off"
+    elif held:
+        ch = "on; on external power now (holds the phone awake)"
+    elif why:
+        ch = "on; " + why
+    elif b["level"] is None:
+        ch = "on; on battery now (no reading)"
+    else:
+        ch = "on; on battery now (%d %%)" % b["level"]
+    out.append("stay awake while charging: " + ch)
+    return out
+
+
+def main(argv):
+    cmd = argv[0] if argv else "status"
+    n = len(argv)
+    if cmd == "status" and n <= 1:
+        asl = daemon()
+        conf, _on_try = asl.load_conf()
+        for line in status_lines(
+            asl, os.path.exists(HOLD), asl.read_hold_until(), conf, asl.read_battery(), time.time()
+        ):
+            print(line)
+        return 0
+    if cmd == "on" and n == 1:
+        try:
+            os.remove(HOLD)
+        except FileNotFoundError:
+            pass
+        print("on")
+        return 0
+    if cmd == "off" and n == 1:
+        os.makedirs(os.path.dirname(HOLD), exist_ok=True)
+        write_atomic(HOLD, HOLD_TEXT % stamp(time.time()))
+        print("off")
+        return 0
+    if cmd == "hold" and n <= 2:
+        asl = daemon()
+        now = time.time()
+        if n == 1:
+            print("timed hold: " + asl.hold_text(asl.read_hold_until(), now))
+            return 0
+        if argv[1] == "clear":
+            try:
+                os.remove(asl.HOLD_UNTIL)
+            except FileNotFoundError:
+                pass
+            print("timed hold: none")
+            return 0
+        s = parse_duration(argv[1])
+        if s is None or not MIN_HOLD_S <= s <= asl.HOLD_MAX_S:
+            print(
+                "hold: a duration from 1 min to %d h (2h, 90m, 1h30m), or clear"
+                % (asl.HOLD_MAX_S // 3600),
+                file=sys.stderr,
+            )
+            return 2
+        end = hold_until(asl, s, now, asl.read_hold_until())
+        os.makedirs(os.path.dirname(asl.HOLD_UNTIL), exist_ok=True)
+        write_atomic(asl.HOLD_UNTIL, hold_file_text(end, now, argv[1]))
+        print("timed hold: " + asl.hold_text(end, now))
+        return 0
+    if cmd == "charging" and n <= 2:
+        asl = daemon()
+        if n == 1:
+            conf, _on_try = asl.load_conf()
+            print("on" if asl.is_on(conf[KEY]) else "off")
+            return 0
+        if argv[1] not in ("on", "off"):
+            print(USAGE, file=sys.stderr)
+            return 2
+        try:
+            with open(asl.CONF) as f:
+                text = f.read()
+        except FileNotFoundError:
+            text = ""
+        write_atomic(asl.CONF, set_charging(text, argv[1]))
+        print(argv[1])
+        return 0
+    print(USAGE, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except PermissionError as e:
+        print("duo2-autosleep-switch: %s (root only: sudo)" % e, file=sys.stderr)
+        sys.exit(1)

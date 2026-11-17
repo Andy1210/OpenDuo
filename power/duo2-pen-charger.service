@@ -1,0 +1,25 @@
+[Unit]
+Description=duo2-os: the pen charger (the Pen Cover's wireless power), as set in Duo Settings
+Documentation=file:/usr/local/sbin/duo2-pen-charger
+# no setting yet: the transmitter stays as the kernel left it at boot (off)
+ConditionPathExists=/etc/duo2/pen-charger
+After=sysinit.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/duo2-pen-charger run
+# off whenever the daemon stops, however it stops
+ExecStopPost=/usr/local/sbin/duo2-pen-charger stop
+Restart=on-failure
+RestartSec=30
+# reads the power supplies and the setting, writes only the connector's state
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_NETLINK AF_UNIX
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,109 @@
+From 392110251f695072298a12bb5751742bd246b4ca Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Fri, 6 Nov 2026 18:38:20 +0100
+Subject: [PATCH 023/137] BRING-UP: arm64: dts: qcom:
+ sm8350-microsoft-surface-duo2: Add the touch digitizer
+
+The digitizer of both panels on SE4 (spi4, GPI DMA), interrupt on gpio84,
+reset on gpio8 through the vendor driver's pinctrl states, L3C supply,
+in the vendor binding ("hid-over-spi"); not the upstream binding.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../qcom/sm8350-microsoft-surface-duo2.dts    | 69 +++++++++++++++++++
+ 1 file changed, 69 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+index 19524ae76ca3..ce877db6fbba 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+@@ -472,6 +472,10 @@ &cdsp {
+ 	firmware-name = "qcom/sm8350/microsoft/cdsp.mbn";
+ };
+ 
++&gpi_dma0 {
++	status = "okay";
++};
++
+ &gpu {
+ 	status = "okay";
+ };
+@@ -480,6 +484,34 @@ &gpu_zap_shader {
+ 	firmware-name = "qcom/sm8350/microsoft/a660_zap.mbn";
+ };
+ 
++/*
++ * The touch digitizer of both panels (Microsoft G6, raw heat maps), HID over
++ * SPI on SE4. The vendor driver drives its reset line through three pinctrl
++ * states, as the vendor DT describes them.
++ */
++&spi4 {
++	pinctrl-0 = <&qup_spi4_default>;
++	pinctrl-names = "default";
++
++	status = "okay";
++
++	digitizer@0 {
++		compatible = "hid-over-spi";
++		reg = <0>;
++		spi-max-frequency = <32000000>;
++
++		interrupts-extended = <&tlmm 84 IRQ_TYPE_EDGE_FALLING>;
++		vdd-supply = <&vreg_l3c_3p0>;
++
++		pinctrl-0 = <&ts_reset_n_high>, <&ts_int_bias>;
++		pinctrl-1 = <&ts_reset_n_low>, <&ts_int_unbias>;
++		pinctrl-2 = <&ts_reset_n_low>, <&ts_int_bias>;
++		pinctrl-names = "active", "sleep", "reset";
++
++		hid-descr-addr = <1>;
++	};
++};
++
+ &ipa {
+ 	qcom,gsi-loader = "self";
+ 	memory-region = <&pil_ipa_fw_mem>;
+@@ -739,6 +771,43 @@ bt_en: bt-en-state {
+ 		bias-pull-down;
+ 	};
+ 
++	qup_spi4_default: qup-spi4-default-state {
++		pins = "gpio20", "gpio21", "gpio22", "gpio23";
++		function = "qup4";
++		drive-strength = <6>;
++		bias-disable;
++	};
++
++	ts_int_bias: ts-int-bias-state {
++		pins = "gpio84";
++		function = "gpio";
++		bias-pull-up;
++		input-enable;
++	};
++
++	ts_int_unbias: ts-int-unbias-state {
++		pins = "gpio84";
++		function = "gpio";
++		bias-disable;
++		input-enable;
++	};
++
++	ts_reset_n_high: ts-reset-n-high-state {
++		pins = "gpio8";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++		output-high;
++	};
++
++	ts_reset_n_low: ts-reset-n-low-state {
++		pins = "gpio8";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++		output-low;
++	};
++
+ 	wcn_sw_ctrl: wcn-sw-ctrl-state {
+ 		pins = "gpio153";
+ 		function = "gpio";

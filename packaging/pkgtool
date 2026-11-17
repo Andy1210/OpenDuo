@@ -1,0 +1,52 @@
+#!/usr/bin/python3 -I
+"""packaging/pkgtool: the package builder's entry (openduo_pkg/build.py) and
+the version helpers for the shell scripts:
+
+  pkgtool build ...                      (openduo_pkg.build's arguments)
+  pkgtool version VERSIONFILE EPOCH HASH [dirty]
+  pkgtool kernel-hash RELEASE
+  pkgtool kernel-version RELEASE EPOCH
+  pkgtool components [PKG...]            the staged components those packages need
+  pkgtool depends                        every Debian package the manifest depends on
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+from openduo_pkg import build, version  # noqa: E402
+
+
+def main(argv):
+    if argv[:1] == ["build"]:
+        return build.main(argv[1:])
+    if argv[:1] == ["version"] and len(argv) in (4, 5):
+        with open(argv[1]) as f:
+            print(
+                version.deb_version(
+                    f.read(), int(argv[2]), argv[3], len(argv) == 5 and argv[4] == "dirty"
+                )
+            )
+        return 0
+    if argv[:1] == ["kernel-hash"] and len(argv) == 2:
+        print(version.kernel_release_parts(argv[1])[1])
+        return 0
+    if argv[:1] == ["kernel-version"] and len(argv) == 3:
+        print(version.kernel_version(argv[1], int(argv[2])))
+        return 0
+    if argv[:1] == ["components"]:
+        pkgs = build.load_manifest()
+        only = set(argv[1:])
+        print(" ".join(sorted({s["component"] for n, s in pkgs.items() if not only or n in only})))
+        return 0
+    if argv == ["depends"]:
+        pkgs = build.load_manifest()
+        print(" ".join(sorted({d for s in pkgs.values() for d in s.get("depends", [])})))
+        return 0
+    print(__doc__, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

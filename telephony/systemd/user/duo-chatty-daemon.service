@@ -1,0 +1,12 @@
+# duo2-os: Chatty in the background, so that SMS arrive (stored, notified)
+# while its window is closed (in GNOME: its autostart entry). A tap on the
+# Chatty icon opens the window of this instance.
+[Unit]
+Description=Chatty in the background (SMS)
+
+[Service]
+Type=dbus
+BusName=sm.puri.Chatty
+ExecStart=/usr/bin/chatty --gapplication-service
+Restart=on-failure
+RestartSec=5

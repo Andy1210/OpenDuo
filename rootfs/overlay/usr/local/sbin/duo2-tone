@@ -1,0 +1,293 @@
+#!/bin/bash
+# duo2-tone [--dry-run] [--equal] [--format s16|s32] left|right|both [VOLUME [SECONDS]]
+# duo2-tone [--dry-run] off
+#
+# docs/hardware/audio.md, the first audible tests of the two WSA883x speakers:
+# a 1 kHz sine at -40 dBFS on one channel (left = stream channel 0 = WSA_RX0
+# = SpkrLeft, right = channel 1 = WSA_RX1 = SpkrRight) or on both.
+#
+#   VOLUME   WSA_RX0/1 Digital Volume of the channel that plays, 0..68
+#            (84 = 0 dB, one step = 1 dB; default 40 = -44 dB, so the tone
+#            reaches the amplifier at -84 dBFS). 68 (-16 dB) is the UCM
+#            draft's value and the cap here; the kernel's own cap is 81.
+#   SECONDS  length of the tone, 1..10 (default 1). 0.3 s of digital silence
+#            before it (the amplifiers switch on with the stream: a click, if
+#            any, comes first and apart from the tone) and 0.2 s after it,
+#            20 ms raised-cosine ramps at both ends.
+#
+# The path is set up as the UCM draft's Speaker device does (both amplifiers
+# on, as in step 5, the state proven with digital silence), except: the PA
+# Volume of both amplifiers is 0 (-3 dB, the bottom of its scale), and the
+# channel that does not play gets digital silence AND Digital Volume 0
+# (-84 dB). The path is always taken down afterwards, also on Ctrl-C, an
+# error or a kill (trap); `duo2-tone off` takes it down by force (and stops
+# an aplay a previous duo2-tone left running). Loads the sound card if it is
+# not loaded (the modules are blacklisted against automatic loading only).
+#
+# --equal gives BOTH channels the Digital Volume, the silent one too (it still
+# gets digital silence): if the tone comes out of both speakers, a channel is
+# duplicated before the WSA macro (2026-11-08: PipeWire's left channel on both
+# speakers, docs/hardware/audio.md). Without it the silent channel is at
+# -84 dB and hides that.
+# --format s32 plays S32_LE (the 16-bit tone in the top 16 bits of each 32-bit
+# word): the 24-bit path of a kernel whose MultiMedia front ends offer S32_LE
+# (the DSP's 24-bit PCM is MSB-aligned, docs/hardware/audio.md); the level is
+# that of the 16-bit tone. Default s16.
+#
+# Refuses: VOLUME above 68 or not a number, SECONDS outside 1..10, a card
+# whose volume caps are missing (WSA_RX0/1 Digital Volume max 81, PA Volume
+# max 17: the duo2 machine driver), a playback PCM somebody else has open.
+# --dry-run prints the commands (modprobe / amixer / aplay) instead of
+# running them; it changes nothing.
+#
+# Prints the amplifier temperatures before and after (the hwmon sensors read
+# only with the PA off) and every kernel message logged meanwhile (from the
+# journal; but the touch driver's spi_hid debug lines).
+set -u
+
+CAP=68
+MAXSECS=10
+DRY=
+EQUAL=
+FMT=s16
+while [ $# -gt 0 ]; do
+	case $1 in
+	--dry-run) DRY=1; shift ;;
+	--equal) EQUAL=1; shift ;;
+	--format) FMT=${2:-}; shift 2 || shift ;;
+	*) break ;;
+	esac
+done
+case $FMT in s16) AFMT=S16_LE ;; s32) AFMT=S32_LE ;; *) echo "--format must be s16 or s32" >&2; exit 2 ;; esac
+SIDE=${1:-}
+VOL=${2:-40}
+SECS=${3:-1}
+
+usage() {
+	echo "usage: duo2-tone [--dry-run] [--equal] [--format s16|s32] left|right|both [VOLUME 0..$CAP [SECONDS 1..$MAXSECS]]" >&2
+	echo "       duo2-tone [--dry-run] off" >&2
+	exit 2
+}
+case $SIDE in left|right|both|off) ;; *) usage ;; esac
+if [ "$SIDE" != off ]; then
+	case $VOL in ''|*[!0-9]*) echo "VOLUME must be a whole number 0..$CAP" >&2; exit 2 ;; esac
+	VOL=$((10#$VOL))
+	[ "$VOL" -le "$CAP" ] || { echo "refused: VOLUME $VOL is above the cap $CAP (-16 dB)" >&2; exit 2; }
+	case $SECS in ''|*[!0-9]*) echo "SECONDS must be a whole number 1..$MAXSECS" >&2; exit 2 ;; esac
+	SECS=$((10#$SECS))
+	[ "$SECS" -ge 1 ] && [ "$SECS" -le "$MAXSECS" ] ||
+		{ echo "refused: SECONDS must be 1..$MAXSECS" >&2; exit 2; }
+fi
+[ -n "$DRY" ] || [ "$(id -u)" = 0 ] || { echo "run as root (sudo)" >&2; exit 1; }
+
+RAW=/dev/shm/duo2-tone.raw
+PIDF=/run/duo2-tone.pid
+MODULES="apr q6core q6afe q6afe_clocks q6afe_dai q6asm q6asm_dai q6adm q6routing pinctrl_sc7280_lpass_lpi snd_soc_sm8250"
+
+run() {
+	if [ -n "$DRY" ]; then
+		{ printf '+'; printf ' %q' "$@"; echo; } 2>/dev/null
+		return 0
+	else
+		"$@"
+	fi
+}
+cardno() { awk '/sm8350 - Microsoft-SurfaceDuo2/ { print $1; exit }' /proc/asound/cards 2>/dev/null; }
+CARD=$(cardno)
+c() { run amixer -c "${CARD:-0}" -q cset "name=$1" "$2"; }
+con() { c "$1" "$2" || { echo "cset $1 = $2 failed: taking the path down" >&2; exit 1; }; }
+
+load_card() {
+	[ -n "$CARD" ] && return 0
+	echo "loading the sound card"
+	for m in $MODULES; do run /sbin/modprobe "$m" || return 1; done
+	[ -n "$DRY" ] && { CARD=0; return 0; }
+	for _ in $(seq 1 20); do
+		CARD=$(cardno); [ -n "$CARD" ] && return 0
+		sleep 0.5
+	done
+	echo "the sm8350 card did not appear (dmesg)" >&2
+	return 1
+}
+
+path_on() { # digital volume of RX0, of RX1
+	con 'WSA_RX0 Digital Volume' "$1"
+	con 'WSA_RX1 Digital Volume' "$2"
+	con 'WSA_CODEC_DMA_RX_0 Audio Mixer MultiMedia1' 1
+	con 'WSA RX0 MUX' AIF1_PB
+	con 'WSA RX1 MUX' AIF1_PB
+	con 'WSA_RX0 INP0' RX0
+	con 'WSA_RX1 INP0' RX1
+	con 'WSA_COMP1 Switch' 1
+	con 'WSA_COMP2 Switch' 1
+	for s in SpkrLeft SpkrRight; do
+		con "$s PA Volume" 0
+		con "$s WSA MODE" Speaker
+		con "$s COMP Switch" 1
+		con "$s BOOST Switch" 1
+		con "$s VISENSE Switch" 0
+		con "$s DAC Switch" 1
+	done
+}
+
+path_off() {
+	[ -n "$CARD" ] || { echo "no sm8350 card loaded: nothing to switch off"; return 0; }
+	for s in SpkrLeft SpkrRight; do
+		c "$s DAC Switch" 0
+		c "$s BOOST Switch" 0
+		c "$s COMP Switch" 0
+		c "$s PA Volume" 0
+	done
+	c 'WSA_COMP1 Switch' 0
+	c 'WSA_COMP2 Switch' 0
+	c 'WSA_RX0 INP0' ZERO
+	c 'WSA_RX1 INP0' ZERO
+	c 'WSA RX0 MUX' ZERO
+	c 'WSA RX1 MUX' ZERO
+	c 'WSA_RX0 Digital Volume' 0
+	c 'WSA_RX1 Digital Volume' 0
+	c 'WSA_CODEC_DMA_RX_0 Audio Mixer MultiMedia1' 0
+}
+
+playback_on() { # DAPM widgets of the WSA macro and the amplifiers that are On
+	local d=/sys/kernel/debug/asoc/Microsoft-SurfaceDuo2
+	grep -l ': On' $d/3240000.codec/dapm/* $d/sdw:*/dapm/* 2>/dev/null |
+		grep -v bias_level | xargs -r -n1 basename | tr '\n' ' '
+}
+
+report_off() { # after the path is down: wait out the 5 s pmdown, then check
+	[ -n "$DRY" ] && return 0
+	[ -n "$CARD" ] || return 0
+	local on
+	for _ in $(seq 1 16); do
+		on=$(playback_on); [ -z "$on" ] && break
+		sleep 0.5
+	done
+	if [ -z "$on" ]; then
+		echo "path off: playback side all Off"
+	else
+		echo "WARNING: playback widgets still On: $on" >&2
+	fi
+}
+
+temps() {
+	local h u t n
+	for h in /sys/class/hwmon/hwmon*; do
+		[ "$(cat "$h/name" 2>/dev/null)" = wsa883x ] || continue
+		u=$(basename "$(readlink -f "$h/device")"); u=${u##*:}
+		case $u in 1) n=left ;; 2) n=right ;; 3) n=earpiece ;; *) n=$u ;; esac
+		t=$(cat "$h/temp1_input" 2>/dev/null) && t="$((t / 1000)) C" || t="n/a"
+		printf '%s %s, ' "$n" "$t"
+	done
+}
+
+stop_old() { # a player a previous duo2-tone left running (its own PID file:
+	# the timeout wrapper, which passes the signal on to its aplay)
+	local p
+	p=$(cat "$PIDF" 2>/dev/null) || return 0
+	case $(cat /proc/"$p"/comm 2>/dev/null) in
+	timeout|aplay)
+		run kill "$p"
+		[ -n "$DRY" ] || { sleep 0.5; kill -0 "$p" 2>/dev/null && { pkill -KILL -P "$p"; kill -9 "$p"; }; }
+		;;
+	esac
+	[ -n "$DRY" ] || rm -f "$PIDF"
+}
+
+if [ "$SIDE" = off ]; then
+	stop_old
+	path_off
+	report_off
+	exit 0
+fi
+
+if [ -z "$DRY" ]; then
+	exec 9>/run/duo2-tone.lock
+	flock -n 9 || { echo "another duo2-tone is running" >&2; exit 1; }
+fi
+
+PLAYER=
+cleanup() {
+	trap - EXIT INT TERM HUP
+	if [ -n "$PLAYER" ] && kill -0 "$PLAYER" 2>/dev/null; then
+		kill "$PLAYER" 2>/dev/null; wait "$PLAYER" 2>/dev/null
+	fi
+	path_off
+	[ -n "$DRY" ] || rm -f "$RAW" "$PIDF"
+	report_off
+}
+trap '' PIPE   # a lost ssh session must not kill the shell before cleanup
+trap cleanup EXIT
+trap 'echo "interrupted: taking the path down" >&2; exit 130' INT TERM HUP
+
+load_card || exit 1
+if [ -z "$DRY" ]; then
+	for k in 'WSA_RX0 Digital Volume:81' 'WSA_RX1 Digital Volume:81' \
+		'SpkrLeft PA Volume:17' 'SpkrRight PA Volume:17'; do
+		amixer -c "$CARD" cget "name=${k%:*}" | grep -q ",max=${k##*:}," ||
+			{ echo "refused: ${k%:*} is not capped at ${k##*:} (machine driver)" >&2; exit 1; }
+	done
+	st=$(head -1 "/proc/asound/card$CARD/pcm0p/sub0/status" 2>/dev/null)
+	[ "$st" = closed ] || { echo "refused: the playback PCM is in use ($st)" >&2; exit 1; }
+fi
+
+case $SIDE in
+left) V0=$VOL; V1=0 ;;
+right) V0=0; V1=$VOL ;;
+both) V0=$VOL; V1=$VOL ;;
+esac
+[ -n "$EQUAL" ] && { V0=$VOL; V1=$VOL; }
+
+# the tone: raw S16_LE, 48 kHz, stereo, into RAM (it is generated, not recorded)
+GEN='import sys, math, array
+secs, side, fmt = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+r = 48000; amp = 0.01 * 32767                    # -40 dBFS
+n, ramp = secs * r, int(0.02 * r)
+L, R = side in ("left", "both"), side in ("right", "both")
+a = array.array("h", [0] * (2 * int(0.3 * r)))
+for i in range(n):
+    g = 1.0
+    if i < ramp: g = 0.5 - 0.5 * math.cos(math.pi * i / ramp)
+    elif i >= n - ramp: g = 0.5 - 0.5 * math.cos(math.pi * (n - 1 - i) / ramp)
+    v = int(round(amp * g * math.sin(2 * math.pi * 1000 * i / r)))
+    a.append(v if L else 0); a.append(v if R else 0)
+a.extend([0] * (2 * int(0.2 * r)))
+pk = max(abs(v) for v in a)
+sys.stderr.write("tone peak %.1f dBFS, %.1f s with the silence\n" % (20 * math.log10(pk / 32768), len(a) / 2 / r))
+if fmt == "s32":
+    a = array.array("i", [v << 16 for v in a])
+sys.stdout.buffer.write(a.tobytes())'
+
+echo "$SIDE: 1 kHz at -40 dBFS ($AFMT), $SECS s; Digital Volume RX0 $V0 RX1 $V1 ($((VOL - 84)) dB on the playing side), PA Volume 0 (-3 dB)"
+if [ -n "$DRY" ]; then
+	echo "+ python3 -I -c <1 kHz sine generator> $SECS $SIDE $FMT > $RAW"
+else
+	python3 -I -c "$GEN" "$SECS" "$SIDE" "$FMT" > "$RAW" || exit 1
+	echo "temperatures before: $(temps)"
+	T0=$(($(date +%s) - 1))
+fi
+
+path_on "$V0" "$V1"
+if [ -n "$DRY" ]; then
+	run timeout $((SECS + 10)) aplay -q -D "hw:${CARD:-0},0" -t raw -f "$AFMT" -r 48000 -c 2 "$RAW"
+else
+	timeout $((SECS + 10)) aplay -q -D "hw:$CARD,0" -t raw -f "$AFMT" -r 48000 -c 2 "$RAW" &
+	PLAYER=$!
+	echo "$PLAYER" > "$PIDF"
+	wait "$PLAYER"; rc=$?
+	PLAYER=
+	[ "$rc" = 0 ] || echo "aplay ended with $rc" >&2
+fi
+
+if [ -z "$DRY" ]; then
+	cleanup
+	echo "temperatures after: $(temps)"
+	# From the journal, not dmesg: the touch driver's spi_hid debug chatter
+	# (~70 lines/s on 2026-11-07) turns the kernel ring over in seconds. Its
+	# lines are left out.
+	sleep 1
+	new=$({ journalctl -k -q --no-pager -o short-monotonic --since "@$T0"
+		journalctl -q --no-pager --since "@$T0" _TRANSPORT=driver | grep -i 'missed'
+	} 2>/dev/null | grep -v 'spi_hid')
+	if [ -n "$new" ]; then echo "kernel messages meanwhile:"; echo "$new"; else echo "kernel messages meanwhile: none"; fi
+fi

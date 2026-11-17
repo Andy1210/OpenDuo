@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# The proximity sensor through iio-sensor-proxy, as the shell reads it during
+# a call (shell/duo-shell/duoshell/proximity.py): claim it as the GUI user,
+# print every near / far for SECONDS (default 30), release it. Cover the top
+# of a panel with a hand (the sensor sits beside the earpiece) and take it
+# away again: each should print a line. Nothing else is touched.
+#
+#   scripts/duo2-proximity-test [SECONDS]
+set -euo pipefail
+. "$(dirname "$0")/lib/remote.sh"
+secs=${1:-30}
+case $secs in *[!0-9]*|'') echo "usage: $0 [SECONDS]" >&2; exit 2 ;; esac
+duo2_user "timeout $((secs + 10)) python3 -I - $secs <<'PY'
+import sys, time
+from gi.repository import Gio, GLib
+secs = int(sys.argv[1])
+bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+p = Gio.DBusProxy.new_sync(bus, 0, None, 'net.hadess.SensorProxy', '/net/hadess/SensorProxy',
+                           'net.hadess.SensorProxy', None)
+if not p.get_cached_property('HasProximity') or not p.get_cached_property('HasProximity').unpack():
+    print('iio-sensor-proxy has no proximity sensor'); sys.exit(1)
+t0 = time.monotonic()
+p.call_sync('ClaimProximity', None, 0, 3000, None)
+print('claimed (%.0f ms); now %s; for %d s' % ((time.monotonic() - t0) * 1000,
+      'near' if p.get_cached_property('ProximityNear').unpack() else 'far', secs), flush=True)
+def changed(_p, ch, _inv):
+    d = ch.unpack()
+    if 'ProximityNear' in d:
+        print('%6.2f s  %s' % (time.monotonic() - t0, 'near' if d['ProximityNear'] else 'far'), flush=True)
+p.connect('g-properties-changed', changed)
+loop = GLib.MainLoop()
+GLib.timeout_add_seconds(secs, loop.quit)
+loop.run()
+p.call_sync('ReleaseProximity', None, 0, 3000, None)
+print('released')
+PY"

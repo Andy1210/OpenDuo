@@ -1,0 +1,62 @@
+#!/usr/bin/python3 -sE
+# imsd-logger: debug only. Serves QRTR service 770 v1 (the
+# IMS Data service) the way 81voltd's no-op path does, success to every
+# request except a start (0x20, logged and left unanswered), and prints each
+# request's TLVs. Stop 81voltd first; run as root:
+#   sudo mkdir -p /run/duo2-volte && sudo python3 -sE imsd-logger 45
+# Long digit runs are masked in what it prints; the raw packets go to
+# /run/duo2-volte/imsd-full.log (root, tmpfs: delete it after use).
+import re
+import socket
+import struct
+import sys
+import time
+
+AF_QIPCRTR, CTRL = 42, 0xFFFFFFFE
+secs = float(sys.argv[1]) if len(sys.argv) > 1 else 60
+full = open("/run/duo2-volte/imsd-full.log", "a")
+s = socket.socket(AF_QIPCRTR, socket.SOCK_DGRAM)
+node = s.getsockname()[0]
+s.sendto(struct.pack("<5I", 4, 770, 1, 0, 0), (node, CTRL))
+s.settimeout(1.0)
+end = time.monotonic() + secs
+
+
+def view(v):
+    a = "".join(chr(c) if 32 <= c < 127 else "." for c in v)
+    a = re.sub(r"\d{5,}", "<masked>", a)
+    h = v.hex()
+    if re.search(r"\d{5,}", "".join(chr(c) if 32 <= c < 127 else "." for c in v)):
+        h = "<hex withheld: digits>"
+    return "hex %s ascii '%s'" % (h, a)
+
+
+while time.monotonic() < end:
+    try:
+        data, src = s.recvfrom(65536)
+    except TimeoutError:
+        continue
+    if src[1] == CTRL or len(data) < 7:
+        continue
+    typ, txn, mid, ln = struct.unpack_from("<BHHH", data, 0)
+    full.write(
+        "%.3f from %s type %d msg 0x%04x txn %d %s\n"
+        % (time.monotonic(), src, typ, mid, txn, data.hex())
+    )
+    full.flush()
+    tl, i, b = [], 0, data[7 : 7 + ln]
+    while i + 3 <= len(b):
+        t, n = struct.unpack_from("<BH", b, i)
+        tl.append("    TLV 0x%02x len %d %s" % (t, n, view(b[i + 3 : i + 3 + n])))
+        i += 3 + n
+    print(
+        "%s request 0x%04x (txn %d, type %d, %d bytes)" % (time.strftime("%T"), mid, txn, typ, ln),
+        flush=True,
+    )
+    for x in tl:
+        print(x, flush=True)
+    if typ == 0 and mid not in (0x20,):
+        s.sendto(struct.pack("<BHHH", 2, txn, mid, 7) + struct.pack("<BHHH", 2, 4, 0, 0), src)
+    elif mid == 0x20:
+        print("    (start request: not answered by the logger)", flush=True)
+print("logger done", flush=True)

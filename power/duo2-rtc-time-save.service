@@ -1,0 +1,8 @@
+[Unit]
+Description=duo2-os: save the offset of the wall clock to the PMIC RTC (after an NTP synchronization)
+Documentation=file:/usr/local/sbin/duo2-rtc-time
+After=duo2-rtc-time.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/duo2-rtc-time save

@@ -1,0 +1,19 @@
+# Device dumps hold the serial, IMEI-bearing props, SSIDs and vendor blobs.
+dumps/
+firmware/
+backups/
+src/
+out/
+# Build inputs that are fetched or personal, never committed (open-source project).
+rescue/busybox
+rootfs/authorized_keys
+# Personal device location for the remote scripts
+local.env
+# Personal patterns for scripts/check-personal-data
+local.personal-data
+
+# Touch runtime inputs (third-party / non-redistributable), see scripts/build-touch-runtime.sh
+__pycache__/
+
+# Extra private patterns for scripts/export-public.sh (names, a network operator)
+local.export-deny

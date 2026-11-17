@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=duo2-os
+Description=OpenDuo: the phone, open like a book, on black; a quiet progress row
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/duo2
+ScriptFile=/usr/share/plymouth/themes/duo2/duo2.script

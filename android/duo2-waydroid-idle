@@ -1,0 +1,136 @@
+#!/usr/bin/python3 -sE
+"""duo2-waydroid-idle.service (the GUI user's, bound to the Android session):
+stop the session when no Android window has been open on duo-wc for IDLE_MIN
+minutes (/etc/duo2/waydroid.conf, ~/.config/duo2/waydroid.conf: the user's
+wins). Stopping the session stops the container (all of Android's memory);
+the next Android app starts it again. docs/hardware/android.md.
+
+KEEP_RUNNING = yes in the same files (Duo Settings > Android apps, "Keep
+Android apps running in the background") keeps the session up without a
+window, so messengers stay connected; Waydroid's freeze is skipped then too
+(duo2-waydroid-patch, hardware_manager.py). Read at every poll: switching it
+off stops the session IDLE_MIN minutes later if no Android window is open.
+
+Once Android is up, its night mode is set to Settings > Appearance's (dark or
+light apps: `duo-appearance android`, which asks only when it changed).
+
+An Android window is a duo-wc window whose app_id is "Waydroid" (the full
+Android UI, the "Waydroid" icon) or starts with "waydroid." (multi-window
+mode names each app's toplevel after its package).
+"""
+
+import json
+import os
+import subprocess
+import sys
+import time
+
+POLL_S = 30
+IDLE_MIN = 5
+ON = ("yes", "on", "true", "1")
+
+
+def conf_paths():
+    return ("/etc/duo2/waydroid.conf", os.path.expanduser("~/.config/duo2/waydroid.conf"))
+
+
+def read_conf(paths=None):
+    """The keys of the files in order (a later file wins), comments dropped."""
+    conf = {}
+    for path in paths or conf_paths():
+        try:
+            with open(path) as f:
+                for line in f:
+                    key, sep, val = line.split("#", 1)[0].strip().partition("=")
+                    if sep and key.strip():
+                        conf[key.strip()] = val.strip().strip("\"'")
+        except OSError:
+            pass
+    return conf
+
+
+def idle_minutes(conf):
+    try:
+        return max(1, int(conf.get("IDLE_MIN", IDLE_MIN)))
+    except ValueError:
+        return IDLE_MIN
+
+
+def keep_running(conf):
+    return str(conf.get("KEEP_RUNNING", "no")).strip().lower() in ON
+
+
+def android_windows():
+    try:
+        out = subprocess.run(["duoctl", "get_state"], capture_output=True, text=True, timeout=10)
+        windows = json.loads(out.stdout)["ok"]["windows"]
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        return None  # duo-wc restarting: no decision
+    return [w for w in windows if str(w.get("app_id") or "").lower().startswith("waydroid")]
+
+
+APPEARANCE = "/usr/local/bin/duo-appearance"
+
+
+def sync_appearance():
+    """Android's night mode to the apps' style; True when done (or nothing
+    to do), False to try again at the next poll (Android still booting)."""
+    if not os.path.exists(APPEARANCE):
+        return True
+    try:
+        r = subprocess.run([APPEARANCE, "android"], capture_output=True, text=True, timeout=90)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if r.returncode == 0 and r.stdout.strip() == "applied":
+        print("duo2-waydroid-idle: Android's night mode set to the apps' style", flush=True)
+    return r.returncode == 0
+
+
+def main():
+    last_seen = time.monotonic()  # the boot of Android counts as use
+    keeping = False
+    synced, tries = False, 0
+    while True:
+        time.sleep(POLL_S)
+        if not synced and tries < 10:
+            tries += 1
+            synced = sync_appearance()
+        conf = read_conf()
+        if keep_running(conf) != keeping:
+            keeping = not keeping
+            print(
+                "duo2-waydroid-idle: keep running in the background %s"
+                % (
+                    "on: the session is not stopped"
+                    if keeping
+                    else "off: the session stops after %d min without an Android window"
+                    % idle_minutes(conf)
+                ),
+                flush=True,
+            )
+        windows = android_windows()
+        if keeping or windows is None or windows:
+            last_seen = time.monotonic()
+            continue
+        idle = time.monotonic() - last_seen
+        if idle >= idle_minutes(conf) * 60:
+            print(
+                "duo2-waydroid-idle: no Android window for %d s, stopping the session" % idle,
+                flush=True,
+            )
+            # session.env points XDG_RUNTIME_DIR at duo-wc's directory; the user
+            # manager is in the user's own
+            env = dict(os.environ, XDG_RUNTIME_DIR="/run/user/%d" % os.getuid())
+            r = subprocess.run(
+                ["systemctl", "--user", "--no-block", "stop", "duo2-waydroid-session.service"],
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            if r.returncode:
+                print("duo2-waydroid-idle: systemctl: %s" % r.stderr.strip(), flush=True)
+            last_seen = time.monotonic()  # ask again after another idle period
+
+
+if __name__ == "__main__":
+    sys.exit(main())

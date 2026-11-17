@@ -1,0 +1,16 @@
+# duo2-os: the modem's switch and mobile data without NetworkManager
+# (telephony/duo2-wwan). It follows ModemManager on D-Bus (a restart of
+# ModemManager, the modem coming and going), so it is not bound to its unit.
+[Unit]
+Description=Modem on/off and mobile data over ModemManager
+Wants=ModemManager.service
+After=ModemManager.service systemd-resolved.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/duo2-wwan
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,154 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""duo2-qsr4-decode: decode the DIAG messages of a modem capture.
+
+  duo2-qsr4-decode QDB DUMP [DUMP...]
+
+DUMP is what duo2-diag-dump wrote on the phone (length, time, packet). The
+modem strips the format strings of its F3 messages out of the image
+("QShrink 4"): a message (DIAG command 0x99) carries only a hash, and the
+strings live in the firmware's qdsp6m.qdb (modem image/<chip>/), a 64-byte
+header ("\\x7fQDB", GUID) and a zlib stream of "hash:mask:ssid:line:file:fmt"
+lines. QDB is that file as it is, or already inflated. Run it on the build
+machine: the database is firmware and does not go into git.
+
+QSR4 packet: cmd 0x99, ts type, (nargs << 4 | arg width), drop count, 64-bit
+timestamp, 32-bit hash, the last two bytes of the database GUID, then nargs
+little-endian arguments of the given width. Messages of a user PD come with
+a 4-byte PD prefix (1, 2...); plain 0x79 messages carry their strings.
+"""
+
+import re
+import struct
+import sys
+import zlib
+
+qdb = {}
+with open(sys.argv[1], "rb") as f:
+    data = f.read()
+if data[:4] == b"\x7fQDB":
+    data = zlib.decompress(data[0x40:])
+content = False
+for raw in data.splitlines():
+    line = raw.decode("latin-1").rstrip("\r\n")
+    if line.startswith("<Content>"):
+        content = True
+        continue
+    if not content or not line or line.startswith("<"):
+        continue
+    parts = line.split(":", 5)
+    if len(parts) < 6:
+        continue
+    try:
+        qdb[int(parts[0])] = (int(parts[1]), int(parts[2]), int(parts[3]), parts[4], parts[5])
+    except ValueError:
+        pass
+
+LEVELS = {1: "L", 2: "M", 4: "H", 8: "E", 16: "F"}
+
+
+def c_format(fmt, args):
+    out = []
+    it = iter(args)
+    pos = 0
+    for m in re.finditer(r"%([-+ #0]*)(\d*)(?:\.(\d+))?(hh|h|ll|l|z|j|t)?([diuxXcspf%])", fmt):
+        out.append(fmt[pos : m.start()])
+        pos = m.end()
+        flags, width, prec, length, conv = m.groups()
+        if conv == "%":
+            out.append("%")
+            continue
+        try:
+            v = next(it)
+        except StopIteration:
+            out.append(m.group(0))
+            continue
+        spec = "%" + flags + width + ("." + prec if prec else "")
+        try:
+            if conv in "di":
+                bits = 64 if length == "ll" else 32
+                v &= (1 << bits) - 1
+                if v >> (bits - 1):
+                    v -= 1 << bits
+                out.append((spec + "d") % v)
+            elif conv == "u":
+                out.append((spec + "d") % v)
+            elif conv in "xX":
+                out.append((spec + conv) % v)
+            elif conv == "p":
+                out.append("0x%x" % v)
+            elif conv == "c":
+                out.append(chr(v & 0xFF))
+            else:
+                out.append("<%s:%x>" % (conv, v))
+        except (TypeError, ValueError):
+            out.append("<?%x>" % v)
+    out.append(fmt[pos:])
+    return "".join(out)
+
+
+def ts_sec(ts):
+    return (ts >> 16) * 1.25 / 1000.0
+
+
+def decode(p):
+    c = p[0]
+    if c == 0x99 and len(p) >= 18:
+        _, tst, packed, drop, ts, h, guid = struct.unpack_from("<BBBBQIH", p, 0)
+        nargs, width = packed >> 4, packed & 0xF
+        args = []
+        off = 18
+        for _ in range(nargs):
+            args.append(int.from_bytes(p[off : off + width], "little"))
+            off += width
+        e = qdb.get(h)
+        if not e:
+            return "%10.3f ?hash %d args %s" % (ts_sec(ts), h, args)
+        mask, ssid, line, fname, fmt = e
+        lvl = "".join(v for k, v in LEVELS.items() if mask & k)
+        return "%10.3f %4d %-2s %s:%d %s" % (
+            ts_sec(ts),
+            ssid,
+            lvl,
+            fname,
+            line,
+            c_format(fmt, args),
+        )
+    if c == 0x79 and len(p) >= 20:
+        _, tst, nargs, drop, ts, line, ssid, ssmask = struct.unpack_from("<BBBBQHHI", p, 0)
+        off = 20
+        args = list(struct.unpack_from("<%dI" % nargs, p, off)) if nargs else []
+        off += 4 * nargs
+        parts = p[off:].split(b"\0")
+        fmt = parts[0].decode("latin-1")
+        fname = parts[1].decode("latin-1") if len(parts) > 1 else ""
+        lvl = "".join(v for k, v in LEVELS.items() if ssmask & k)
+        return "%10.3f %4d %-2s %s:%d %s" % (
+            ts_sec(ts),
+            ssid,
+            lvl,
+            fname,
+            line,
+            c_format(fmt, args),
+        )
+    if c == 0x98 and len(p) > 4:
+        return decode(p[4:])
+    if c in (1, 2, 3) and len(p) > 8 and p[1:4] == b"\0\0\0" and p[4] in (0x79, 0x99):
+        r = decode(p[4:])
+        return ("pd%d " % c) + r if r else r
+    if c == 0x7D:
+        return None
+    return "raw %02x len %d %s" % (c, len(p), p[:40].hex())
+
+
+for path in sys.argv[2:]:
+    d = open(path, "rb").read()
+    o = 0
+    while o + 12 <= len(d):
+        n, t = struct.unpack_from("<Id", d, o)
+        o += 12
+        p = d[o : o + n]
+        o += n
+        s = decode(p)
+        if s:
+            print("%9.3f| %s" % (t, s))

@@ -1,0 +1,20 @@
+# duo2-os: the audio side of phone calls (telephony/duo2-callaudio): holds
+# the voice front ends of the sound card open while a call is up and the
+# card is in its Voice Call profile (that starts the ADSP's voice path), and
+# mirrors the call volume and mute into the WSA gain and the vocproc.
+[Unit]
+Description=Phone call audio (voice path, call volume, mute)
+# Enabled globally: without this the administrator's user manager (an ssh
+# login) ran a second instance, which saw every call but could not open the
+# sound card (not in "audio"). Only the GUI user is.
+ConditionGroup=audio
+After=pipewire-pulse.socket wireplumber.service
+Wants=pipewire-pulse.socket
+
+[Service]
+ExecStart=/usr/local/lib/duo2-telephony/duo2-callaudio
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,106 @@
+From dc21212380b2a31bfbac43468167dd1a13f62daa Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 16:57:15 +0100
+Subject: [PATCH 047/137] dt-bindings: input: qcom,spmi-haptics: Add the
+ PM8350B haptics
+
+The PM8350B PMIC (SM8350 phones, e.g. the Surface Duo 2) has the older
+HAP520 haptics module. It has the DIRECT_PLAY and FIFO play modes of
+HAP530_HV, but a fixed 640-sample FIFO instead of the partitioned 8 KiB
+memory, so it is not compatible with qcom,spmi-haptics. It is powered by
+its own boost converter, HAP_HBST, a third peripheral the driver needs
+to read (the 5 V clamp, whether the boost is idle before a play).
+
+Add qcom,pm8350b-haptics with the third register region.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../bindings/input/qcom,spmi-haptics.yaml     | 58 ++++++++++++++++++-
+ 1 file changed, 55 insertions(+), 3 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/input/qcom,spmi-haptics.yaml b/Documentation/devicetree/bindings/input/qcom,spmi-haptics.yaml
+index e6cdaed9ce5b..1ed5b3d2e906 100644
+--- a/Documentation/devicetree/bindings/input/qcom,spmi-haptics.yaml
++++ b/Documentation/devicetree/bindings/input/qcom,spmi-haptics.yaml
+@@ -61,21 +61,31 @@ description: |
+     waveforms that may not follow the resonant frequency; autonomous hardware
+     resonance correction would interfere with the intended output.
+ 
++  The older HAP520 module in the PM8350B PMIC offers the same play modes with a
++  640-sample FIFO and no PAT_MEM partitioning. It is powered by its own boost
++  converter (HAP_HBST), whose state the driver has to watch.
++
+ properties:
+   compatible:
+-    items:
+-      - const: qcom,pmih0108-haptics
+-      - const: qcom,spmi-haptics
++    oneOf:
++      - items:
++          - const: qcom,pmih0108-haptics
++          - const: qcom,spmi-haptics
++      - const: qcom,pm8350b-haptics
+ 
+   reg:
++    minItems: 2
+     items:
+       - description: HAP_CFG module base address
+       - description: HAP_PTN module base address
++      - description: HAP_HBST (haptics boost) module base address
+ 
+   reg-names:
++    minItems: 2
+     items:
+       - const: cfg
+       - const: ptn
++      - const: hbst
+ 
+   interrupts:
+     maxItems: 1
+@@ -113,4 +123,46 @@ required:
+   - qcom,vmax-microvolt
+   - qcom,lra-period-us
+ 
++allOf:
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: qcom,pm8350b-haptics
++    then:
++      properties:
++        reg:
++          minItems: 3
++        reg-names:
++          minItems: 3
++    else:
++      properties:
++        reg:
++          maxItems: 2
++        reg-names:
++          maxItems: 2
++
+ additionalProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/interrupt-controller/irq.h>
++    #include <dt-bindings/spmi/spmi.h>
++
++    pmic@3 {
++        compatible = "qcom,pm8350b", "qcom,spmi-pmic";
++        reg = <0x3 SPMI_USID>;
++        #address-cells = <1>;
++        #size-cells = <0>;
++
++        haptics@f000 {
++            compatible = "qcom,pm8350b-haptics";
++            reg = <0xf000>, <0xf100>, <0xf200>;
++            reg-names = "cfg", "ptn", "hbst";
++            interrupts = <0x3 0xf0 0x1 IRQ_TYPE_EDGE_RISING>;
++            interrupt-names = "fifo-empty";
++
++            qcom,vmax-microvolt = <3050000>;
++            qcom,lra-period-us = <6135>;
++        };
++    };

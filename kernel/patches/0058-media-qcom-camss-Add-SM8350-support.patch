@@ -1,0 +1,464 @@
+From c4b54bade964c9858c2bad1897d639c34694a849 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 05:58:13 +0100
+Subject: [PATCH 058/137] media: qcom: camss: Add SM8350 support
+
+SM8350 has Titan 580. The vendor camera driver runs its CSID580 with
+the CSID480 data and its VFE580 with the VFE480 tables (only the RDI1
+input mux shift of the CAMIF lite and the CAMIF data differ, which the
+RDI path here does not use), and the register map is that of SM8250
+plus a third full IFE at 0xacef000 (CSID2 inside it at +0x1200, the
+same layout). So the SM8250 ops serve:
+
+- CSID/VFE: three full and two lite instances on csid_ops_gen2 and
+  vfe_ops_480, the CSID inside the VFE region as on SM8250; the CSID
+  base is now chosen by is_lite, not by index, because the third
+  instance is a full one on SM8350.
+- IFE clock rates of the SM8350 camera clock controller (338, 475,
+  600, 720 MHz), CSID and CPHY RX at 400 MHz.
+- CSIPHY: the SM8250 resources, with the D-PHY lane settings of the
+  vendor csiphy v1.2.3 table (lane_regs_sm8350).
+
+This needs the SM8350 camera clock controller and the qcom,sm8350-camss
+binding, which follow in this series.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../media/platform/qcom/camss/camss-csid.c    |  11 +-
+ .../qcom/camss/camss-csiphy-3ph-1-0.c         |  90 +++++++
+ drivers/media/platform/qcom/camss/camss-vfe.c |   2 +
+ drivers/media/platform/qcom/camss/camss.c     | 236 ++++++++++++++++++
+ drivers/media/platform/qcom/camss/camss.h     |   1 +
+ 5 files changed, 335 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/camss/camss-csid.c b/drivers/media/platform/qcom/camss/camss-csid.c
+index 48459b46a981..47d27b7b268c 100644
+--- a/drivers/media/platform/qcom/camss/camss-csid.c
++++ b/drivers/media/platform/qcom/camss/camss-csid.c
+@@ -1113,12 +1113,13 @@ int msm_csid_subdev_init(struct camss *camss, struct csid_device *csid,
+ 
+ 	/* Memory */
+ 
+-	if (camss->res->version == CAMSS_8250) {
+-		/* for titan 480, CSID registers are inside the VFE region,
+-		 * between the VFE "top" and "bus" registers. this requires
+-		 * VFE to be initialized before CSID
++	if (camss->res->version == CAMSS_8250 ||
++	    camss->res->version == CAMSS_8350) {
++		/* for titan 480 and 580, CSID registers are inside the VFE
++		 * region, between the VFE "top" and "bus" registers. this
++		 * requires VFE to be initialized before CSID
+ 		 */
+-		if (id >= 2) /* VFE/CSID lite */
++		if (csid->res->is_lite) /* VFE/CSID lite */
+ 			csid->base = csid->res->parent_dev_ops->get_base_address(camss, id)
+ 				+ VFE_480_LITE_CSID_OFFSET;
+ 		else
+diff --git a/drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c b/drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c
+index dac8d2ecf799..a9cf9e696860 100644
+--- a/drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c
++++ b/drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c
+@@ -294,6 +294,91 @@ csiphy_lane_regs lane_regs_sc8280xp[] = {
+ 	{0x0664, 0x7F, 0x00, CSIPHY_DEFAULT_PARAMS},
+ };
+ 
++/* GEN2 1.2.3 2PH (SM8350), D-PHY: the 2ph table of the vendor csiphy v1.2.3 */
++static const struct
++csiphy_lane_regs lane_regs_sm8350[] = {
++	{0x0030, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0024, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0028, 0x00, 0x00, CSIPHY_DNP_PARAMS},
++	{0x0000, 0x91, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x000C, 0x00, 0x00, CSIPHY_DNP_PARAMS},
++	{0x0038, 0xFE, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x002C, 0x01, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0034, 0x0F, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0010, 0x52, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x001C, 0x0A, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0014, 0x60, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x003C, 0xB8, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0004, 0x0C, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0020, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0008, 0x10, 0x00, CSIPHY_SETTLE_CNT_LOWER_BYTE},
++	{0x0800, 0x02, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0730, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0724, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0728, 0x04, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0700, 0x80, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x070C, 0xFF, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0738, 0x1F, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x072C, 0x01, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0734, 0x0F, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0710, 0x52, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x071C, 0x0A, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0714, 0x60, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x073C, 0xB8, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0704, 0x0C, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0720, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0708, 0x10, 0x00, CSIPHY_SETTLE_CNT_LOWER_BYTE},
++	{0x0800, 0x02, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0230, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0224, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0228, 0x00, 0x00, CSIPHY_DNP_PARAMS},
++	{0x0200, 0x91, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x020C, 0x00, 0x00, CSIPHY_DNP_PARAMS},
++	{0x0238, 0xFE, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x022C, 0x01, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0234, 0x0F, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0210, 0x52, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x021C, 0x0A, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0214, 0x60, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x023C, 0xB8, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0204, 0x0C, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0220, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0208, 0x10, 0x00, CSIPHY_SETTLE_CNT_LOWER_BYTE},
++	{0x0800, 0x02, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0430, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0424, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0428, 0x00, 0x00, CSIPHY_DNP_PARAMS},
++	{0x0400, 0x91, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x040C, 0x00, 0x00, CSIPHY_DNP_PARAMS},
++	{0x0438, 0xFE, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x042C, 0x01, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0434, 0x0F, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0410, 0x52, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x041C, 0x0A, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0414, 0x60, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x043C, 0xB8, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0404, 0x0C, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0420, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0408, 0x10, 0x00, CSIPHY_SETTLE_CNT_LOWER_BYTE},
++	{0x0800, 0x02, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0630, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0624, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0628, 0x00, 0x00, CSIPHY_DNP_PARAMS},
++	{0x0600, 0x91, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x060C, 0x00, 0x00, CSIPHY_DNP_PARAMS},
++	{0x0638, 0xFE, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x062C, 0x01, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0634, 0x0F, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0610, 0x52, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x061C, 0x0A, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0614, 0x60, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x063C, 0xB8, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0604, 0x0C, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0620, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
++	{0x0608, 0x10, 0x00, CSIPHY_SETTLE_CNT_LOWER_BYTE},
++	{0x0800, 0x02, 0x00, CSIPHY_DEFAULT_PARAMS},
++};
++
+ /* GEN2 1.2.1 2PH */
+ static const struct
+ csiphy_lane_regs lane_regs_sm8250[] = {
+@@ -1136,6 +1221,7 @@ static bool csiphy_is_gen2(u32 version)
+ 	case CAMSS_8250:
+ 	case CAMSS_8280XP:
+ 	case CAMSS_8300:
++	case CAMSS_8350:
+ 	case CAMSS_845:
+ 	case CAMSS_8550:
+ 	case CAMSS_8650:
+@@ -1239,6 +1325,10 @@ static int csiphy_init(struct csiphy_device *csiphy)
+ 		regs->lane_regs = &lane_regs_sc8280xp[0];
+ 		regs->lane_array_size = ARRAY_SIZE(lane_regs_sc8280xp);
+ 		break;
++	case CAMSS_8350:
++		regs->lane_regs = &lane_regs_sm8350[0];
++		regs->lane_array_size = ARRAY_SIZE(lane_regs_sm8350);
++		break;
+ 	case CAMSS_X1E80100:
+ 		regs->lane_regs = &lane_regs_x1e80100[0];
+ 		regs->lane_array_size = ARRAY_SIZE(lane_regs_x1e80100);
+diff --git a/drivers/media/platform/qcom/camss/camss-vfe.c b/drivers/media/platform/qcom/camss/camss-vfe.c
+index 55c0a0ee398f..85a020c7feef 100644
+--- a/drivers/media/platform/qcom/camss/camss-vfe.c
++++ b/drivers/media/platform/qcom/camss/camss-vfe.c
+@@ -349,6 +349,7 @@ static u32 vfe_src_pad_code(struct vfe_line *line, u32 sink_code,
+ 	case CAMSS_8250:
+ 	case CAMSS_8280XP:
+ 	case CAMSS_8300:
++	case CAMSS_8350:
+ 	case CAMSS_845:
+ 	case CAMSS_8550:
+ 	case CAMSS_8650:
+@@ -2005,6 +2006,7 @@ static int vfe_bpl_align_rdi(struct vfe_device *vfe)
+ 	case CAMSS_8250:
+ 	case CAMSS_8280XP:
+ 	case CAMSS_8300:
++	case CAMSS_8350:
+ 	case CAMSS_845:
+ 	case CAMSS_8550:
+ 	case CAMSS_8650:
+diff --git a/drivers/media/platform/qcom/camss/camss.c b/drivers/media/platform/qcom/camss/camss.c
+index 68491b16d647..cd3686ded85e 100644
+--- a/drivers/media/platform/qcom/camss/camss.c
++++ b/drivers/media/platform/qcom/camss/camss.c
+@@ -2252,6 +2252,228 @@ static const struct resources_icc icc_res_sm8250[] = {
+ 	},
+ };
+ 
++/*
++ * SM8350 (Titan 580): the vendor driver runs CSID580 with the CSID480 data and
++ * VFE580 with the VFE480 tables, so the SM8250 ops serve. Three full IFEs
++ * (the third is new) and two lite ones; the CSIPHYs are those of SM8250.
++ */
++static const struct camss_subdev_resources csid_res_8350[] = {
++	/* CSID0 */
++	{
++		.regulators = {},
++		.clock = { "vfe0_csid", "vfe0_cphy_rx", "vfe0", "vfe0_areg", "vfe0_ahb" },
++		.clock_rate = { { 400000000 },
++				{ 400000000 },
++				{ 338000000, 475000000, 600000000, 720000000 },
++				{ 100000000, 200000000, 300000000, 400000000 },
++				{ 0 } },
++		.reg = { "csid0" },
++		.interrupt = { "csid0" },
++		.csid = {
++			.hw_ops = &csid_ops_gen2,
++			.parent_dev_ops = &vfe_parent_dev_ops,
++			.formats = &csid_formats_gen2
++		}
++	},
++	/* CSID1 */
++	{
++		.regulators = {},
++		.clock = { "vfe1_csid", "vfe1_cphy_rx", "vfe1", "vfe1_areg", "vfe1_ahb" },
++		.clock_rate = { { 400000000 },
++				{ 400000000 },
++				{ 338000000, 475000000, 600000000, 720000000 },
++				{ 100000000, 200000000, 300000000, 400000000 },
++				{ 0 } },
++		.reg = { "csid1" },
++		.interrupt = { "csid1" },
++		.csid = {
++			.hw_ops = &csid_ops_gen2,
++			.parent_dev_ops = &vfe_parent_dev_ops,
++			.formats = &csid_formats_gen2
++		}
++	},
++	/* CSID2 */
++	{
++		.regulators = {},
++		.clock = { "vfe2_csid", "vfe2_cphy_rx", "vfe2", "vfe2_areg", "vfe2_ahb" },
++		.clock_rate = { { 400000000 },
++				{ 400000000 },
++				{ 338000000, 475000000, 600000000, 720000000 },
++				{ 100000000, 200000000, 300000000, 400000000 },
++				{ 0 } },
++		.reg = { "csid2" },
++		.interrupt = { "csid2" },
++		.csid = {
++			.hw_ops = &csid_ops_gen2,
++			.parent_dev_ops = &vfe_parent_dev_ops,
++			.formats = &csid_formats_gen2
++		}
++	},
++	/* CSID3 (lite) */
++	{
++		.regulators = {},
++		.clock = { "vfe_lite_csid", "vfe_lite_cphy_rx", "vfe_lite", "vfe_lite_ahb" },
++		.clock_rate = { { 400000000 },
++				{ 400000000 },
++				{ 400000000, 480000000 },
++				{ 0 } },
++		.reg = { "csid3" },
++		.interrupt = { "csid3" },
++		.csid = {
++			.is_lite = true,
++			.hw_ops = &csid_ops_gen2,
++			.parent_dev_ops = &vfe_parent_dev_ops,
++			.formats = &csid_formats_gen2
++		}
++	},
++	/* CSID4 (lite) */
++	{
++		.regulators = {},
++		.clock = { "vfe_lite_csid", "vfe_lite_cphy_rx", "vfe_lite", "vfe_lite_ahb" },
++		.clock_rate = { { 400000000 },
++				{ 400000000 },
++				{ 400000000, 480000000 },
++				{ 0 } },
++		.reg = { "csid4" },
++		.interrupt = { "csid4" },
++		.csid = {
++			.is_lite = true,
++			.hw_ops = &csid_ops_gen2,
++			.parent_dev_ops = &vfe_parent_dev_ops,
++			.formats = &csid_formats_gen2
++		}
++	},
++};
++
++static const struct camss_subdev_resources vfe_res_8350[] = {
++	/* VFE0 */
++	{
++		.regulators = {},
++		.clock = { "camnoc_axi_src", "slow_ahb_src", "cpas_ahb",
++			   "camnoc_axi", "vfe0_ahb", "vfe0_areg", "vfe0",
++			   "vfe0_axi", "cam_hf_axi" },
++		.clock_rate = { { 19200000, 300000000, 400000000 },
++				{ 19200000, 80000000 },
++				{ 19200000 },
++				{ 0 },
++				{ 0 },
++				{ 100000000, 200000000, 300000000, 400000000 },
++				{ 338000000, 475000000, 600000000, 720000000 },
++				{ 0 },
++				{ 0 } },
++		.reg = { "vfe0" },
++		.interrupt = { "vfe0" },
++		.vfe = {
++			.line_num = 3,
++			.has_pd = true,
++			.pd_name = "ife0",
++			.hw_ops = &vfe_ops_480,
++			.formats_rdi = &vfe_formats_rdi_845,
++			.formats_pix = &vfe_formats_pix_845
++		}
++	},
++	/* VFE1 */
++	{
++		.regulators = {},
++		.clock = { "camnoc_axi_src", "slow_ahb_src", "cpas_ahb",
++			   "camnoc_axi", "vfe1_ahb", "vfe1_areg", "vfe1",
++			   "vfe1_axi", "cam_hf_axi" },
++		.clock_rate = { { 19200000, 300000000, 400000000 },
++				{ 19200000, 80000000 },
++				{ 19200000 },
++				{ 0 },
++				{ 0 },
++				{ 100000000, 200000000, 300000000, 400000000 },
++				{ 338000000, 475000000, 600000000, 720000000 },
++				{ 0 },
++				{ 0 } },
++		.reg = { "vfe1" },
++		.interrupt = { "vfe1" },
++		.vfe = {
++			.line_num = 3,
++			.has_pd = true,
++			.pd_name = "ife1",
++			.hw_ops = &vfe_ops_480,
++			.formats_rdi = &vfe_formats_rdi_845,
++			.formats_pix = &vfe_formats_pix_845
++		}
++	},
++	/* VFE2 */
++	{
++		.regulators = {},
++		.clock = { "camnoc_axi_src", "slow_ahb_src", "cpas_ahb",
++			   "camnoc_axi", "vfe2_ahb", "vfe2_areg", "vfe2",
++			   "vfe2_axi", "cam_hf_axi" },
++		.clock_rate = { { 19200000, 300000000, 400000000 },
++				{ 19200000, 80000000 },
++				{ 19200000 },
++				{ 0 },
++				{ 0 },
++				{ 100000000, 200000000, 300000000, 400000000 },
++				{ 338000000, 475000000, 600000000, 720000000 },
++				{ 0 },
++				{ 0 } },
++		.reg = { "vfe2" },
++		.interrupt = { "vfe2" },
++		.vfe = {
++			.line_num = 3,
++			.has_pd = true,
++			.pd_name = "ife2",
++			.hw_ops = &vfe_ops_480,
++			.formats_rdi = &vfe_formats_rdi_845,
++			.formats_pix = &vfe_formats_pix_845
++		}
++	},
++	/* VFE3 (lite) */
++	{
++		.regulators = {},
++		.clock = { "camnoc_axi_src", "slow_ahb_src", "cpas_ahb",
++			   "camnoc_axi", "vfe_lite_ahb", "vfe_lite_axi",
++			   "vfe_lite", "cam_hf_axi" },
++		.clock_rate = { { 19200000, 300000000, 400000000 },
++				{ 19200000, 80000000 },
++				{ 19200000 },
++				{ 0 },
++				{ 0 },
++				{ 0 },
++				{ 400000000, 480000000 },
++				{ 0 } },
++		.reg = { "vfe_lite0" },
++		.interrupt = { "vfe_lite0" },
++		.vfe = {
++			.is_lite = true,
++			.line_num = 4,
++			.hw_ops = &vfe_ops_480,
++			.formats_rdi = &vfe_formats_rdi_845,
++			.formats_pix = &vfe_formats_pix_845
++		}
++	},
++	/* VFE4 (lite) */
++	{
++		.regulators = {},
++		.clock = { "camnoc_axi_src", "slow_ahb_src", "cpas_ahb",
++			   "camnoc_axi", "vfe_lite_ahb", "vfe_lite_axi",
++			   "vfe_lite", "cam_hf_axi" },
++		.clock_rate = { { 19200000, 300000000, 400000000 },
++				{ 19200000, 80000000 },
++				{ 19200000 },
++				{ 0 },
++				{ 0 },
++				{ 0 },
++				{ 400000000, 480000000 },
++				{ 0 } },
++		.reg = { "vfe_lite1" },
++		.interrupt = { "vfe_lite1" },
++		.vfe = {
++			.is_lite = true,
++			.line_num = 4,
++			.hw_ops = &vfe_ops_480,
++			.formats_rdi = &vfe_formats_rdi_845,
++			.formats_pix = &vfe_formats_pix_845
++		}
++	},
++};
++
+ static const struct camss_subdev_resources csiphy_res_7280[] = {
+ 	/* CSIPHY0 */
+ 	{
+@@ -5673,6 +5895,19 @@ static const struct camss_resources sm8250_resources = {
+ 	.vfe_num = ARRAY_SIZE(vfe_res_8250),
+ };
+ 
++static const struct camss_resources sm8350_resources = {
++	.version = CAMSS_8350,
++	.pd_name = "top",
++	.csiphy_res = csiphy_res_8250,
++	.csid_res = csid_res_8350,
++	.vfe_res = vfe_res_8350,
++	.icc_res = icc_res_sm8250,
++	.icc_path_num = ARRAY_SIZE(icc_res_sm8250),
++	.csiphy_num = ARRAY_SIZE(csiphy_res_8250),
++	.csid_num = ARRAY_SIZE(csid_res_8350),
++	.vfe_num = ARRAY_SIZE(vfe_res_8350),
++};
++
+ static const struct camss_resources sc8280xp_resources = {
+ 	.version = CAMSS_8280XP,
+ 	.pd_name = "top",
+@@ -5760,6 +5995,7 @@ static const struct of_device_id camss_dt_match[] = {
+ 	{ .compatible = "qcom,sm6150-camss", .data = &sm6150_resources },
+ 	{ .compatible = "qcom,sm6350-camss", .data = &sm6350_resources },
+ 	{ .compatible = "qcom,sm8250-camss", .data = &sm8250_resources },
++	{ .compatible = "qcom,sm8350-camss", .data = &sm8350_resources },
+ 	{ .compatible = "qcom,sm8550-camss", .data = &sm8550_resources },
+ 	{ .compatible = "qcom,sm8650-camss", .data = &sm8650_resources },
+ 	{ .compatible = "qcom,x1e80100-camss", .data = &x1e80100_resources },
+diff --git a/drivers/media/platform/qcom/camss/camss.h b/drivers/media/platform/qcom/camss/camss.h
+index 93d691c8ac63..cb94fe35243a 100644
+--- a/drivers/media/platform/qcom/camss/camss.h
++++ b/drivers/media/platform/qcom/camss/camss.h
+@@ -92,6 +92,7 @@ enum camss_version {
+ 	CAMSS_8250,
+ 	CAMSS_8280XP,
+ 	CAMSS_8300,
++	CAMSS_8350,
+ 	CAMSS_845,
+ 	CAMSS_8550,
+ 	CAMSS_8650,

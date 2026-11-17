@@ -1,0 +1,15 @@
+#!/bin/sh
+# duo2-waydroid-session.service (the GUI user's): `waydroid session start`
+# inside duo-wc's session. Started on demand: `waydroid app launch PKG` (the
+# command of every Android icon) asks for id.waydro.Session on the session
+# bus, and D-Bus activation starts this unit; duo2-waydroid-idle stops it.
+set -eu
+# shellcheck source=/dev/null
+. /run/duo-wc/session.env
+# Waydroid binds the Wayland socket ($XDG_RUNTIME_DIR/$WAYLAND_DISPLAY: duo-wc's,
+# an ordinary untrusted client) and the PulseAudio socket of PipeWire.
+export PULSE_RUNTIME_PATH="${PIPEWIRE_RUNTIME_DIR:-/run/user/$(id -u)}/pulse"
+# ro.sf.lcd_density = GRID_UNIT_PX * 20 = 400: the stock Duo 2's density, the
+# same size as duo-wc's scale 2.5
+export GRID_UNIT_PX=20
+exec /usr/bin/waydroid session start

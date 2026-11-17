@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=Voicemail
+Name[hu]=Hangposta
+Name[de]=Mailbox
+Comment=Call your mailbox
+Comment[hu]=A hangposta felhívása
+Comment[de]=Die Mailbox anrufen
+Keywords=voicemail;mailbox;answering machine;
+Keywords[hu]=hangposta;üzenetrögzítő;mobilbox;
+Exec=duo-voicemail
+Icon=call-start-symbolic
+Terminal=false
+Categories=GTK;Utility;Telephony;
+StartupNotify=false
+X-Purism-FormFactor=Workstation;Mobile;

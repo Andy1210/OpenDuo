@@ -1,0 +1,42 @@
+From 2503acbf75b0c2dc38fb617033881212284de82f Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Mon, 9 Nov 2026 21:49:05 +0100
+Subject: [PATCH 16/16] BRING-UP: media: iris: Gen1: a switch for the VP9
+ session restart
+
+gen1_vp9_restart (default on): 0 keeps the stopped VP9 session as iris
+did, for an A/B on the device; a line per restart. Debugging aid only,
+not for upstream.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c b/drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c
+index 8a88d68aed00..c928a75a290f 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c
+@@ -17,6 +17,9 @@
+ static bool gen1_venus_stop_flush = true;
+ module_param(gen1_venus_stop_flush, bool, 0644);
+ MODULE_PARM_DESC(gen1_venus_stop_flush, "BRING-UP: Gen1 decoder stop flushes as venus does (0: as iris did)");
++static bool gen1_vp9_restart = true;
++module_param(gen1_vp9_restart, bool, 0644);
++MODULE_PARM_DESC(gen1_vp9_restart, "BRING-UP: a new firmware session after a VP9 decoder stops (0: as iris did)");
+ 
+ static u32 iris_hfi_gen1_buf_type_from_driver(enum iris_buffer_type buffer_type)
+ {
+@@ -300,8 +303,11 @@ static int iris_hfi_gen1_session_stop(struct iris_inst *inst, u32 plane)
+ 			iris_helper_buffers_done(inst, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+ 						 VB2_BUF_STATE_ERROR);
+ 
+-			if (inst->codec == V4L2_PIX_FMT_VP9)
++			if (inst->codec == V4L2_PIX_FMT_VP9 && gen1_vp9_restart) {
+ 				ret = iris_hfi_gen1_session_restart(inst);
++				dev_info(core->dev, "BRING-UP: session %x restarted: %d\n",
++					 inst->session_id, ret);
++			}
+ 		}
+ 	} else {
+ 		if (inst->state == IRIS_INST_STREAMING ||

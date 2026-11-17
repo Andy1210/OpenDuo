@@ -1,0 +1,18 @@
+[Unit]
+Description=OpenDuo: is the kernel being tried healthy? (compositor, touch, network)
+Documentation=file:///usr/local/lib/duo2-maint/duo2-boot
+# Only on a boot from a packaged kernel's entry (duo2-boot add); on a good
+# entry it returns at once. Ordered after multi-user.target so that the boot
+# itself never waits for it (the 6-minute boot timeout counts to multi-user).
+ConditionKernelCommandLine=openduo.entry
+After=multi-user.target duo-wc.service duo2-touchd.service
+Before=boot-complete.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/duo2-boot health --wait
+TimeoutStartSec=20min
+
+[Install]
+RequiredBy=boot-complete.target

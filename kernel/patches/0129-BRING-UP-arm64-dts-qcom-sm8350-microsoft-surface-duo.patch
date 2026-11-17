@@ -1,0 +1,63 @@
+From f532bea473fe351b5b206ddcbf0a2ed259d4b98b Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Mon, 9 Nov 2026 17:19:43 +0100
+Subject: [PATCH 129/137] BRING-UP: arm64: dts: qcom:
+ sm8350-microsoft-surface-duo2: Drop the always-on display rails from variant
+ J
+
+Variant J inherited variant I's always-on display and DSI PHY rails
+(L2B 3.07 V, L12C 1.8 V, L13C 3.0 V for the panels, L5B / L6B for the
+DSI PHYs), which kept the UEFI's picture alive before the display
+driver existed. The panel, DSI host and PHY drivers (and the PCIe, UFS
+and USB PHYs on the shared L5B / L6B) hold them now, so the extra
+always-on enable only kept them powered with both panels off, and in
+HPM through system sleep (regulator_summary: use 1 with every consumer
+at 0).
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ ...m8350-microsoft-surface-duo2-bringup-j.dts | 24 +++----------------
+ 1 file changed, 3 insertions(+), 21 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup-j.dts b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup-j.dts
+index f9075897f99e..f711dffbb74e 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup-j.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup-j.dts
+@@ -5,7 +5,9 @@
+  * showed is needed to keep the UEFI's picture and a USB console alive:
+  *  - MDSS marked okay without its driver (providers keep the display votes)
+  *  - dispcc off (its probe reprograms the display PLLs)
+- *  - the display / DSI PHY rails always on
++ *  - the display / DSI PHY rails always on (dropped again: the panel, DSI
++ *    and PHY drivers hold them now, and always on they stayed powered
++ *    with both panels off, in system sleep too)
+  *  - USB 2.0 only, fixed peripheral; the pmic_glink connector stays (battery,
+  *    charger, UCSI) but without the graph links to dwc3 / QMP for now
+  *  - usb_2 off (usb30_sec_gdsc stuck off)
+@@ -17,26 +19,6 @@ &mdss {
+ 	status = "okay";
+ };
+ 
+-&vreg_l5b_0p88 {
+-	regulator-always-on;
+-};
+-
+-&vreg_l6b_1p2 {
+-	regulator-always-on;
+-};
+-
+-&vreg_l2b_3p07 {
+-	regulator-always-on;
+-};
+-
+-&vreg_l12c_1p8 {
+-	regulator-always-on;
+-};
+-
+-&vreg_l13c_3p0 {
+-	regulator-always-on;
+-};
+-
+ &usb_1 {
+ 	/*
+ 	 * High speed only (no USB3 PHY, below): clock the PIPE interface from

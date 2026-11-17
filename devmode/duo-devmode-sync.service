@@ -1,0 +1,17 @@
+# The developer tools (devmode/devtools.list) follow Developer mode at every
+# boot: installed while it is on, removed while it is off, also when a
+# component's installer put one back while it was off. The touch log's
+# switch needs nothing here: it is on a tmpfs (/run/duo-devmode), so a
+# reboot switches it off.
+[Unit]
+Description=Developer tools follow Developer mode
+After=local-fs.target
+ConditionPathExists=/usr/local/sbin/duo-devmode
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/duo-devmode devtools sync
+StandardOutput=journal
+
+[Install]
+WantedBy=multi-user.target

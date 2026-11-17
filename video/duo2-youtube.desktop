@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=YouTube
+GenericName=Web video (hardware decoding)
+GenericName[hu]=Webes videó (hardveres dekódolás)
+Comment=YouTube in Chromium, decoded by the phone's video core
+Comment[hu]=YouTube Chromiumban, a telefon videómagja dekódolja
+Keywords=youtube;video;
+Keywords[hu]=youtube;videó;
+Exec=duo2-youtube
+Icon=video-display
+Terminal=false
+Categories=AudioVideo;Video;Network;
+StartupNotify=true
+X-Purism-FormFactor=Workstation;Mobile;

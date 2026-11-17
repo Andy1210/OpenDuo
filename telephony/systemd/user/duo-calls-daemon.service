@@ -1,0 +1,13 @@
+# duo2-os: GNOME Calls in the background, so that an incoming call rings and
+# shows its window (in GNOME the autostart entry or calls-daemon.service under
+# gnome-session.target does this; duo-wc's session has neither). A tap on the
+# Calls icon opens the window of this instance (one application, on D-Bus).
+[Unit]
+Description=GNOME Calls in the background (incoming calls)
+
+[Service]
+Type=dbus
+BusName=org.gnome.Calls
+ExecStart=/usr/bin/gnome-calls --daemon
+Restart=on-failure
+RestartSec=5

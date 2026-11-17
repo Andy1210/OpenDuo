@@ -1,0 +1,242 @@
+#!/bin/busybox sh
+# duo2-os rescue initramfs: USB console FIRST, root later (or never).
+#
+# - USB gadget: CDC-ACM (ttyGS0, a shell for the host's /dev/ttyACM*) and
+#   CDC-NCM (usb0 = 10.15.19.1/24, DHCP for the host, telnet on port 23).
+# - The kernel log is copied to /run/dmesg.txt every 2 s and kept on the
+#   ACM shell's history; `dmesg` works too.
+# - Stays in the initramfs unless the command line has duo2.boot=root, in
+#   which case it waits for PARTLABEL=linux (20 s) and switches to it,
+#   bringing the boot splash up first (early_display below).
+# Both boot entries boot this image, each from its own copy on the ESP
+# (scripts/build-initrd.sh): rescue.conf /duo2/initrd.img (kept as it is),
+# duo2.conf /duo2/initrd-boot.img (scripts/duo2-promote).
+/bin/busybox --install -s /bin
+export PATH=/bin:/sbin
+mkdir -p /proc /sys /dev /run /tmp /mnt/root /sys/kernel/config
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mkdir -p /dev/pts && mount -t devpts devpts /dev/pts
+# As systemd would mount it (the root's systemd keeps this one): a bare
+# tmpfs is world-writable (1777).
+mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs /run
+mount -t configfs configfs /sys/kernel/config
+echo "duo2 rescue: init started" > /dev/kmsg
+
+KMSG=/dev/kmsg
+log() { echo "duo2 rescue: $*" > $KMSG; echo "$*"; }
+
+# The boot splash on both panels as soon as the root is there, ~4 s before
+# udev would load the display (docs/hardware/boot.md).
+# Runs after the move of /dev, /proc, /sys and /run into the root, right
+# before switch_root:
+# - msm, the panel driver and the rest of the display path are loaded from
+#   the root (its modules for this kernel and its modprobe.d), so this
+#   image stays kernel independent;
+# - msm's first open of card0 (its fbdev client, inside the bind) loads the
+#   GPU's firmware: from the root as well, through firmware_class.path for
+#   this window only;
+# - Plymouth (the root's, with its theme) starts in a chroot once card0 is
+#   there and goes on into the root as it is: its root is /mnt/root
+#   already, which switch_root makes /. Without udev it is told to take
+#   card0 (plymouth.ignore-udev); the root's plymouth-start.service sees it
+#   answer and skips (rootfs/plymouth).
+# Nothing here may hold the boot up: every wait has a limit, and without
+# card0 or Plymouth the root's own path brings the splash up, as before.
+# duo2.early-display=0 on the command line leaves it all to the root.
+DISPLAY_MODULES="gpucc-sm8350 qcom-refgen-regulator panel-microsoft-elgin msm"
+RPATH=/usr/sbin:/usr/bin:/sbin:/bin
+early_display() {
+    K=/mnt/root
+    read -r cmdline < $K/proc/cmdline
+    case " $cmdline " in *" duo2.early-display=0 "*) log "early display: off"; return 0 ;; esac
+    rel=$(uname -r)
+    if [ ! -f "$K/lib/modules/$rel/modules.dep.bin" ]; then
+        log "early display: the root has no modules for $rel"
+        return 0
+    fi
+    fwp=$K/sys/module/firmware_class/parameters/path
+    [ -w $fwp ] && printf %s $K/lib/firmware > $fwp
+    rm -f /tmp/modprobe.done
+    log "early display: loading $DISPLAY_MODULES"
+    # shellcheck disable=SC2086 # DISPLAY_MODULES is a list of module names
+    ( PATH=$RPATH chroot "$K" modprobe -a $DISPLAY_MODULES; echo $? > /tmp/modprobe.done ) &
+    # card0: at most 6 s, or 1 s after modprobe gave up without it
+    i=0; j=0
+    while [ ! -e $K/dev/dri/card0 ] && [ $i -lt 600 ] && [ $j -lt 100 ]; do
+        usleep 10000; i=$((i + 1))
+        [ -f /tmp/modprobe.done ] && j=$((j + 1))
+    done
+    if [ ! -e $K/dev/dri/card0 ]; then
+        log "early display: no card0"
+    elif [ ! -x $K/usr/sbin/plymouthd ]; then
+        log "early display: card0, no Plymouth in the root"
+    else
+        case " $cmdline " in
+        *" plymouth.enable=0 "*|*" nosplash "*) log "early display: card0, splash off" ;;
+        *)  log "early display: card0, starting Plymouth"
+            if PATH=$RPATH timeout 5 chroot $K /usr/sbin/plymouthd --mode=boot \
+                    --pid-file=/run/plymouth/pid --attach-to-session \
+                    --kernel-command-line="$cmdline splash plymouth.ignore-udev" &&
+               PATH=$RPATH timeout 5 chroot $K /usr/bin/plymouth show-splash; then
+                log "early display: splash shown"
+            else
+                log "early display: Plymouth did not start"
+            fi ;;
+        esac
+    fi
+    # The GPU firmware comes in modprobe's msm bind: the path stays until then.
+    i=0; while [ ! -f /tmp/modprobe.done ] && [ $i -lt 600 ]; do usleep 10000; i=$((i + 1)); done
+    if [ -f /tmp/modprobe.done ]; then
+        log "early display: modprobe done ($(cat /tmp/modprobe.done))"
+    else
+        log "early display: modprobe still running, going on"
+    fi
+    [ -w $fwp ] && printf '\000' > $fwp
+    return 0
+}
+
+# End every process but this init: TERM and HUP (the interactive shell on
+# the ACM port ignores TERM; it alone made a fixed 1 s wait), then KILL
+# whatever is left after at most 1 s (kernel threads and zombies have no
+# exe).
+others_alive() {
+    for p in /proc/[0-9]*; do
+        [ "$p" = /proc/1 ] && continue
+        [ -e "$p/exe" ] && return 0
+    done
+    return 1
+}
+end_all() {
+    kill -TERM -1 2>/dev/null; kill -HUP -1 2>/dev/null
+    i=0; while others_alive && [ $i -lt 50 ]; do usleep 20000; i=$((i + 1)); done
+    [ $i -lt 50 ] || log "processes left after 1 s, killing them"
+    kill -KILL -1 2>/dev/null
+}
+
+gadget() {
+    G=/sys/kernel/config/usb_gadget/duo2
+    i=0
+    while [ -z "$(ls /sys/class/udc 2>/dev/null)" ] && [ $i -lt 60 ]; do sleep 1; i=$((i+1)); done
+    # shellcheck disable=SC2012 # a UDC's name is a plain device name
+    UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
+    [ -n "$UDC" ] || { log "no UDC after 60 s"; return 1; }
+    mkdir -p $G && cd $G || return 1
+    echo 0x1d6b > idVendor; echo 0x0104 > idProduct; echo 0x0100 > bcdDevice
+    mkdir -p strings/0x409
+    echo duo2-os > strings/0x409/manufacturer
+    echo "Surface Duo 2 rescue" > strings/0x409/product
+    echo duo2rescue > strings/0x409/serialnumber
+    mkdir -p configs/c.1/strings/0x409 functions/acm.GS0 functions/ncm.usb0
+    echo "ACM + NCM" > configs/c.1/strings/0x409/configuration
+    echo 500 > configs/c.1/MaxPower
+    ln -s functions/acm.GS0 configs/c.1/
+    ln -s functions/ncm.usb0 configs/c.1/
+    echo "$UDC" > UDC && log "gadget bound to $UDC"
+    cd /
+    i=0; while [ ! -e /sys/class/net/usb0 ] && [ $i -lt 10 ]; do sleep 1; i=$((i+1)); done
+    ip link set usb0 up && ip addr add 10.15.19.1/24 dev usb0
+    mkdir -p /var/lib/misc && : > /var/lib/misc/udhcpd.leases
+    printf 'start 10.15.19.10\nend 10.15.19.20\ninterface usb0\nmax_leases 4\noption subnet 255.255.255.0\n' > /run/udhcpd.conf
+    udhcpd /run/udhcpd.conf
+    telnetd -l /bin/sh -p 23
+    # A shell on the ACM port, respawned when the host closes it.
+    # "|| exit": once switch_root has emptied the initramfs, a leftover loop
+    # must end instead of spinning on "not found" (it did, on the console).
+    ( while true; do setsid sh -c 'exec sh -i </dev/ttyGS0 >/dev/ttyGS0 2>&1'; sleep 1 || exit; done ) &
+    echo $! > /run/acm-loop.pid
+    log "usb console up: ttyGS0 shell, telnet 10.15.19.1"
+}
+
+( while true; do dmesg > /run/dmesg.txt 2>/dev/null; sleep 2 || exit; done ) &
+HELPERS="$!"
+gadget &
+
+# Boot log onto the ESP every 10 s for 5 minutes, so a boot with no USB still
+# tells its story: read it back from the WOA recovery (no flashing needed).
+esplog() {
+    mkdir -p /sys/kernel/debug && mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null
+    mkdir -p /mnt/esp; dev=""; i=0
+    while [ -z "$dev" ] && [ $i -lt 30 ]; do
+        for u in /sys/class/block/*/uevent; do
+            grep -q '^PARTNAME=esp$' "$u" && dev=/dev/$(sed -n 's/^DEVNAME=//p' "$u")
+        done
+        [ -z "$dev" ] && { sleep 1; i=$((i+1)); }
+    done
+    [ -n "$dev" ] || log "esp partition not found"
+    if [ -n "$dev" ] && mount -t vfat "$dev" /mnt/esp; then
+        L=/mnt/esp/logs
+    else
+        # Fallback: the ext4 root partition (logs in /duo2-logs there).
+        log "esp mount failed, trying the linux partition"
+        rdev=""
+        for u in /sys/class/block/*/uevent; do
+            grep -q '^PARTNAME=linux$' "$u" && rdev=/dev/$(sed -n 's/^DEVNAME=//p' "$u")
+        done
+        # no partition, or the mount failed: both end here
+        # shellcheck disable=SC2015
+        [ -n "$rdev" ] && mount -t ext4 "$rdev" /mnt/esp || { log "no log partition"; return; }
+        L=/mnt/esp/duo2-logs
+    fi
+    mkdir -p $L
+    # shellcheck disable=SC2012 # the log files' own names (bootNN.txt)
+    n=$(ls $L 2>/dev/null | wc -l)
+    f=$L/boot$(printf %02d "$n").txt
+    k=0
+    while [ $k -lt 30 ]; do
+        { echo "== cmdline"; cat /proc/cmdline
+          echo "== uptime"; cat /proc/uptime
+          echo "== udc"; ls /sys/class/udc 2>&1
+          echo "== devices_deferred"; cat /sys/kernel/debug/devices_deferred 2>&1
+          echo "== block"; ls /sys/class/block 2>&1
+          echo "== net"; ls /sys/class/net 2>&1
+          echo "== power_supply"; ls /sys/class/power_supply 2>&1
+          echo "== dmesg"; dmesg
+        } > "$f.tmp" 2>&1
+        mv "$f.tmp" "$f"; sync
+        sleep 10 || exit; k=$((k+1))
+    done
+    log "esp log finished: $f"
+}
+# Only when the boot stays here (the rescue entry, or no root to switch to):
+# a root boot switches after ~3 s, and this background writer, killed
+# mid-write at the switch (logs/bootNN.txt.tmp left behind) with the ESP
+# perhaps still busy for the umount, left the FAT mounted read-write and so
+# dirty for the whole boot. The rootfs keeps its own journal.
+
+if grep -q 'duo2.boot=root' /proc/cmdline; then
+    # 20 s, looked for every 50 ms (a 1 s step could cost the boot a second)
+    i=0; dev=""
+    while [ -z "$dev" ] && [ $i -lt 400 ]; do
+        for u in /sys/class/block/*/uevent; do
+            grep -q '^PARTNAME=linux$' "$u" && dev=/dev/$(sed -n 's/^DEVNAME=//p' "$u")
+        done
+        [ -z "$dev" ] && { usleep 50000; i=$((i+1)); }
+    done
+    if [ -n "$dev" ] && mount -o rw "$dev" /mnt/root; then
+        log "switching to $dev"
+        # The rootfs brings its own DHCP server, getty and gadget service: stop
+        # the rescue helpers (the gadget itself stays bound) and leave no
+        # mounts behind.
+        # shellcheck disable=SC2046,SC2086 # lists of PIDs
+        kill $HELPERS $(cat /run/acm-loop.pid 2>/dev/null) 2>/dev/null
+        killall udhcpd telnetd 2>/dev/null
+        umount /mnt/esp /sys/kernel/debug 2>/dev/null
+        # Whatever is still running (the gadget job may not have finished,
+        # and its loops and daemons would outlive switch_root as orphans
+        # with no binaries left): end everything but this init. (It was
+        # TERM, a fixed 1 s sleep, KILL: a second of every boot.)
+        end_all
+        for m in /dev /proc /sys /run; do mount --move $m /mnt/root$m; done
+        KMSG=/mnt/root/dev/kmsg
+        early_display
+        log "switch_root"
+        exec switch_root /mnt/root /sbin/init
+    fi
+    log "root PARTLABEL=linux not found / not mountable; staying in rescue"
+fi
+esplog &
+HELPERS="$HELPERS $!"
+log "staying in rescue shell"
+while true; do sleep 3600; done

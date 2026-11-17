@@ -1,0 +1,68 @@
+From 3ace954c150d6887e973ae1afc856ea5e856b6a6 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 00:50:40 +0100
+Subject: [PATCH 072/137] BRING-UP: arm64: dts: qcom:
+ sm8350-microsoft-surface-duo2: Add the ultrawide camera's endpoint
+
+Connect the ultrawide IMX481 (CCI1 bus 0, 0x10) to CSIPHY4, four lanes
+in order (the vendor laneAssign 0x3210), at its modes' 835.2 MHz link
+frequency, with the register tables generated from the phone's own
+vendor image (scripts/build-camera-tables.sh in OpenDuo).
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../qcom/sm8350-microsoft-surface-duo2.dts    | 29 ++++++++++++++++++-
+ 1 file changed, 28 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+index 0d3e607758df..95ab0d800a91 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+@@ -558,12 +558,26 @@ vreg_l1d_1p2: ldo1 {
+  * stock power sequence of their reads) and are read-only: they hold the
+  * factory calibration of the modules.
+  */
+-/* CSIPHY supplies as in the vendor DT; no sensor endpoints yet (BRING-UP) */
++/*
++ * CSIPHY supplies as in the vendor DT. The ultrawide camera streams through
++ * CSIPHY4 (BRING-UP: the other three have no endpoints yet). The modules'
++ * lanes are in order (the vendor laneAssign 0x3210).
++ */
+ &camss {
+ 	vdda-phy-supply = <&vreg_l5b_0p88>;
+ 	vdda-pll-supply = <&vreg_l6b_1p2>;
+ 
+ 	status = "okay";
++
++	ports {
++		port@4 {
++			csiphy4_ep: endpoint {
++				clock-lanes = <7>;
++				data-lanes = <0 1 2 3>;
++				remote-endpoint = <&camera_uw_ep>;
++			};
++		};
++	};
+ };
+ 
+ &cci0 {
+@@ -637,6 +651,19 @@ camera_uw: camera@10 {
+ 
+ 		pinctrl-0 = <&cam_mclk2_default &cam_uw_reset_default>;
+ 		pinctrl-names = "default";
++
++		/* generated from the phone's own vendor image, see docs/hardware/camera.md */
++		firmware-name = "qcom/sm8350/microsoft/imx481-uw.bin";
++
++		orientation = <1>;
++
++		port {
++			camera_uw_ep: endpoint {
++				data-lanes = <1 2 3 4>;
++				link-frequencies = /bits/ 64 <835200000>;
++				remote-endpoint = <&csiphy4_ep>;
++			};
++		};
+ 	};
+ 
+ 	eeprom@50 {

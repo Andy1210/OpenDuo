@@ -1,0 +1,1086 @@
+#!/usr/bin/python3 -I
+"""duo2-hotspotd: the mobile hotspot and USB tethering (hotspot/README.md).
+
+Runs only while something is shared (duo2-hotspot.service, started by
+`duo2-hotspot on` / `usb on`, never at boot; it stops itself when nothing is
+wanted any more). Everything it changes lives in /run or the kernel and goes
+with it: the access point interface (ap0, beside the phone's own wlan0),
+hostapd on it, the USB function (tether0), networkd's runtime files for
+them (DHCP server, router advertisements), the nftables table
+`inet duo2_hotspot`, the policy routing table, per-device forwarding
+switches, a DNS relay to systemd-resolved and a logind sleep inhibitor.
+
+What is wanted: /run/duo2-hotspot/want.json (written by duo2-hotspot, then
+SIGHUP). What it does: /run/duo2/hotspot.json (world-readable: no password,
+no device address), which the shell's quick menu, Duo Settings and
+duo2-wwan's smart 5G follow.
+
+The phone's own WiFi connection is never cut unless the request says so
+(`on --wifi-off`, after the user was asked) and both the user's setting
+(WIFI_CLIENT=ask) and the administrator's (NEVER_CUT_WIFI=no) allow it.
+"""
+
+import hashlib
+import json
+import os
+import signal
+import socket
+import subprocess
+import sys
+import time
+
+_here = os.path.dirname(os.path.realpath(__file__))
+for _p in (_here, "/usr/local/lib/duo2-hotspot"):
+    if os.path.isdir(os.path.join(_p, "duo2hotspot")):
+        sys.path.insert(0, _p)
+        break
+
+from gi.repository import Gio, GLib  # noqa: E402
+
+from duo2hotspot import conf, netplan, state, wifi  # noqa: E402
+from duo2hotspot.gadget import Gadget, GadgetError, macs, ssh_over  # noqa: E402
+
+RUN = state.RUN_DIR
+HOSTAPD = "/usr/sbin/hostapd"
+HOSTAPD_CONF = RUN + "/hostapd.conf"
+SAVED = RUN + "/saved.json"  # the switches' values before us and the WiFi client's hold (cleanup)
+CTRL_DIR = RUN + "/hostapd"
+WLAN = "wlan0"
+AP = "ap0"
+USB_IFACE = "tether0"
+DEV_NET = "usb0"
+AIRPLANE = "/var/lib/duo2/airplane"
+WAYDROID_NFT = "/etc/duo2/waydroid/firewall.nft"
+AP_START_TIMEOUT = 15.0
+LEASE_REFRESH = (3, 12, 40)  # s after a device joins: its DHCP lease and name
+NETLINK_GROUPS = 0x1 | 0x10 | 0x40 | 0x100 | 0x400 | (1 << 23) | (1 << 24)
+
+
+def log(*a):
+    print(*a, flush=True)
+
+
+def unlink(path):
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+class Fail(Exception):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+class Sys:
+    """Everything done to the system (tests: a stand-in that records)."""
+
+    def run(self, argv, input=None, timeout=20):
+        try:
+            p = subprocess.run(argv, input=input, capture_output=True, text=True, timeout=timeout)
+            return p.returncode, p.stdout, p.stderr
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return 127, "", str(e)
+
+    def json(self, argv):
+        rc, out, _err = self.run(argv)
+        if rc != 0:
+            return None
+        try:
+            return json.loads(out or "null")
+        except ValueError:
+            return None
+
+    def read(self, path):
+        try:
+            with open(path) as f:
+                return f.read()
+        except OSError:
+            return None
+
+    def write(self, path, text, mode=0o644):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+
+    def sysctl(self, path, value=None):
+        """Read (value None) or write a /proc/sys switch; None if absent."""
+        try:
+            if value is None:
+                with open(path) as f:
+                    return f.read().strip()
+            with open(path, "w") as f:
+                f.write(value)
+            return value
+        except OSError:
+            return None
+
+    def remove(self, path):
+        try:
+            os.unlink(path)
+            return True
+        except OSError:
+            return False
+
+    def exists(self, path):
+        return os.path.exists(path)
+
+    def spawn(self, argv):
+        return subprocess.Popen(
+            argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL
+        )
+
+    def sleep(self, s):
+        time.sleep(s)
+
+    def monotonic(self):
+        return time.monotonic()
+
+    def now(self):
+        return time.time()
+
+    def rfkill_blocked(self, kind="wlan"):
+        root = "/sys/class/rfkill"
+        try:
+            for e in os.listdir(root):
+                if (self.read(os.path.join(root, e, "type")) or "").strip() == kind:
+                    return (self.read(os.path.join(root, e, "soft")) or "0").strip() == "1"
+        except OSError:
+            pass
+        return None
+
+    def rfkill(self, kind, block):
+        root = "/sys/class/rfkill"
+        try:
+            for e in os.listdir(root):
+                if (self.read(os.path.join(root, e, "type")) or "").strip() == kind:
+                    with open(os.path.join(root, e, "soft"), "w") as f:
+                        f.write("1" if block else "0")
+        except OSError as e:
+            log("duo2-hotspot: rfkill: %s" % e)
+
+
+class Hotspot:
+    def __init__(self, sysobj=None, gadget=None, relay_factory=None, quit=None):
+        self.sys = sysobj or Sys()
+        self.gadget = gadget or Gadget()
+        self.relay_factory = relay_factory
+        self.quit = quit or (lambda: None)
+        self.salt = os.urandom(8)
+        self.wifi = None
+        self.usb = None
+        self.uplink = None
+        self.uplink_v6 = False
+        self.nft = None
+        self.saved_sysctls = {}
+        self.relay = None
+        self.relay_addrs = ()
+        self.inhibit_fd = None
+        self.result = None
+        self.request = None
+        self.client_request = None
+        self.clients = []
+        self.idle_timer = 0
+        self.idle_at = None
+        self.lease_timers = []
+        self.last_state = None
+        self.load_settings()
+
+    # -- settings -------------------------------------------------------------------
+
+    def load_settings(self):
+        self.admin = conf.merged(conf.ADMIN_DEFAULTS, conf.parse_kv(self.sys.read(conf.ADMIN_CONF)))
+        self.user = conf.merged(conf.USER_DEFAULTS, conf.parse_kv(self.sys.read(conf.SETTINGS)))
+        self.password = (self.sys.read(conf.PASSWORD) or "").strip()
+
+    def ap_key(self):
+        return (
+            self.user["SSID"],
+            self.user["BAND"],
+            self.user["SECURITY"],
+            hashlib.sha256(self.password.encode()).hexdigest(),
+        )
+
+    def never_cut(self):
+        return conf.yes(self.admin["NEVER_CUT_WIFI"])
+
+    def may_cut(self):
+        return self.user["WIFI_CLIENT"] == "ask" and not self.never_cut()
+
+    # -- the request ----------------------------------------------------------------
+
+    def reconcile(self):
+        """What is wanted, done (start, SIGHUP)."""
+        want = state.read_json(state.WANT)
+        self.load_settings()
+        self.request = want.get("request")
+        self.result = {"ok": True}
+        if want.get("wifi"):
+            inherited = None
+            if self.wifi is not None and self.wifi["key"] != self.ap_key():
+                log("duo2-hotspot: the hotspot's settings changed: the access point starts again")
+                inherited = self.wifi["hold"]
+                self.stop_wifi("settings", restore_client=False)
+            if self.wifi is None:
+                self._try("wifi", lambda: self.start_wifi(bool(want.get("wifi_off")), inherited))
+                if self.wifi is None and inherited:
+                    self.restore_client(inherited)
+            elif want.get("client_on") and want.get("client_on") != self.client_request:
+                self.client_request = want.get("client_on")
+                self.client_on()
+        elif self.wifi is not None:
+            self.stop_wifi("off")
+        if want.get("usb"):
+            if self.usb is None:
+                self._try("usb", lambda: self.start_usb(bool(want.get("usb_force"))))
+        elif self.usb is not None:
+            self.stop_usb("off")
+        self.apply_shared()
+        self.write_state()
+        if self.wifi is None and self.usb is None:
+            self.quit()
+
+    def _try(self, part, fn):
+        try:
+            fn()
+        except Fail as f:
+            log("duo2-hotspot: %s not started (%s): %s" % (part, f.code, f.message))
+            self.result = {"ok": False, "code": f.code, "error": f.message, "part": part}
+            self._want_off(wifi=part == "wifi", usb=part == "usb")
+
+    def _want_off(self, wifi=False, usb=False):
+        want = state.read_json(state.WANT)
+        if wifi:
+            want["wifi"] = False
+            want.pop("wifi_off", None)
+        if usb:
+            want["usb"] = False
+            want.pop("usb_force", None)
+        state.write_json(state.WANT, want, 0o600)
+
+    # -- WiFi -------------------------------------------------------------------------
+
+    def phy_name(self):
+        name = (self.sys.read("/sys/class/net/%s/phy80211/name" % WLAN) or "").strip()
+        if not name:
+            raise Fail("no-wifi", "The WiFi chip is not there.")
+        return name
+
+    def start_wifi(self, wifi_off, inherited=None):
+        if (self.sys.read(AIRPLANE) or "").strip() == "on":
+            raise Fail("airplane", "Airplane mode is on.")
+        if not self.sys.exists(HOSTAPD):
+            raise Fail("no-hostapd", "hostapd is not installed (apt install hostapd).")
+        if not conf.valid_password(self.password) or not conf.valid_ssid(self.user["SSID"]):
+            raise Fail("settings", "No name or password yet (duo2-hotspot status makes them).")
+        phyname = self.phy_name()
+        _rc, info, _e = self.sys.run(["iw", "phy", phyname, "info"])
+        phy = wifi.parse_phy(info)
+        if "AP" not in phy["modes"]:
+            raise Fail("no-ap-mode", "The WiFi chip offers no access point mode.")
+        blocked = self.sys.rfkill_blocked("wlan")
+        connected, sta = False, None
+        if blocked is False:
+            _rc, out, _e = self.sys.run(["iw", "dev", WLAN, "link"])
+            connected = wifi.parse_link(out)["connected"]
+            if connected:
+                _rc, out, _e = self.sys.run(["iw", "dev", WLAN, "info"])
+                sta = wifi.parse_dev_info(out)
+                if sta is None:
+                    raise Fail("no-sta-channel", "The WiFi connection's channel is not known.")
+        hold = None  # what is done to the phone's own WiFi client
+        if blocked:
+            hold = "radio"  # switched off by the user: it stays off as a client
+        elif inherited and not connected:
+            hold = inherited  # a restart for new settings: held as before
+        elif connected and wifi_off:
+            if not self.may_cut():
+                raise Fail(
+                    "cut-not-allowed",
+                    "Switching the WiFi connection off for the hotspot is not "
+                    "allowed (%s)." % ("development mode" if self.never_cut() else "the setting"),
+                )
+            hold = "cut"
+        band = self.user["BAND"]
+        chan = self.admin["CHANNEL_5"] if band == "5" else self.admin["CHANNEL_24"]
+        other = (
+            [("2.4", self.admin["CHANNEL_24"])] if band == "5" else [("5", self.admin["CHANNEL_5"])]
+        )
+        cd, how = wifi.plan_channel(
+            phy,
+            band,
+            sta if hold is None and connected else None,
+            chan,
+            conf.yes(self.admin["OTHER_CHANNEL"]),
+            other,
+        )
+        if cd is None:
+            if connected and hold is None:
+                if self.may_cut():
+                    raise Fail(
+                        "needs-wifi-off",
+                        "The hotspot cannot run beside this WiFi connection: "
+                        "switch WiFi off for it?",
+                    )
+                raise Fail(
+                    "channel-not-shared",
+                    "The hotspot cannot run beside this WiFi connection (%s)." % how,
+                )
+            raise Fail("no-channel", "No WiFi channel may be used for an access point here.")
+        log(
+            "duo2-hotspot: access point on %s GHz channel %d, %d MHz (%s%s)"
+            % (
+                cd["band"],
+                cd["chan"],
+                cd["width"],
+                how,
+                {"radio": ", WiFi client off (it was)", "cut": ", WiFi client disconnected"}.get(
+                    hold, ""
+                ),
+            )
+        )
+
+        down = None
+        proc = None
+        if self.sys.exists("/sys/class/net/%s" % AP):
+            log("duo2-hotspot: an access point interface was left over: removed")
+            self.sys.run(["iw", "dev", AP, "del"])
+        try:
+            if hold:
+                self.sys.run(["wpa_cli", "-i", WLAN, "disconnect"])
+            if hold == "radio":
+                self.sys.rfkill("wlan", False)
+                self.sys.sleep(1.0)
+            down = self.make_downstream(AP, "SUBNETS_WIFI", 1)
+            self.sys.write(netplan.network_path(AP), netplan.network_file(down))
+            self.sys.run(["networkctl", "reload"])
+            self.sys.write(netplan.LINK_FILE, netplan.link_file(AP))
+            self.sys.run(["udevadm", "control", "--reload"])
+            rc, _o, err = self.sys.run(
+                ["iw", "phy", phyname, "interface", "add", AP, "type", "__ap"]
+            )
+            if rc != 0:
+                raise Fail(
+                    "concurrent-failed" if connected and hold is None else "iface",
+                    "The access point interface could not be made: %s" % err.strip()[:120],
+                )
+            self.sys.run(["udevadm", "settle", "--timeout=5"])
+            self.sys.write(
+                HOSTAPD_CONF,
+                wifi.hostapd_conf(
+                    AP,
+                    CTRL_DIR,
+                    self.user["SSID"],
+                    self.password,
+                    self.user["SECURITY"],
+                    cd,
+                    phy,
+                    int(self.admin["MAX_CLIENTS"] or 8),
+                ),
+                0o600,
+            )
+            os.makedirs(CTRL_DIR, mode=0o700, exist_ok=True)
+            proc = self.sys.spawn([HOSTAPD, HOSTAPD_CONF])
+            self.wait_enabled(proc, connected and hold is None)
+        except Fail:
+            self.undo_wifi(proc, down is not None, hold)
+            raise
+        except OSError as e:
+            self.undo_wifi(proc, down is not None, hold)
+            raise Fail("iface", "The access point did not start: %s" % e) from e
+        self.wifi = {
+            "proc": proc,
+            "down": down,
+            "cd": cd,
+            "how": how,
+            "hold": hold,
+            "key": self.ap_key(),
+            "phy": phyname,
+            "events": None,
+            "requests": None,
+            "watches": {},
+        }
+        self.save()
+        self.watch_hostapd()
+        self.refresh_stations()
+        self.arm_idle()
+
+    def make_downstream(self, iface, key, index):
+        addrs = self.sys.json(["ip", "-j", "addr"]) or []
+        routes = self.sys.json(["ip", "-j", "route", "show", "table", "all"]) or []
+        mine = [
+            d["net4"] for d in (self.wifi and self.wifi["down"], self.usb and self.usb["down"]) if d
+        ]
+        net4 = netplan.pick_subnet(
+            conf.subnets(self.admin[key]), netplan.used_networks(addrs, routes), mine
+        )
+        if net4 is None:
+            raise Fail("subnet", "Every hotspot subnet (%s) is in use." % key)
+        ula = None
+        if self.admin["IPV6"] == "nat66":
+            ula = conf.ula_from_seed(self.ula_seed())
+        return netplan.downstream(iface, net4, ula, index)
+
+    def ula_seed(self):
+        seed = self.sys.read(conf.ULA_SEED)
+        if seed and len(seed.strip()) == 10:
+            try:
+                return bytes.fromhex(seed.strip())
+            except ValueError:
+                pass
+        b = os.urandom(5)
+        self.sys.write(conf.ULA_SEED, b.hex() + "\n", 0o600)
+        return b
+
+    def wait_enabled(self, proc, concurrent):
+        """hostapd up (its control socket says ENABLED) or a Fail."""
+        deadline = self.sys.monotonic() + AP_START_TIMEOUT
+        ctrl = None
+        try:
+            while self.sys.monotonic() < deadline:
+                self.drain_output(proc)
+                if proc.poll() is not None:
+                    raise Fail(
+                        "concurrent-failed" if concurrent else "hostapd",
+                        "hostapd stopped while starting (exit %s)" % proc.returncode,
+                    )
+                if ctrl is None and self.sys.exists(os.path.join(CTRL_DIR, AP)):
+                    try:
+                        from duo2hotspot.ctrl import Ctrl
+
+                        ctrl = Ctrl(os.path.join(CTRL_DIR, AP), RUN)
+                    except OSError:
+                        ctrl = None
+                if ctrl is not None:
+                    try:
+                        st = ctrl.request("STATUS")
+                    except OSError:
+                        st = ""
+                    if "state=ENABLED" in st:
+                        return
+                self.sys.sleep(0.25)
+            raise Fail(
+                "concurrent-failed" if concurrent else "hostapd",
+                "hostapd did not start the access point within %d s" % AP_START_TIMEOUT,
+            )
+        finally:
+            if ctrl is not None:
+                ctrl.close()
+
+    def drain_output(self, proc):
+        out = getattr(proc, "stdout", None)
+        if out is None:
+            return
+        try:
+            os.set_blocking(out.fileno(), False)
+            data = out.read()
+        except (OSError, ValueError):
+            data = None
+        if data:
+            for line in data.decode("utf-8", "replace").splitlines():
+                if line.strip():
+                    log("hostapd: " + wifi.mask_macs(line, self.salt))
+
+    def undo_wifi(self, proc, network_written, hold):
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        if proc is not None:
+            self.drain_output(proc)
+        self.sys.run(["iw", "dev", AP, "del"])
+        if network_written:
+            self.sys.remove(netplan.network_path(AP))
+            self.sys.run(["networkctl", "reload"])
+        self.sys.remove(netplan.LINK_FILE)
+        self.sys.run(["udevadm", "control", "--reload"])
+        self.sys.remove(HOSTAPD_CONF)
+        self.restore_client(hold)
+
+    def restore_client(self, hold):
+        if hold == "radio":
+            self.sys.rfkill("wlan", True)
+            self.sys.run(["wpa_cli", "-i", WLAN, "reconnect"])
+        elif hold == "cut":
+            self.sys.run(["wpa_cli", "-i", WLAN, "reconnect"])
+
+    def stop_wifi(self, reason, restore_client=True):
+        w, self.wifi = self.wifi, None
+        if w is None:
+            return
+        for wid in w["watches"].values():
+            GLib.source_remove(wid)
+        for c in (w["events"], w["requests"]):
+            if c is not None:
+                c.close()
+        self.cancel_idle()
+        for t in self.lease_timers:
+            GLib.source_remove(t)
+        self.lease_timers = []
+        hold = w["hold"]
+        log("duo2-hotspot: access point off (%s)" % reason)
+        self.undo_wifi(w["proc"], True, hold if restore_client else None)
+        self.clients = [c for c in self.clients if c["via"] != "wifi"]
+
+    def client_on(self):
+        """The user switched the phone's own WiFi on while the hotspot held it."""
+        w = self.wifi
+        if w is None or not w["hold"]:
+            return
+        if w["hold"] == "radio" and conf.yes(self.admin["OTHER_CHANNEL"]):
+            log("duo2-hotspot: WiFi client back on beside the access point")
+            self.sys.run(["wpa_cli", "-i", WLAN, "reconnect"])
+            w["hold"] = None
+            self.save()
+        else:
+            self.stop_wifi("the WiFi connection comes first")
+            self._want_off(wifi=True)
+
+    def watch_hostapd(self):
+        from duo2hotspot.ctrl import Ctrl
+
+        w = self.wifi
+        try:
+            w["events"] = Ctrl(os.path.join(CTRL_DIR, AP), RUN)
+            w["events"].request("ATTACH")
+            w["requests"] = Ctrl(os.path.join(CTRL_DIR, AP), RUN)
+        except OSError as e:
+            log("duo2-hotspot: hostapd's control socket: %s" % e)
+        if w["events"] is not None:
+            w["watches"]["events"] = GLib.io_add_watch(
+                w["events"].fileno(), GLib.PRIORITY_DEFAULT, GLib.IO_IN, self._hostapd_event
+            )
+        out = getattr(w["proc"], "stdout", None)
+        if out is not None:
+            os.set_blocking(out.fileno(), False)
+            w["watches"]["output"] = GLib.io_add_watch(
+                out.fileno(), GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_HUP, self._hostapd_output
+            )
+        w["watches"]["child"] = GLib.child_watch_add(
+            GLib.PRIORITY_DEFAULT, w["proc"].pid, self._hostapd_exited
+        )
+
+    def _hostapd_output(self, _fd, cond):
+        w = self.wifi
+        if w is None:
+            return False
+        self.drain_output(w["proc"])
+        if cond & GLib.IO_HUP:
+            w["watches"].pop("output", None)
+            return False
+        return True
+
+    def _hostapd_exited(self, pid, status):
+        w = self.wifi
+        if w is not None and w["proc"].pid == pid:
+            w["watches"].pop("child", None)  # gone with this call
+            log("duo2-hotspot: hostapd ended (status %d)" % status)
+            self.stop_wifi("hostapd ended")
+            self._want_off(wifi=True)
+            self.result = {"ok": False, "code": "hostapd", "error": "The access point stopped."}
+            self.after_change()
+
+    def _hostapd_event(self, _fd, _cond):
+        w = self.wifi
+        if w is None or w["events"] is None:
+            return False
+        changed = False
+        while True:
+            msg = w["events"].recv_event()
+            if msg is None:
+                break
+            name, _mac = wifi.parse_event(msg)
+            if name in ("AP-STA-CONNECTED", "AP-STA-DISCONNECTED"):
+                changed = True
+            elif name in ("AP-DISABLED", "CTRL-EVENT-TERMINATING"):
+                log("duo2-hotspot: hostapd: %s" % name)
+                w["watches"].pop("events", None)  # this source ends with False
+                self.stop_wifi(name)
+                self._want_off(wifi=True)
+                self.after_change()
+                return False
+        if changed:
+            self.refresh_stations()
+            for t in self.lease_timers:
+                GLib.source_remove(t)
+            self.lease_timers = []
+            for s_ in LEASE_REFRESH:
+                self.lease_timers.append(GLib.timeout_add_seconds(s_, self._lease_tick, s_))
+        return True
+
+    def _lease_tick(self, _s):
+        src = GLib.main_current_source()
+        if src is not None and src.get_id() in self.lease_timers:
+            self.lease_timers.remove(src.get_id())
+        self.refresh_stations()
+        return False
+
+    def refresh_stations(self):
+        stations = []
+        w = self.wifi
+        if w is not None and w["requests"] is not None:
+            try:
+                stations = w["requests"].stations()
+            except OSError:
+                stations = []
+        leases = {
+            "wifi": self.leases(AP) if w is not None else [],
+            "usb": self.leases(USB_IFACE) if self.usb is not None else [],
+        }
+        before = len([c for c in self.clients if c["via"] == "wifi"])
+        self.clients = state.clients(stations, leases, self.sys.now())
+        now = len([c for c in self.clients if c["via"] == "wifi"])
+        if now != before:
+            log("duo2-hotspot: %d device(s) on the WiFi hotspot" % now)
+        self.arm_idle()
+        self.write_state()
+
+    def leases(self, iface):
+        return state.parse_leases(
+            self.sys.json(["networkctl", "--json=short", "status", iface]) or {}
+        )
+
+    # -- the automatic off --------------------------------------------------------------
+
+    def arm_idle(self):
+        minutes = int(self.user.get("IDLE_OFF_MIN") or 0)
+        wifi_clients = [c for c in self.clients if c["via"] == "wifi"]
+        if self.wifi is None or minutes <= 0 or wifi_clients:
+            self.cancel_idle()
+            return
+        if self.idle_timer:
+            return
+        self.idle_at = int(self.sys.now() + minutes * 60)
+        self.idle_timer = GLib.timeout_add_seconds(minutes * 60, self._idle_off)
+
+    def cancel_idle(self):
+        if self.idle_timer:
+            GLib.source_remove(self.idle_timer)
+        self.idle_timer = 0
+        self.idle_at = None
+
+    def _idle_off(self):
+        self.idle_timer = 0
+        self.idle_at = None
+        log("duo2-hotspot: no device for %s min: off" % self.user.get("IDLE_OFF_MIN"))
+        self.stop_wifi("no device")
+        self._want_off(wifi=True)
+        self.after_change()
+        return False
+
+    def after_change(self):
+        self.apply_shared()
+        self.write_state()
+        if self.wifi is None and self.usb is None:
+            self.quit()
+
+    # -- USB ----------------------------------------------------------------------------
+
+    def start_usb(self, force):
+        g = self.gadget
+        if not g.present() or not g.udc():
+            raise Fail("no-gadget", "The phone's USB gadget is not there (or not bound).")
+        if not force:
+            dev = [
+                a.get("local")
+                for link in (self.sys.json(["ip", "-j", "addr", "show", "dev", DEV_NET]) or [])
+                for a in link.get("addr_info") or []
+                if a.get("local")
+            ]
+            _rc, ss, _e = self.sys.run(["ss", "-Htn", "state", "established"])
+            if ssh_over(ss, set(dev)):
+                raise Fail(
+                    "usb-ssh",
+                    "An ssh session runs over the USB development link: it would drop for "
+                    "a moment. Use --force to go on.",
+                )
+        down = self.make_downstream(USB_IFACE, "SUBNETS_USB", 2)
+        self.sys.write(netplan.network_path(USB_IFACE), netplan.network_file(down))
+        self.sys.run(["networkctl", "reload"])
+        dev_addr, host_addr = macs(self.sys.read("/etc/machine-id") or "")
+        try:
+            g.add(dev_addr, host_addr)
+        except (GadgetError, OSError) as e:
+            self.sys.remove(netplan.network_path(USB_IFACE))
+            self.sys.run(["networkctl", "reload"])
+            raise Fail("usb", str(e)) from e
+        name = (g.netdev() or USB_IFACE).strip()
+        if name != USB_IFACE:
+            log("duo2-hotspot: the USB function's device is %s, not %s" % (name, USB_IFACE))
+        log("duo2-hotspot: USB tethering on (the USB connection was re-plugged)")
+        self.usb = {"down": down, "iface": name}
+
+    def stop_usb(self, reason):
+        u, self.usb = self.usb, None
+        if u is None:
+            return
+        try:
+            self.gadget.remove()
+        except (GadgetError, OSError) as e:
+            log("duo2-hotspot: removing the USB function: %s" % e)
+        self.sys.remove(netplan.network_path(USB_IFACE))
+        self.sys.run(["networkctl", "reload"])
+        self.clients = [c for c in self.clients if c["via"] != "usb"]
+        log("duo2-hotspot: USB tethering off (%s)" % reason)
+
+    # -- what both share ----------------------------------------------------------------
+
+    def downs(self):
+        return [x["down"] for x in (self.wifi, self.usb) if x is not None]
+
+    def apply_shared(self):
+        downs = self.downs()
+        if not downs:
+            self.teardown_shared()
+            return
+        links = self.sys.json(["ip", "-j", "link"]) or []
+        addrs = self.sys.json(["ip", "-j", "addr"]) or []
+        routes = (self.sys.json(["ip", "-j", "route", "show", "default"]) or []) + (
+            self.sys.json(["ip", "-j", "-6", "route", "show", "default"]) or []
+        )
+        uplink = netplan.find_uplink(links, addrs, routes, self.admin["UPLINKS"])
+        v6 = bool(uplink) and netplan.has_v6(addrs, uplink) and self.admin["IPV6"] == "nat66"
+        if (uplink, v6) != (self.uplink, self.uplink_v6):
+            log(
+                "duo2-hotspot: mobile data %s"
+                % (
+                    ("on %s%s" % (uplink, " (IPv4 + IPv6)" if v6 else " (IPv4)"))
+                    if uplink
+                    else "not there: the devices have no internet"
+                )
+            )
+            for cmd in netplan.table_flush_cmds():
+                self.sys.run(cmd)
+            for cmd in netplan.table_cmds(uplink, v6):
+                self.sys.run(cmd)
+            self.uplink, self.uplink_v6 = uplink, v6
+        rules = self.sys.json(["ip", "-j", "-4", "rule", "show"]) or []
+        rules6 = self.sys.json(["ip", "-j", "-6", "rule", "show"]) or []
+        for d in downs:
+            for cmd, have in zip(netplan.rule_cmds(d["iface"]), (rules, rules6)):
+                if not netplan.rules_present(have, d["iface"]):
+                    self.sys.run(cmd)
+        ruleset = netplan.nft_ruleset(downs, [uplink] if uplink else [])
+        if ruleset != self.nft:
+            rc, _o, err = self.sys.run(["nft", "-f", "-"], input=ruleset)
+            if rc != 0:
+                log("duo2-hotspot: nft: %s" % err.strip()[:300])
+            else:
+                self.nft = ruleset
+            self.waydroid_exception()
+        for path, value in netplan.sysctls(downs, uplink):
+            self.set_sysctl(path, value)
+        if uplink:
+            fix = netplan.rp_filter_fix(
+                self.sys.sysctl("/proc/sys/net/ipv4/conf/all/rp_filter"),
+                self.sys.sysctl("/proc/sys/net/ipv4/conf/%s/rp_filter" % uplink),
+            )
+            if fix:
+                self.set_sysctl("/proc/sys/net/ipv4/conf/%s/rp_filter" % uplink, fix)
+        want_addrs = tuple(
+            sorted(str(a) for d in downs for a in (d["addr4"], d["addr6"]) if a is not None)
+        )
+        if want_addrs != self.relay_addrs:
+            if self.relay is not None:
+                self.relay.close()
+            self.relay = self.relay_factory(list(want_addrs)) if self.relay_factory else None
+            self.relay_addrs = want_addrs
+        if self.inhibit_fd is None:
+            self.inhibit_fd = self.inhibit()
+
+    def set_sysctl(self, path, value):
+        cur = self.sys.sysctl(path)
+        if cur is None:
+            return  # no such switch (an older kernel: force_forwarding)
+        if path not in self.saved_sysctls:
+            self.saved_sysctls[path] = cur
+            self.save()
+        if cur != value:
+            self.sys.sysctl(path, value)
+
+    def save(self):
+        """What a crash would leave behind, for `duo2-hotspotd --cleanup`
+        (the unit's ExecStopPost): the switches' old values, the client's hold."""
+        hold = self.wifi["hold"] if self.wifi is not None else None
+        try:
+            state.write_json(SAVED, {"sysctls": self.saved_sysctls, "hold": hold}, 0o600)
+        except OSError as e:
+            log("duo2-hotspot: %s: %s" % (SAVED, e))
+
+    def waydroid_exception(self):
+        """The Waydroid table drops all forwarding but its own; a table loaded
+        before the hotspot knew about the mark is loaded again from its file
+        (it replaces itself; nothing else of it changes)."""
+        rc, out, _e = self.sys.run(["nft", "list", "table", "inet", "duo2_waydroid"])
+        if rc != 0:
+            return
+        if ("0x%08x" % netplan.MARK) in out or ("0x%x" % netplan.MARK) in out:
+            return
+        text = self.sys.read(WAYDROID_NFT) or ""
+        if "0x%08x" % netplan.MARK not in text:
+            log(
+                "duo2-hotspot: Android's firewall (duo2_waydroid) blocks the hotspot's traffic "
+                "and its file has no exception: update android/firewall.nft"
+            )
+            return
+        rc, _o, err = self.sys.run(["nft", "-f", WAYDROID_NFT])
+        log(
+            "duo2-hotspot: Android's firewall table loaded again with the hotspot's exception%s"
+            % ("" if rc == 0 else ": " + err.strip()[:200])
+        )
+
+    def teardown_shared(self):
+        if self.nft is not None:
+            self.sys.run(["nft", "-f", "-"], input=netplan.nft_teardown())
+            self.nft = None
+        for iface in (AP, USB_IFACE):
+            for cmd in netplan.rule_cmds(iface, add=False):
+                self.sys.run(cmd)
+        for cmd in netplan.table_flush_cmds():
+            self.sys.run(cmd)
+        self.uplink, self.uplink_v6 = None, False
+        for path, value in self.saved_sysctls.items():
+            if self.sys.sysctl(path) not in (None, value):
+                self.sys.sysctl(path, value)
+        self.saved_sysctls = {}
+        unlink(SAVED)
+        if self.relay is not None:
+            self.relay.close()
+            self.relay = None
+        self.relay_addrs = ()
+        if self.inhibit_fd is not None:
+            try:
+                os.close(self.inhibit_fd)
+            except OSError:
+                pass
+            self.inhibit_fd = None
+
+    def inhibit(self):
+        """A logind sleep inhibitor (block): duo2-autosleep keeps the phone
+        awake while it is held (an access point cannot serve asleep)."""
+        try:
+            bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+            res, fds = bus.call_with_unix_fd_list_sync(
+                "org.freedesktop.login1",
+                "/org/freedesktop/login1",
+                "org.freedesktop.login1.Manager",
+                "Inhibit",
+                GLib.Variant("(ssss)", ("sleep", "duo2-hotspot", "Sharing mobile data", "block")),
+                GLib.VariantType("(h)"),
+                Gio.DBusCallFlags.NONE,
+                -1,
+                None,
+                None,
+            )
+            return fds.get(res.unpack()[0])
+        except (GLib.Error, AttributeError, TypeError) as e:
+            log("duo2-hotspot: no sleep inhibitor: %s" % getattr(e, "message", e))
+            return None
+
+    # -- the state file -----------------------------------------------------------------
+
+    def settings_view(self):
+        return {
+            "ssid": self.user["SSID"],
+            "band": self.user["BAND"],
+            "security": self.user["SECURITY"],
+            "wifi_client": self.user["WIFI_CLIENT"],
+            "idle_off_min": int(self.user["IDLE_OFF_MIN"] or 0),
+            "use_5g": conf.yes(self.user["USE_5G"]),
+            "never_cut_wifi": self.never_cut(),
+        }
+
+    def write_state(self):
+        st = state.off_state()
+        st["settings"] = self.settings_view()
+        w, u = self.wifi, self.usb
+        if w is not None or u is not None:
+            st["state"] = "on"
+        if w is not None:
+            cd = w["cd"]
+            st["wifi"] = {
+                "iface": AP,
+                "band": cd["band"],
+                "channel": cd["chan"],
+                "width": cd["width"],
+                "how": w["how"],
+                "client": w["hold"] or ("kept" if w["how"] in ("shared", "second") else None),
+                "ssid": self.user["SSID"],
+                "security": self.user["SECURITY"],
+            }
+        if u is not None:
+            carrier = (self.sys.read("/sys/class/net/%s/carrier" % u["iface"]) or "").strip() == "1"
+            st["usb"] = {"iface": u["iface"], "host": carrier}
+        st["clients"] = self.clients
+        st["client_count"] = len(self.clients)
+        st["uplink"] = {"iface": self.uplink, "ipv6": self.uplink_v6} if self.uplink else None
+        st["use_5g"] = bool(self.clients) and conf.yes(self.user["USE_5G"])
+        st["idle_off_at"] = self.idle_at
+        if self.request:
+            st["request"] = self.request
+            st["result"] = self.result
+        if st == self.last_state:
+            return  # the same again (a netlink change of ours): readers are not woken
+        self.last_state = dict(st)
+        st["updated"] = int(self.sys.now())
+        state.write_json(state.STATE, st)
+
+    # -- the end ------------------------------------------------------------------------
+
+    def shutdown(self, reason="stopped"):
+        self.stop_wifi(reason)
+        self.stop_usb(reason)
+        self.teardown_shared()
+        st = state.off_state(reason=reason)
+        st["settings"] = self.settings_view()
+        if self.request:
+            st["request"] = self.request
+            st["result"] = self.result
+        st["updated"] = int(self.sys.now())
+        state.write_json(state.STATE, st)
+
+
+class NetWatch:
+    """rtnetlink: links, addresses, routes, forwarding switches: any change
+    -> changed() once things are quiet for 0.5 s."""
+
+    def __init__(self, changed):
+        self.changed = changed
+        self.sock = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, socket.NETLINK_ROUTE)
+        self.sock.bind((0, NETLINK_GROUPS))
+        self.sock.setblocking(False)
+        self.timer = 0
+        self.watch = GLib.io_add_watch(
+            self.sock.fileno(), GLib.PRIORITY_DEFAULT, GLib.IO_IN, self._readable
+        )
+
+    def _readable(self, *_a):
+        try:
+            while self.sock.recv(65536):
+                pass
+        except (BlockingIOError, InterruptedError):
+            pass
+        except OSError:
+            pass
+        if self.timer:
+            GLib.source_remove(self.timer)
+        self.timer = GLib.timeout_add(500, self._fire)
+        return True
+
+    def _fire(self):
+        self.timer = 0
+        self.changed()
+        return False
+
+
+def cleanup(sysobj=None, gadget=None):
+    """After the daemon (the unit's ExecStopPost, or by hand): whatever a
+    crash left is removed and put back. Idempotent; after a clean stop it
+    finds nothing to do."""
+    sy = sysobj or Sys()
+    did = []
+    saved = state.read_json(SAVED)
+    rc, _o, _e = sy.run(["nft", "list", "table", "inet", netplan.NFT_TABLE])
+    if rc == 0:
+        sy.run(["nft", "-f", "-"], input=netplan.nft_teardown())
+        did.append("table")
+    rules = (sy.json(["ip", "-j", "-4", "rule", "show"]) or []) + (
+        sy.json(["ip", "-j", "-6", "rule", "show"]) or []
+    )
+    for iface in (AP, USB_IFACE):
+        if netplan.rules_present(rules, iface):
+            for cmd in netplan.rule_cmds(iface, add=False):
+                sy.run(cmd)
+            did.append("rules")
+    for cmd in netplan.table_flush_cmds():
+        sy.run(cmd)
+    if sy.exists("/sys/class/net/%s" % AP):
+        sy.run(["iw", "dev", AP, "del"])
+        did.append(AP)
+    g = gadget or Gadget()
+    try:
+        if g.active():
+            g.remove()
+            did.append("usb")
+    except (GadgetError, OSError) as e:
+        log("duo2-hotspot: cleanup: the USB function: %s" % e)
+    files = [
+        netplan.network_path(AP),
+        netplan.network_path(USB_IFACE),
+        netplan.LINK_FILE,
+        HOSTAPD_CONF,
+    ]
+    removed = [f for f in files if sy.remove(f)]
+    if any(f.endswith(".network") for f in removed):
+        sy.run(["networkctl", "reload"])
+    if netplan.LINK_FILE in removed:
+        sy.run(["udevadm", "control", "--reload"])
+    for path, value in (saved.get("sysctls") or {}).items():
+        if sy.sysctl(path) not in (None, value):
+            sy.sysctl(path, value)
+            did.append("switches")
+    hold = saved.get("hold")
+    if hold == "radio":
+        sy.rfkill("wlan", True)
+    if hold in ("radio", "cut"):
+        sy.run(["wpa_cli", "-i", WLAN, "reconnect"])
+        did.append("wifi client")
+    unlink(SAVED)
+    if did:
+        log("duo2-hotspot: cleanup after the daemon: %s" % ", ".join(sorted(set(did))))
+        st = state.off_state(reason="cleanup")
+        st["updated"] = int(sy.now())
+        state.write_json(state.STATE, st)
+    return did
+
+
+def main():
+    if sys.argv[1:] == ["--cleanup"]:
+        cleanup()
+        return 0
+    os.umask(0o022)
+    os.makedirs(RUN, mode=0o700, exist_ok=True)
+    loop = GLib.MainLoop()
+
+    def relay(addrs):
+        from duo2hotspot.dnsrelay import Relay
+
+        return Relay(addrs, log=log)
+
+    hs = Hotspot(relay_factory=relay, quit=lambda: GLib.idle_add(loop.quit))
+
+    def netchange():
+        if hs.wifi is not None and not os.path.exists("/sys/class/net/%s" % AP):
+            hs.stop_wifi("the access point interface is gone")
+            hs._want_off(wifi=True)
+        hs.after_change()
+
+    try:
+        NetWatch(netchange)
+    except OSError as e:
+        log(
+            "duo2-hotspot: no netlink watch (%s): the mobile data device is looked up at changes only"
+            % e
+        )
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGHUP, lambda: hs.reconcile() or True)
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, lambda: loop.quit() or False)
+    try:
+        hs.reconcile()
+        if hs.wifi is not None or hs.usb is not None:
+            loop.run()
+    finally:
+        hs.shutdown()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

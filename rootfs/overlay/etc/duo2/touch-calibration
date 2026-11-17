@@ -1,0 +1,22 @@
+# duo2-touchd: per-panel correction of Microsoft's heat processor output,
+# applied in the panel's normalised coordinates (0..1) BEFORE clamping to the
+# panel: x' = a x + b y + c, y' = d x + e y + f (the form of a libinput
+# calibration matrix). Lines: "left|right a b c d e f".
+#
+# Measured 2026-11-07 with real taps on five targets per panel (10 %/90 %
+# corners and the centre, compositor/duo-wc/tools/touch-calib.py): along x the
+# heat processor stretches both panels by ~4.5 %; the right panel is shifted
+# ~4.7 mm towards the hinge, the left one less and with a slight shear (the x
+# error depends on y). y needed nothing. Until 2026-11-07 these numbers were
+# libinput matrices (90-duo2-touch.rules), applied after duo2-touchd had
+# clamped x to the panel, which made the panels' hinge-side edges unreachable.
+# Refine with touch/tools/touch-edge-targets.py + touch-edge-fit.py.
+#
+# These "left"/"right" lines are for duo2-touchd's split mode. Its stitched
+# mode (/etc/duo2/touch-mode) has two geometries of its own, each with its own
+# lines: "stitched-left"/"stitched-right" (both panels lit: the stock stitched
+# surface) and "single-left"/"single-right" (one panel lit, e.g. folded back).
+# Without lines a geometry gets no correction; touch-edge-fit.py prints the
+# line for the geometry the taps were made in.
+right 0.95703 0       0.05272 0 1 0
+left  0.95651 0.02520 0.00433 0 1 0

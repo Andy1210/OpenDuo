@@ -1,0 +1,47 @@
+#!/bin/sh
+# The sensors' quick switch (run on the phone, as root or with sudo):
+#
+#   duo2-sensors-mode on       duo-posed acts (poses, rotation, the closed
+#                              phone: lock, peek, glance) and duo-wc offers the
+#                              session lock (a swipe unlocks; no PIN is set)
+#   duo2-sensors-mode off      back to logging only; the session lock is off
+#                              (an engaged lock is ended)
+#   duo2-sensors-mode status
+#
+# Both settings are in their config files (they survive a reboot) and are
+# applied live: duo-posed is reloaded, duo-wc is told over its socket.
+set -eu
+POSED=/etc/duo-posed.conf
+WC=/etc/duo-wc/duo-wc.conf
+
+get() { # get FILE KEY: the value, or "-"
+    sed -n "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*\([^#[:space:]]*\).*/\1/p" "$1" 2>/dev/null | tail -1 | grep . || echo -
+}
+set_key() { # set_key FILE KEY VALUE
+    if grep -q "^[[:space:]]*$2[[:space:]]*=" "$1" 2>/dev/null; then
+        sed -i "s/^[[:space:]]*$2[[:space:]]*=.*/$2 = $3/" "$1"
+    else
+        printf '%s = %s\n' "$2" "$3" >>"$1"
+    fi
+}
+wc() { # duoctl as root: duo-wc's admin socket (docs/hardware/security.md)
+    duoctl "$@"
+}
+
+case "${1:-status}" in
+on|off)
+    [ "$(id -u)" = 0 ] || exec sudo "$0" "$@"
+    set_key "$POSED" enabled "$1"
+    set_key "$WC" session_lock "$1"
+    systemctl try-reload-or-restart duo-posed.service || true
+    wc set_session_lock "$1" >/dev/null 2>&1 || true
+    if [ "$1" = off ]; then
+        wc unlock >/dev/null 2>&1 || true
+        wc ambient off >/dev/null 2>&1 || true
+    fi
+    ;;
+status) ;;
+*) echo "usage: duo2-sensors-mode on|off|status" >&2; exit 2 ;;
+esac
+echo "duo-posed enabled: $(get "$POSED" enabled) (auto_pose $(get "$POSED" auto_pose), auto_rotate $(get "$POSED" auto_rotate), forward_posture $(get "$POSED" forward_posture))"
+echo "duo-wc session_lock: $(get "$WC" session_lock)"

@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Back up the phone's data by PULLING it to this machine (a PC, or the host
+# that has the backup share mounted): the other way to duo2-backup's push from the
+# phone (docs/UPDATES.md "Backups"). Logs in as the administrator
+# (scripts/lib/remote.sh, local.env) and reads as root on the phone (sudo
+# rsync), so the phone holds no key of this machine. The same filter as the
+# push (maint/backup.filter); the same layout:
+#
+#   DEST/current/home/USER/...      the home, Android's data in it
+#   DEST/current/staged/system/     /etc + /var/lib/duo2* + BlueZ as a tarball, the package lists
+#   DEST/current/staged/android-owners.nul.gz   Android's owners and modes
+#   DEST/deleted/DATE/              what this run replaced or deleted
+#
+#   scripts/duo2-backup-pull DEST [--dry-run]
+#
+# Needs rsync on the phone (maint/install.sh installs it) and duo2-backup
+# (its "stage"). The phone stays awake while the administrator's ssh is open.
+set -euo pipefail
+. "$(dirname "$0")/lib/remote.sh"
+dest=${1:?usage: $0 DEST [--dry-run]}
+dry=
+[ "${2:-}" = --dry-run ] && dry=--dry-run
+duo2_resolve
+duo2_ssh "sudo /usr/local/sbin/duo2-backup stage"
+mkdir -p "$dest/current"
+date=$(date +%Y-%m-%d_%H%M%S)
+# shellcheck disable=SC2086
+rsync -rlptDH -R --numeric-ids --delete --delete-excluded --backup --backup-dir="../deleted/$date" \
+    --partial-dir=.rsync-partial --filter="merge $R/maint/backup.filter" --stats $dry \
+    -e "ssh -o BatchMode=yes -o ServerAliveInterval=15 $DUO2_SSH_OPTS" --rsync-path="sudo rsync" \
+    "$DUO2_HOST:/./home/$DUO2_USER" ":/var/backups/duo2/backup/./staged" "$dest/current/" |
+    grep -E '^(Number of (files|regular files transferred)|Total (file size|bytes sent|bytes received)):' || true
+echo "into $dest/current (replaced / deleted files: $dest/deleted/$date)"

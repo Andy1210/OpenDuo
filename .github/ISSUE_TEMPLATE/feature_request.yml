@@ -1,0 +1,31 @@
+name: Feature request
+description: An idea for OpenDuo.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What would you like to do?
+      description: The situation or problem, in your own words (not yet the solution).
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: How could OpenDuo help?
+      description: What you have in mind. For the two panels and postures, say which posture you mean.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: What you do today instead, or how other systems solve it.
+  - type: dropdown
+    id: help
+    attributes:
+      label: Would you work on it?
+      options:
+        - "No"
+        - Yes, with some guidance
+        - Yes, I can send a pull request

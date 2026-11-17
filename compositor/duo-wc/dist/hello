@@ -1,0 +1,15 @@
+#!/bin/sh
+# What each panel's terminal shows first, then a login shell.
+printf '\033[1m%s\033[0m - sound, volume keys, browsers, two windows on a panel\n\n' "$(duo-wc --version)"
+printf 'Bottom edge: short swipe up = dock, long = apps, swipe up and hold = windows.\n'
+printf 'Windows: tap = switch, swipe up = close, drag to the inner edge = other panel,\n'
+printf '         drag to a half (or hold, then drag) = two windows on that panel;\n'
+printf '         drag the divider between them, to the edge to end it.\n'
+printf 'Status bar: pull down = quick menu (WiFi, BT, brightness, pose, power).\n'
+printf 'Keyboard: comes up in a text field; the bar button shows / hides it.\n'
+printf 'Power key (short press): both panels off / on. Idle: off after 60 s.\n'
+printf 'Volume keys: speaker volume (also while dark; they do not wake the screen).\n'
+printf 'Control: duoctl get_state | overview | set_pose dual | single DSI-1 | span\n'
+printf '         duoctl snap <window> left|right|top|bottom, unsplit DSI-1\n'
+printf '         duoctl set_full_redraw on|off, set_scanout on|off (flicker hunt)\n\n'
+exec bash -l

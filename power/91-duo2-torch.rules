@@ -1,0 +1,14 @@
+# duo2-os: the torch. The rear camera's flash LED (PM8350C's flash module,
+# leds-qcom-flash; the LED class device white:flash) lights as a torch when
+# its brightness is set (0 = off, max_brightness = the stock torch current).
+# Its brightness is the video group's, which the GUI user is in (duo-shell's
+# quick menu switches it); the rest of the LED (the trigger, the flash
+# strobe, the flash current and timeout) stays root's. A sysfs attribute
+# takes no GROUP= / MODE=: chgrp / chmod when the LED appears.
+#
+# After 90-feedbackd.rules on purpose: feedbackd's rule takes every *:flash
+# LED as a notification LED (fbd-ledctrl gives the brightness to the
+# feedbackd group, then fails on the missing pattern trigger); RUN commands
+# run in rule order, so this one decides. feedbackd (the GUI user, in both
+# groups) uses the flash only with its prefer-flash setting on, false here.
+ACTION!="remove", SUBSYSTEM=="leds", DRIVERS=="leds-qcom-flash", RUN+="/usr/bin/chgrp video /sys%p/brightness", RUN+="/usr/bin/chmod 0664 /sys%p/brightness"

@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""Run one command on the Duo's rescue shell over the USB ACM port.
+
+    duo2-sh 'dmesg | tail -50'          # prints the output, exits when done
+    TIMEOUT=60 duo2-sh 'cat /run/dmesg.txt'
+
+The rescue initramfs runs `sh -i` on ttyGS0 (host side /dev/ttyACM*). The
+command is followed by an end marker; output stops at the marker or at
+TIMEOUT seconds (default 20).
+"""
+
+import glob
+import os
+import select
+import sys
+import termios
+import time
+import tty
+
+MARK = "__DUO2_END__"
+
+
+def main():
+    if len(sys.argv) < 2:
+        sys.exit(__doc__)
+    ports = sorted(glob.glob("/dev/ttyACM*"))
+    if not ports:
+        sys.exit("no /dev/ttyACM*: the rescue gadget is not up")
+    fd = os.open(ports[-1], os.O_RDWR | os.O_NOCTTY)
+    tty.setraw(fd)
+    attrs = termios.tcgetattr(fd)
+    attrs[3] &= ~termios.ECHO
+    termios.tcsetattr(fd, termios.TCSANOW, attrs)
+    os.write(fd, b"\n")
+    time.sleep(0.3)
+    while select.select([fd], [], [], 0.2)[0]:
+        os.read(fd, 65536)  # drop the prompt / leftovers
+    cmd = " ".join(sys.argv[1:])
+    os.write(fd, (cmd + f"; echo; echo {MARK}\n").encode())
+    deadline = time.time() + float(os.environ.get("TIMEOUT", "20"))
+    buf = b""
+    while time.time() < deadline:
+        if select.select([fd], [], [], 0.5)[0]:
+            buf += os.read(fd, 65536)
+            text = buf.decode(errors="replace").replace("\r", "")
+            lines = text.split("\n")
+            if MARK in lines[:-1] or text.rstrip().endswith("\n" + MARK) or lines[-1] == MARK:
+                break
+    text = buf.decode(errors="replace").replace("\r", "")
+    out = []
+    for line in text.split("\n"):
+        if line.strip() == MARK:
+            break
+        if MARK in line and cmd[:20] in line:
+            continue  # the shell's echo of our own command line
+        out.append(line)
+    print("\n".join(out).strip("\n"))
+
+
+if __name__ == "__main__":
+    main()

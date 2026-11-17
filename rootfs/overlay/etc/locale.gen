@@ -1,0 +1,17 @@
+# The locales built into the image (locale-gen; Duo Settings > Language &
+# region offers exactly the generated ones). UTF-8 only. Add a line here and
+# in the Dockerfile's locale-gen run to ship another; on a running phone:
+# edit this file as root and run `locale-gen`.
+# Scripts that need CJK also need a CJK font (fonts-noto-cjk, not in the image).
+en_US.UTF-8 UTF-8
+en_GB.UTF-8 UTF-8
+hu_HU.UTF-8 UTF-8
+de_DE.UTF-8 UTF-8
+fr_FR.UTF-8 UTF-8
+es_ES.UTF-8 UTF-8
+it_IT.UTF-8 UTF-8
+pt_BR.UTF-8 UTF-8
+nl_NL.UTF-8 UTF-8
+pl_PL.UTF-8 UTF-8
+sv_SE.UTF-8 UTF-8
+tr_TR.UTF-8 UTF-8

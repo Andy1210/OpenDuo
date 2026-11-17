@@ -1,0 +1,30 @@
+#!/bin/bash
+# Check of rootfs/overlay/etc/mpv/duo2-hwdec.lua's probe on a file (run on the
+# host or the phone):   scripts/duo2-hwdec-check FILE [FILE...]
+# Prints what each probe step sees and the verdict the script would reach
+# (hardware only for 8-bit 4:2:0 progressive H.264/HEVC). The tiny old probe
+# (32 / 0) is shown for comparison; the script's steps must both end known.
+# Keep the numbers equal to PROBES in the Lua file.
+set -u
+rc=0
+for f in "$@"; do
+  echo "== $f"
+  verdict=software
+  for step in "32 0 old" "5000000 2000000 step1" "50000000 10000000 step2"; do
+    # shellcheck disable=SC2086 # three words: probe size, duration, label
+    set -- $step
+    out=$(timeout 30 ffprobe -v error -threads 1 -probesize "$1" -analyzeduration "$2" -select_streams V:0 \
+      -show_entries stream=codec_name,pix_fmt,field_order,width,height -of default=noprint_wrappers=1 -- "$f" 2>&1 | tr '\n' ' ')
+    echo "  $3: $out"
+    if [ "$3" != old ] && [ "$verdict" = software ]; then
+      case "$out" in *unknown*|"") continue ;; esac
+      case "$out" in
+        *codec_name=h264*|*codec_name=hevc*)
+          case "$out" in *pix_fmt=yuv420p\ *|*pix_fmt=yuvj420p\ *) case "$out" in *field_order=progressive*) verdict=hardware ;; esac ;; esac ;;
+      esac
+      break
+    fi
+  done
+  echo "  verdict: $verdict"
+done
+exit $rc

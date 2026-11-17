@@ -1,0 +1,711 @@
+#!/usr/bin/python3 -sE
+# duo2-callaudio: the audio side of a phone call on the Surface Duo 2
+# (docs/hardware/audio.md, telephony/README.md). Runs as the GUI user
+# (a systemd user service), next to callaudiod.
+#
+# A call's audio never passes through Linux: the modem hands it to the
+# ADSP's voice services, which read the microphone from and play the other
+# party into the codec DMA ports directly (kernel: q6voice, the VoiceMMode1/2
+# front ends). Something has to start that path, and the call's volume and
+# mute have to reach the DSP and the amplifier:
+#
+# - while ModemManager has a call that is dialing, ringing out or active,
+#   AND the card is in the UCM "Voice Call" profile (callaudiod switches it
+#   when Calls asks for call mode), the voice front ends' PCMs are opened,
+#   prepared and started in both directions (no data is ever written or
+#   read: preparing them starts the voice path in the DSP, starting them
+#   unmutes the amplifiers). Both subscriptions'
+#   sessions (VoiceMMode1, VoiceMMode2): the one the call is on carries the
+#   audio. Closed when the call ends or the profile goes;
+# - the volume of the card's Voice Call sink (the volume keys move it:
+#   duo-shell sets the default sink, which callaudiod makes this one) is
+#   mirrored into the WSA digital gain, per output: the earpiece and the
+#   speakers each have a cap (callaudio.conf), 100 % is the cap and every
+#   step below it is RANGE_DB / 100 dB lower, 0 % or muted is silence;
+# - the mute of the card's Voice Call source (callaudiod's MuteMic, Calls'
+#   mute button) is mirrored into the vocproc's uplink mute (the "Capture
+#   Switch" of each voice front end): the microphone stream PipeWire may
+#   have open has nothing to do with what the other party hears.
+#
+# - it offers GNOME Calls callaudiod's interface (org.mobian_project.CallAudio
+#   on the session bus: SelectMode, EnableSpeaker, MuteMic and their
+#   properties) and replaces callaudiod: callaudiod switches the speaker by
+#   a sink port, but PipeWire 1.4 makes two profiles of this card's Voice
+#   Call verb, "Voice Call (Earpiece, Mic)" and "Voice Call (Mic, Speaker)"
+#   (the two outputs share a PCM), so here the profile is switched (as
+#   WirePlumber does itself from 0.5.11 on). An output change during a call
+#   reopens the voice path: the amplifiers' SoundWire ports are only taken
+#   when the back end starts. A call that comes up without a client asking
+#   for call mode switches it here, and back when it ends.
+#
+# Event driven: ModemManager's D-Bus signals (GObject), `pactl subscribe`.
+# Settings: /etc/duo2/callaudio.conf, read at start.
+import ctypes
+import json
+import os
+import re
+import shlex
+import signal
+import subprocess
+import sys
+
+import gi
+
+gi.require_version("ModemManager", "1.0")
+from gi.repository import Gio, GLib  # noqa: E402
+from gi.repository import ModemManager as Mm  # noqa: E402
+
+CONF = "/etc/duo2/callaudio.conf"
+DEFAULTS = {
+    "CARD": "MicrosoftSurfac",
+    "VOICE_PCMS": "3 4",
+    "EARPIECE_MAX": "52",
+    "SPEAKER_MAX": "75",
+    "RANGE_DB": "40",
+    "TX_TOPOLOGY": "none",
+}
+# The vocproc's uplink processing (no calibration data: the DSP's defaults).
+# none = as it comes (known to work), ecns = single-mic echo canceller and
+# noise suppression (VSS_IVOCPROC_TOPOLOGY_ID_TX_SM_ECNS).
+TX_TOPOLOGIES = {"none": 0x00010F70, "ecns": 0x00010F71}
+ACTIVE_STATES = {Mm.CallState.DIALING, Mm.CallState.RINGING_OUT, Mm.CallState.ACTIVE}
+VOICE_PROFILE = "Voice Call"
+SWITCHES = ("VoiceMMode1 Capture Switch", "VoiceMMode2 Capture Switch")
+
+
+def log(*a):
+    print(*a, flush=True)
+
+
+def read_conf(path=CONF):
+    c = dict(DEFAULTS)
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = k.strip()
+                if k in c:
+                    c[k] = " ".join(shlex.split(v))
+    except FileNotFoundError:
+        pass
+    return c
+
+
+def gain_for(volume, muted, cap, range_db):
+    """WSA digital gain register value for a PipeWire volume (0..1, the
+    percentage the volume keys move): cap at 100 %, RANGE_DB below it at
+    the bottom, 0 (-84 dB) when silent."""
+    if muted or volume <= 0:
+        return 0
+    v = min(volume, 1.0)
+    return max(1, min(cap, int(round(cap - (1 - v) * range_db))))
+
+
+# --- the voice front ends' PCMs (libasound through ctypes) -----------------
+
+SND_PCM_STREAM_PLAYBACK = 0
+SND_PCM_STREAM_CAPTURE = 1
+SND_PCM_NONBLOCK = 1
+SND_PCM_FORMAT_S16_LE = 2
+SND_PCM_ACCESS_RW_INTERLEAVED = 3
+
+
+class Alsa:
+    def __init__(self):
+        lib = ctypes.CDLL("libasound.so.2", use_errno=True)
+        lib.snd_pcm_open.argtypes = [
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
+        lib.snd_pcm_set_params.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_uint,
+            ctypes.c_uint,
+            ctypes.c_int,
+            ctypes.c_uint,
+        ]
+        for f in ("snd_pcm_start", "snd_pcm_drop", "snd_pcm_close"):
+            getattr(lib, f).argtypes = [ctypes.c_void_p]
+        lib.snd_pcm_sw_params_sizeof.restype = ctypes.c_size_t
+        lib.snd_pcm_sw_params_current.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        lib.snd_pcm_sw_params_get_boundary.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_ulong),
+        ]
+        for f in ("snd_pcm_sw_params_set_start_threshold", "snd_pcm_sw_params_set_stop_threshold"):
+            getattr(lib, f).argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong]
+        lib.snd_pcm_sw_params.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        lib.snd_strerror.restype = ctypes.c_char_p
+        self.lib = lib
+
+    def err(self, r):
+        return self.lib.snd_strerror(r).decode()
+
+    def open_voice(self, name):
+        """Open, set up and start one voice front end in both directions.
+        Returns the two handles, or raises OSError (nothing left open)."""
+        handles = []
+        try:
+            for stream in (SND_PCM_STREAM_PLAYBACK, SND_PCM_STREAM_CAPTURE):
+                h = ctypes.c_void_p()
+                r = self.lib.snd_pcm_open(ctypes.byref(h), name.encode(), stream, SND_PCM_NONBLOCK)
+                if r < 0:
+                    raise OSError(f"open {name}: {self.err(r)}")
+                handles.append(h)
+                # 8 kHz mono S16: the front end takes nothing else (no data
+                # flows; 512 ms of buffer = 4 periods of 2048 bytes)
+                r = self.lib.snd_pcm_set_params(
+                    h, SND_PCM_FORMAT_S16_LE, SND_PCM_ACCESS_RW_INTERLEAVED, 1, 8000, 0, 512000
+                )
+                if r < 0:
+                    raise OSError(f"set up {name}: {self.err(r)}")
+                # The front end has no buffer and its pointer never moves:
+                # start it empty, and never let ALSA stop it for that (stop
+                # threshold = boundary). Starting matters: the back ends'
+                # trigger is what unmutes the amplifiers.
+                sw = ctypes.create_string_buffer(self.lib.snd_pcm_sw_params_sizeof())
+                boundary = ctypes.c_ulong()
+                r = self.lib.snd_pcm_sw_params_current(h, sw)
+                if r >= 0:
+                    r = self.lib.snd_pcm_sw_params_get_boundary(sw, ctypes.byref(boundary))
+                if r >= 0:
+                    r = self.lib.snd_pcm_sw_params_set_start_threshold(h, sw, boundary.value)
+                if r >= 0:
+                    r = self.lib.snd_pcm_sw_params_set_stop_threshold(h, sw, boundary.value)
+                if r >= 0:
+                    r = self.lib.snd_pcm_sw_params(h, sw)
+                if r < 0:
+                    raise OSError(f"sw params {name}: {self.err(r)}")
+                r = self.lib.snd_pcm_start(h)
+                if r < 0:
+                    raise OSError(f"start {name}: {self.err(r)}")
+            return handles
+        except OSError:
+            self.close(handles)
+            raise
+
+    def close(self, handles):
+        for h in handles:
+            self.lib.snd_pcm_drop(h)
+            self.lib.snd_pcm_close(h)
+
+
+def amixer(card, name, value):
+    r = subprocess.run(
+        ["amixer", "-q", "-c", card, "cset", f"name={name}", str(value)],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode:
+        log(f"amixer {name}={value}: {r.stderr.strip()}")
+    return r.returncode == 0
+
+
+# --- PipeWire (through pactl, pipewire-pulse) -----------------------------
+
+
+def pactl_json(*args):
+    r = subprocess.run(["pactl", "-f", "json", *args], capture_output=True, text=True)
+    if r.returncode:
+        return None
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        return None
+
+
+def card_state(card_id):
+    """The ALSA card as pipewire-pulse sees it: {name, profile, profiles,
+    sink, source}; sink / source (the Voice Call profile's) are dicts with
+    name, volume (0..1), mute, port. None without the card."""
+    pa_card = None
+    for c in pactl_json("list", "cards") or []:
+        if c.get("properties", {}).get("alsa.id") == card_id:
+            pa_card = c
+            break
+    if not pa_card:
+        return None
+    st = {
+        "name": pa_card.get("name"),
+        "profile": pa_card.get("active_profile") or "",
+        "profiles": list(pa_card.get("profiles", {}).keys()),
+        "sink": None,
+        "source": None,
+    }
+
+    def pick(kind):
+        for d in pactl_json("list", kind) or []:
+            name = d.get("name", "")
+            # (a sink's monitor is a source of the card too)
+            if (
+                d.get("properties", {}).get("device.name") != st["name"]
+                or "Voice_Call" not in name
+                or name.endswith(".monitor")
+            ):
+                continue
+            vols = d.get("volume", {})
+            pct = [int(str(v.get("value_percent", "0")).rstrip("%")) for v in vols.values()]
+            return {
+                "name": d.get("name"),
+                "volume": (max(pct) if pct else 0) / 100.0,
+                "mute": bool(d.get("mute")),
+                "port": d.get("active_port") or "",
+            }
+        return None
+
+    if st["profile"].startswith(VOICE_PROFILE):
+        st["sink"] = pick("sinks")
+        st["source"] = pick("sources")
+    return st
+
+
+def voice_profile(profiles, speaker):
+    """The Voice Call profile with the earpiece, or with the speakers.
+    PipeWire makes one profile per output: both use the same PCM."""
+    want = "Speaker" if speaker else "Earpiece"
+    for p in profiles:
+        if p.startswith(VOICE_PROFILE) and want in p:
+            return p
+    return None
+
+
+def pactl(*args):
+    r = subprocess.run(["pactl", *args], capture_output=True, text=True)
+    if r.returncode:
+        log(f"pactl {' '.join(args)}: {r.stderr.strip()}")
+    return r.returncode == 0
+
+
+# --- org.mobian_project.CallAudio (what callaudiod offers Calls) ------------
+#
+# callaudiod switches the speaker by a sink port; PipeWire 1.4 puts the
+# earpiece and the speakers in two profiles of the card (they share a PCM),
+# so here the profile is switched instead, as WirePlumber does from 0.5.11.
+
+CALLAUDIO_XML = """
+<node>
+  <interface name="org.mobian_project.CallAudio">
+    <method name="SelectMode">
+      <arg direction="in" name="mode" type="u"/>
+      <arg direction="out" name="success" type="b"/>
+    </method>
+    <property name="AudioMode" type="u" access="read"/>
+    <method name="EnableSpeaker">
+      <arg direction="in" name="enable" type="b"/>
+      <arg direction="out" name="success" type="b"/>
+    </method>
+    <property name="SpeakerState" type="u" access="read"/>
+    <method name="MuteMic">
+      <arg direction="in" name="mute" type="b"/>
+      <arg direction="out" name="success" type="b"/>
+    </method>
+    <property name="MicState" type="u" access="read"/>
+  </interface>
+</node>
+"""
+# For tests without a call (scripts/duo2-voice-check style): a call is
+# assumed to be up all the time. The DSP plays silence then.
+ASSUME_CALL = os.environ.get("DUO2_CALLAUDIO_ASSUME_CALL") == "1"
+# DUO2_CALLAUDIO_BUSNAME: another name, to test beside a running callaudiod
+CALLAUDIO_NAME = os.environ.get("DUO2_CALLAUDIO_BUSNAME", "org.mobian_project.CallAudio")
+CALLAUDIO_PATH = "/org/mobian_project/CallAudio"
+MODE_DEFAULT, MODE_CALL, UNKNOWN = 0, 1, 255
+
+
+class CallAudio:
+    def __init__(self, conf):
+        self.conf = conf
+        self.card = conf["CARD"]
+        self.pcms = [f"hw:CARD={self.card},DEV={d}" for d in conf["VOICE_PCMS"].split()]
+        self.alsa = Alsa()
+        self.open_handles = {}
+        self.in_call = False
+        self.calls = {}  # call object path -> (call, handler id, modem path)
+        self.voices = {}  # modem object path -> (voice, handler ids)
+        self.applied = {}
+        self.pending = None
+        self.mm = None
+        self.mode = MODE_DEFAULT  # what Calls asked for (or a call forced)
+        self.auto_mode = False  # call mode set here, not by a client
+        self.speaker = False
+        self.mic_muted = False
+        self.open_profile = None  # the profile the voice path was opened in
+        self.connected = False  # a call is ACTIVE (not dialing / ringing out)
+        self.opened_connected = False  # the voice path was opened while one was
+        self.bus = None
+        self.reg = None
+
+    # ModemManager
+    def start(self):
+        bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+        Mm.Manager.new(
+            bus, Gio.DBusObjectManagerClientFlags.DO_NOT_AUTO_START, None, self.on_manager
+        )
+        self.start_pactl()
+        Gio.bus_own_name(
+            Gio.BusType.SESSION,
+            CALLAUDIO_NAME,
+            Gio.BusNameOwnerFlags.ALLOW_REPLACEMENT | Gio.BusNameOwnerFlags.REPLACE,
+            self.on_bus,
+            lambda *_: log(f"owning {CALLAUDIO_NAME}"),
+            lambda *_: log(f"lost {CALLAUDIO_NAME} (callaudiod running?)"),
+        )
+
+    # org.mobian_project.CallAudio
+    def on_bus(self, bus, _name):
+        self.bus = bus
+        node = Gio.DBusNodeInfo.new_for_xml(CALLAUDIO_XML)
+        self.reg = bus.register_object(
+            CALLAUDIO_PATH, node.interfaces[0], self.on_call_method, self.on_get_property, None
+        )
+
+    def on_get_property(self, _conn, _sender, _path, _iface, prop):
+        if prop == "AudioMode":
+            return GLib.Variant("u", self.mode)
+        if prop == "SpeakerState":
+            return GLib.Variant("u", 1 if self.speaker else 0)
+        if prop == "MicState":
+            return GLib.Variant("u", 0 if self.mic_muted else 1)
+        return None
+
+    def on_call_method(self, _conn, _sender, _path, _iface, method, params, inv):
+        arg = params.unpack()[0]
+        if method == "SelectMode":
+            if arg not in (MODE_DEFAULT, MODE_CALL):
+                inv.return_dbus_error(
+                    "org.freedesktop.DBus.Error.InvalidArgs", f"unknown mode {arg}"
+                )
+                return
+            log(f"SelectMode({arg})")
+            self.auto_mode = False
+            ok = self.select_mode(arg)
+        elif method == "EnableSpeaker":
+            log(f"EnableSpeaker({arg})")
+            ok = self.enable_speaker(bool(arg))
+        elif method == "MuteMic":
+            log(f"MuteMic({arg})")
+            ok = self.mute_mic(bool(arg))
+        else:
+            inv.return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", method)
+            return
+        inv.return_value(GLib.Variant("(b)", (ok,)))
+
+    def changed(self, **props):
+        if not self.bus:
+            return
+        vals = {k: GLib.Variant("u", v) for k, v in props.items()}
+        self.bus.emit_signal(
+            None,
+            CALLAUDIO_PATH,
+            "org.freedesktop.DBus.Properties",
+            "PropertiesChanged",
+            GLib.Variant("(sa{sv}as)", ("org.mobian_project.CallAudio", vals, [])),
+        )
+
+    def select_mode(self, mode):
+        st = card_state(self.card)
+        if not st:
+            return False
+        if mode == MODE_CALL:
+            prof = voice_profile(st["profiles"], self.speaker)
+            if not prof:
+                log("no Voice Call profile (kernel without the voice front ends?)")
+                return False
+        else:
+            prof = "HiFi"
+            if self.speaker:
+                self.speaker = False
+                self.changed(SpeakerState=0)
+            if self.mic_muted:
+                self.mute_mic(False)
+        ok = st["profile"] == prof or pactl("set-card-profile", st["name"], prof)
+        if ok:
+            if mode != self.mode:
+                self.mode = mode
+                self.changed(AudioMode=mode)
+            self.schedule()
+        return ok
+
+    def enable_speaker(self, on):
+        if on != self.speaker:
+            self.speaker = on
+            self.changed(SpeakerState=1 if on else 0)
+        if self.mode != MODE_CALL:
+            return True
+        return self.select_mode(MODE_CALL)
+
+    def mute_mic(self, mute):
+        st = card_state(self.card)
+        ok = True
+        if st and st["source"]:
+            ok = pactl("set-source-mute", st["source"]["name"], "1" if mute else "0")
+        for name in SWITCHES:
+            ok = amixer(self.card, name, 0 if mute else 1) and ok
+        if mute != self.mic_muted:
+            self.mic_muted = mute
+            self.changed(MicState=0 if mute else 1)
+        self.schedule()
+        return ok
+
+    def on_manager(self, _src, res):
+        try:
+            self.mm = Mm.Manager.new_finish(res)
+        except GLib.Error as e:
+            log(f"ModemManager: {e.message}; retrying in 10 s")
+            GLib.timeout_add_seconds(10, lambda: self.start_mm_again())
+            return
+        self.mm.connect("object-added", lambda _m, o: self.add_modem(o))
+        self.mm.connect("object-removed", lambda _m, o: self.remove_modem(o))
+        for o in self.mm.get_objects():
+            self.add_modem(o)
+        self.update()
+
+    def start_mm_again(self):
+        bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+        Mm.Manager.new(
+            bus, Gio.DBusObjectManagerClientFlags.DO_NOT_AUTO_START, None, self.on_manager
+        )
+        return False
+
+    def add_modem(self, obj):
+        voice = obj.get_modem_voice()
+        if not voice or obj.get_object_path() in self.voices:
+            return
+        ids = (
+            voice.connect("call-added", lambda _v, p: self.refresh_calls(voice)),
+            voice.connect("call-deleted", lambda _v, p: self.refresh_calls(voice)),
+        )
+        self.voices[obj.get_object_path()] = (voice, ids)
+        self.refresh_calls(voice)
+
+    def remove_modem(self, obj):
+        modem = obj.get_object_path()
+        v = self.voices.pop(modem, None)
+        if v:
+            for i in v[1]:
+                v[0].disconnect(i)
+        for p, (call, hid, m) in list(self.calls.items()):
+            if m == modem:
+                call.disconnect(hid)
+                del self.calls[p]
+        self.update()
+
+    def refresh_calls(self, voice):
+        voice.list_calls(None, self.on_calls, voice)
+
+    def on_calls(self, voice, res, _data):
+        try:
+            calls = voice.list_calls_finish(res)
+        except GLib.Error as e:
+            log(f"list calls: {e.message}")
+            return
+        modem = voice.get_object_path()
+        listed = {c.get_path(): c for c in calls}
+        for p, (call, hid, m) in list(self.calls.items()):
+            if m == modem and p not in listed:
+                call.disconnect(hid)
+                del self.calls[p]
+        for p, call in listed.items():
+            if p not in self.calls:
+                hid = call.connect("state-changed", lambda *_: self.update())
+                self.calls[p] = (call, hid, modem)
+        self.update()
+
+    def call_active(self):
+        if ASSUME_CALL:
+            return True
+        return any(c.get_state() in ACTIVE_STATES for c, _, _ in self.calls.values())
+
+    def call_connected(self):
+        if ASSUME_CALL:
+            return True
+        return any(c.get_state() == Mm.CallState.ACTIVE for c, _, _ in self.calls.values())
+
+    # PipeWire
+    def start_pactl(self):
+        self.pactl = subprocess.Popen(
+            ["pactl", "subscribe"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+        )
+        ch = GLib.IOChannel.unix_new(self.pactl.stdout.fileno())
+        GLib.io_add_watch(ch, GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_HUP, self.on_pactl)
+
+    def on_pactl(self, _ch, cond):
+        if cond & GLib.IO_HUP:
+            log("pactl subscribe ended; restarting in 2 s")
+            self.pactl.wait()
+            GLib.timeout_add_seconds(2, lambda: (self.start_pactl(), False)[1])
+            return False
+        line = self.pactl.stdout.readline()
+        if re.search(r"on (card|sink|source|server) ", line):
+            self.schedule()
+        return True
+
+    def schedule(self):
+        # a burst of events (profile + ports + volumes) -> one look, 150 ms on
+        if self.pending is None:
+            self.pending = GLib.timeout_add(150, self.on_pending)
+
+    def on_pending(self):
+        self.pending = None
+        self.update()
+        return False
+
+    # the state
+    def update(self):
+        active = self.call_active()
+        if active != self.in_call:
+            log(f"call {'up' if active else 'ended'}")
+            self.in_call = active
+            # a call without a client asking for call mode (Calls not
+            # running, or answered elsewhere): switch here, and back
+            if active and self.mode != MODE_CALL:
+                self.auto_mode = True
+                self.select_mode(MODE_CALL)
+            elif not active and self.auto_mode:
+                self.auto_mode = False
+                self.select_mode(MODE_DEFAULT)
+        st = card_state(self.card)
+        profile = st["profile"] if st else ""
+        voice_profile_on = profile.startswith(VOICE_PROFILE)
+        want = active and voice_profile_on
+        self.connected = self.call_connected()
+        if self.open_handles and (not want or profile != self.open_profile):
+            # another output: the amplifiers' SoundWire ports only change
+            # when the back end starts anew, so the path is reopened
+            self.close_voice()
+        elif self.open_handles and self.connected and not self.opened_connected:
+            # opened while dialing / ringing out: start the DSP's voice path
+            # anew once the call is connected (2026-11-08: the first calls'
+            # paths, set up before or right at the connection, stayed silent;
+            # one reopened later in the call carried audio both ways)
+            log("call connected: reopening the voice path")
+            self.close_voice()
+        if want and not self.open_handles:
+            self.open_voice(profile)
+        if voice_profile_on:
+            if self.mode == MODE_CALL:
+                self.make_default(st)
+            self.apply(st["sink"], st["source"])
+        else:
+            self.applied = {}
+
+    def make_default(self, st):
+        """In call mode the call's sink and source are the defaults: the
+        volume keys move the default sink (a Bluetooth headset that became
+        the default would otherwise take them, but the call cannot reach
+        it)."""
+        for kind, dev in (("sink", st["sink"]), ("source", st["source"])):
+            if not dev:
+                continue
+            r = subprocess.run(["pactl", f"get-default-{kind}"], capture_output=True, text=True)
+            if r.stdout.strip() != dev["name"]:
+                pactl(f"set-default-{kind}", dev["name"])
+
+    def open_voice(self, profile):
+        self.open_profile = profile
+        self.opened_connected = self.connected
+        topo = TX_TOPOLOGIES.get(self.conf["TX_TOPOLOGY"], TX_TOPOLOGIES["none"])
+        for fe in ("VoiceMMode1", "VoiceMMode2"):
+            amixer(self.card, f"{fe} TX Topology", topo)
+        for name in self.pcms:
+            try:
+                self.open_handles[name] = self.alsa.open_voice(name)
+                log(f"{name}: voice path open")
+            except OSError as e:
+                log(f"{name}: {e}")
+        if not self.open_handles:
+            # e.g. the routing of the profile is not set yet: try again
+            GLib.timeout_add_seconds(1, lambda: (self.update(), False)[1])
+        elif self.mic_muted:
+            for name in SWITCHES:
+                amixer(self.card, name, 0)
+
+    def close_voice(self):
+        for name, h in self.open_handles.items():
+            self.alsa.close(h)
+            log(f"{name}: voice path closed")
+        self.open_handles = {}
+
+    def apply(self, sink, source):
+        c = self.conf
+        if sink:
+            port = sink["port"].lower()
+            if "earpiece" in port:
+                gains = {
+                    "WSA_RX0 Digital Volume": gain_for(
+                        sink["volume"], sink["mute"], int(c["EARPIECE_MAX"]), int(c["RANGE_DB"])
+                    )
+                }
+            elif "speaker" in port:
+                g = gain_for(
+                    sink["volume"], sink["mute"], int(c["SPEAKER_MAX"]), int(c["RANGE_DB"])
+                )
+                gains = {"WSA_RX0 Digital Volume": g, "WSA_RX1 Digital Volume": g}
+            else:
+                gains = {}
+            for name, g in gains.items():
+                key = (port, name)
+                if self.applied.get(key) != g:
+                    if amixer(self.card, name, g):
+                        self.applied[key] = g
+                        log(
+                            f"{port}: {name} {g} ({g - 84} dB) at {round(sink['volume'] * 100)} %"
+                            f"{' muted' if sink['mute'] else ''}"
+                        )
+            # a port switch re-runs the UCM sequence: forget the other port
+            for key in [k for k in self.applied if k[0] not in (port, "mic")]:
+                del self.applied[key]
+        if source:
+            on = 0 if (source["mute"] or self.mic_muted) else 1
+            for name in SWITCHES:
+                if self.applied.get(("mic", name)) != on and amixer(self.card, name, on):
+                    self.applied[("mic", name)] = on
+            if self.applied.get(("mic", "log")) != on:
+                self.applied[("mic", "log")] = on
+                log(f"microphone {'on' if on else 'muted'}")
+
+
+def main():
+    conf = read_conf()
+    app = CallAudio(conf)
+    loop = GLib.MainLoop()
+
+    def stop(*_):
+        app.close_voice()
+        loop.quit()
+
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, stop)
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, stop)
+
+    def reopen(*_):
+        # SIGHUP: open the voice path anew (e.g. after changing a q6voice
+        # module parameter during a call)
+        log("SIGHUP: reopening the voice path")
+        app.close_voice()
+        app.update()
+        return True
+
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGHUP, reopen)
+    log(
+        f"duo2-callaudio: card {app.card}, voice PCMs {' '.join(app.pcms)}, "
+        f"earpiece max {conf['EARPIECE_MAX']}, speaker max {conf['SPEAKER_MAX']}, "
+        f"range {conf['RANGE_DB']} dB, uplink {conf['TX_TOPOLOGY']}"
+    )
+    app.start()
+    loop.run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

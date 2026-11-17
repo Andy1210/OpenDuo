@@ -1,0 +1,66 @@
+From e7011df5e7010c4894390febc7d1e304adee9a1e Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 07:46:14 +0100
+Subject: [PATCH 084/137] BRING-UP: arm64: dts: qcom:
+ sm8350-microsoft-surface-duo2: Set the camera rotation
+
+The vendor configuration gives all four camera sensors a mounting roll
+of 90 degrees (the front one's module description too), i.e. Android's
+sensor orientation of 90 to the panels' portrait orientation: a
+rotation of 270 in the DT's terms.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../boot/dts/qcom/sm8350-microsoft-surface-duo2.dts   | 11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+index 69a5ebf7606b..2fe9c3bb616a 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+@@ -613,9 +613,10 @@ &cci1 {
+ };
+ 
+ /*
+- * The four sensors (BRING-UP: imx48x powers each up, reads its model number
+- * and powers it down; no endpoints yet). Supplies, MCLKs and XCLR lines as
+- * in the vendor DT; the MCLKs at 19.2 MHz.
++ * The four sensors: supplies, MCLKs and XCLR lines as in the vendor DT; the
++ * MCLKs at 19.2 MHz. The vendor configuration mounts all four with a sensor
++ * orientation of 90 degrees (clockwise, in Android's terms) to the panels'
++ * portrait orientation, the front one included: a rotation of 270.
+  */
+ &cci0_i2c0 {
+ 	camera_tele: camera@1a {
+@@ -639,6 +640,7 @@ camera_tele: camera@1a {
+ 		firmware-name = "qcom/sm8350/microsoft/imx481-tele.bin";
+ 
+ 		orientation = <1>;
++		rotation = <270>;
+ 
+ 		port {
+ 			camera_tele_ep: endpoint {
+@@ -673,6 +675,7 @@ camera_wide: camera@1a {
+ 		firmware-name = "qcom/sm8350/microsoft/imx563-wide.bin";
+ 
+ 		orientation = <1>;
++		rotation = <270>;
+ 
+ 		port {
+ 			camera_wide_ep: endpoint {
+@@ -706,6 +709,7 @@ camera_uw: camera@10 {
+ 		firmware-name = "qcom/sm8350/microsoft/imx481-uw.bin";
+ 
+ 		orientation = <1>;
++		rotation = <270>;
+ 
+ 		port {
+ 			camera_uw_ep: endpoint {
+@@ -746,6 +750,7 @@ camera_front: camera@1a {
+ 		firmware-name = "qcom/sm8350/microsoft/imx481-front.bin";
+ 
+ 		orientation = <0>;
++		rotation = <270>;
+ 
+ 		port {
+ 			camera_front_ep: endpoint {

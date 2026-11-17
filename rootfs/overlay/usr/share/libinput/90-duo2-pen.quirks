@@ -1,0 +1,17 @@
+# duo2-os: duo2-touchd's pen devices ("Surface Duo 2 Pen Left" / "... Right",
+# the heat processor's pen reports; touch/pen_rules.h).
+#
+# libinput takes a pen's contact from its pressure, never from BTN_TOUCH, and
+# by default only above 5 % of the range (3277 of 0..65535, about 200 of the
+# pen's 4096 levels): a light stroke would never ink. duo2-touchd sends a
+# hover as 0 and the tip as at least 3, so with this range the contact is
+# exactly the heat processor's tip bit. (libinput 1.28 reads a tablet's range
+# swapped; nothing between 1 and 2 is ever sent, so either reading works.)
+#
+# No smoothing: the heat processor filters the pen itself (its jitter
+# restrictor); libinput's history on top only adds latency.
+[Surface Duo 2 Pen]
+MatchUdevType=tablet
+MatchName=Surface Duo 2 Pen *
+AttrPressureRange=2:1
+AttrTabletSmoothing=0

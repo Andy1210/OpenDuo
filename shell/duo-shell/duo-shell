@@ -1,0 +1,29 @@
+#!/usr/bin/python3 -sE
+"""duo-shell: duo2-os's status bars and app grid (GTK4 + gtk4-layer-shell).
+
+libgtk4-layer-shell has to be loaded before GTK (and its libwayland-client)
+is, so it is loaded here, before anything imports Gtk.
+
+Trust (duoshell/trust.py): the session starts the shell with a trusted
+Wayland connection (WAYLAND_SOCKET) and the trust factory (DUO_WC_TRUST_FD).
+First of all the shell becomes non-dumpable (no other process of the user
+may attach to it) and takes the factory out of the environment. `-s`: no
+user site-packages (the user's apps could write them); `-E`: no PYTHON*
+variables.
+"""
+
+import ctypes
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from duoshell import trust  # noqa: E402
+
+trust.make_undumpable()
+trust.take()
+ctypes.CDLL("libgtk4-layer-shell.so.0")
+
+from duoshell.main import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main())

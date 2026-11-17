@@ -1,0 +1,976 @@
+#!/usr/bin/python3 -sE
+"""duo2-android-location: the phone's position for Android apps (Waydroid).
+
+The Waydroid image has no GNSS HAL, so Android has no location provider
+of its own. This bridge (the GUI user's, bound to the Android session:
+duo2-android-location.service) gives it test providers, "gps" (and
+"network", NETWORK in /etc/duo2/android-location.conf) and fills them
+from geoclue, the host's location service, only while an Android app
+asks for locations (androidloc/policy.py says when, how exactly and which
+fix goes where). Google Maps, OsmAnd and the rest then see an ordinary
+GPS whose fixes are marked as mock locations.
+
+Talking to Android: over binder, as the host's GUI user, which is
+Android's system uid (AID_SYSTEM, package "android") in the container:
+LocationManagerService's addTestProvider / setTestProviderEnabled /
+setTestProviderLocation and its provider-request listener (who asks the
+providers), and AppOpsService for the MOCK_LOCATION app op of "android"
+(androidloc/locmgr.py, with the transaction codes of the LineageOS 20
+image and a read-only self check first). An Android image that has its
+own "gps" provider keeps it: the bridge then mocks only "network".
+
+Talking to the host: geoclue on the system bus, as the app
+"duo2-android-location" (Settings > Privacy lists it as "Android apps";
+the shell's Location switch and that row decide), at EXACT (the modem's
+GNSS) for "gps", at NEIGHBORHOOD (the mobile cell) for "network" alone;
+a logind sleep inhibitor while an Android app uses the GNSS (KEEP_AWAKE);
+nothing while the container is frozen (no Android app on screen).
+
+Nothing here logs or stores a position. The status file
+$XDG_RUNTIME_DIR/duo2-android-location.json says what runs and how good
+the last fix was (scripts/duo2-android-location-test reads it).
+"""
+
+import json
+import os
+import signal
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+from gi.repository import Gio, GLib  # noqa: E402
+
+from androidloc import (
+    locmgr,  # noqa: E402
+    parcel,  # noqa: E402
+)
+from androidloc import policy as pol  # noqa: E402
+
+GC = "org.freedesktop.GeoClue2"
+GC_MANAGER_PATH = "/org/freedesktop/GeoClue2/Manager"
+PROPS = "org.freedesktop.DBus.Properties"
+WAYDROID_CFG = "/var/lib/waydroid/waydroid.cfg"
+GEOCLUE_APPS_CONF = "/etc/geoclue/conf.d/91-duo2-apps.conf"
+CONFIGS = (
+    "/etc/duo2/android-location.conf",
+    os.path.expanduser("~/.config/duo2/android-location.conf"),
+)
+ANDROID_POLL_S = 3
+CALL_TIMEOUT_S = 20
+SETUP_RETRY_S = 60
+KEPT_OBJECTS = []
+
+
+def log(*args):
+    print("duo2-android-location:", *args, flush=True)
+
+
+def runtime_dir():
+    return os.environ.get("XDG_RUNTIME_DIR") or "/run/user/%d" % os.getuid()
+
+
+def read_file(path):
+    try:
+        with open(path) as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def boottime_ns():
+    return time.clock_gettime_ns(time.CLOCK_BOOTTIME)
+
+
+def wall_ms():
+    return time.time_ns() // 1000000
+
+
+# -- the host's "may" ---------------------------------------------------------------------
+
+
+class HostPermission:
+    """The shell's Location switch (~/.config/duo-shell/location.json) and
+    Settings > Privacy's refusal (geoclue's 91-duo2-apps.conf), followed
+    through file monitors."""
+
+    def __init__(self, changed):
+        self.changed = changed
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+        self.store = os.path.join(base, "duo-shell", "location.json")
+        self.monitors = []
+        for path in (self.store, GEOCLUE_APPS_CONF):
+            try:
+                m = Gio.File.new_for_path(path).monitor_file(Gio.FileMonitorFlags.NONE, None)
+                m.connect("changed", lambda *_a: self.reload())
+                self.monitors.append(m)
+            except GLib.Error:
+                pass
+        self.allowed = None
+        self.reload(initial=True)
+
+    def reload(self, initial=False):
+        text = read_file(self.store)
+        enabled = True if text is None else pol.parse_store_enabled(text)
+        allowed = pol.host_allowed(enabled, pol.parse_denied(read_file(GEOCLUE_APPS_CONF)))
+        if allowed != self.allowed:
+            self.allowed = allowed
+            log("host: Android apps %s use the location" % ("may" if allowed else "may not"))
+            if not initial:
+                self.changed()
+
+
+# -- the container ---------------------------------------------------------------------------
+
+
+def container_frozen():
+    """Waydroid freezes the container (cgroup freezer) when no Android app
+    is on screen. None: no container cgroup (not running)."""
+    try:
+        names = [n for n in os.listdir("/sys/fs/cgroup") if n.startswith("lxc.payload.waydroid")]
+    except OSError:
+        return None
+    for name in names:
+        text = read_file("/sys/fs/cgroup/%s/cgroup.events" % name)
+        if text is None:
+            continue
+        for line in text.splitlines():
+            key, _, value = line.partition(" ")
+            if key == "frozen":
+                return value.strip() == "1"
+    return None
+
+
+def system_server_id():
+    """(pid, start time) of Android's system_server as the host sees it:
+    which Android boot this is (our test providers die with it)."""
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        cmd = read_file("/proc/%s/cmdline" % pid)
+        if not cmd or not cmd.startswith("system_server"):
+            continue
+        cg = read_file("/proc/%s/cgroup" % pid) or ""
+        if "lxc.payload.waydroid" not in cg:
+            continue
+        stat = read_file("/proc/%s/stat" % pid) or ""
+        fields = stat.rsplit(")", 1)[-1].split()
+        return "%s:%s" % (pid, fields[19] if len(fields) > 19 else "?")
+    return None
+
+
+def binder_device():
+    name = "anbox-binder"
+    for line in (read_file(WAYDROID_CFG) or "").splitlines():
+        if line.split("=", 1)[0].strip() == "binder":
+            name = line.split("=", 1)[1].strip() or name
+    for path in ("/dev/" + name, "/dev/binderfs/" + name):
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def append_payload(req, payload):
+    """The argument bytes into a libgbinder request, as 32-bit words
+    (every Parcel item is padded to 4 bytes; append_int32 is in every
+    version of the Python binding)."""
+    for word in parcel.words(payload):
+        req.append_int32(word)
+
+
+def reader_of(reply):
+    init = getattr(reply, "init_reader", None)
+    return init() if init is not None else reply
+
+
+class Android:
+    """The binder side: the service manager, LocationManagerService and
+    AppOpsService, the request listener. Calls go one at a time."""
+
+    def __init__(self, cfg, on_up, on_down, on_request):
+        import gbinder
+
+        self.gbinder = gbinder
+        self.cfg = cfg
+        self.on_up = on_up
+        self.on_down = on_down
+        self.on_request = on_request
+        self.reset()
+        self.broken = None  # a reason never to try again (codes do not fit)
+        self.retry_at = 0.0
+        self.use_async = True
+        self.marker = os.path.join(runtime_dir(), "duo2-android-location.boot")
+
+    def reset(self):
+        self.gen = getattr(self, "gen", 0) + 1  # replies to an older link are dropped
+        # libgbinder calls a local object through a pointer to its Python
+        # object: one Android may still hold must never be freed
+        if getattr(self, "listener", None) is not None:
+            KEPT_OBJECTS.append(self.listener)
+        self.frozen = getattr(self, "frozen", False)
+        self.sm = None
+        self.dev = None
+        self.loc = None  # gbinder.Client of ILocationManager
+        self.appops = None
+        self.remote = None
+        self.listener = None
+        self.queue = []
+        self.busy = None  # (name, deadline)
+        self.up = False
+        self.setting_up = False
+        self.mocked = []  # the providers we mock
+        self.enabled = None
+
+    # -- calls --
+
+    def call(self, client, code, payload, done, name, obj=None):
+        self.queue.append((client, code, payload, done, name, obj))
+        self.pump()
+
+    def pump(self):
+        # nothing goes to a frozen container (the call would wait for the thaw)
+        if self.busy is not None or not self.queue or self.frozen:
+            return
+        client, code, payload, done, name, obj = self.queue.pop(0)
+        gen = self.gen
+        req = client.new_request()
+        if obj is not None:
+            req.append_local_object(obj)
+        append_payload(req, payload)
+        self.busy = (name, time.monotonic() + CALL_TIMEOUT_S)
+
+        def replied(reply, status):
+            if gen != self.gen:
+                return
+            self.busy = None
+            if status != 0 or reply is None:
+                done(None, "binder status %s" % status)
+            else:
+                try:
+                    done(reader_of(reply), None)
+                except locmgr.RemoteError as e:
+                    done(None, str(e))
+                except (ValueError, TypeError) as e:
+                    done(None, "bad reply: %s" % e)
+            GLib.idle_add(lambda: self.pump() and False)
+
+        if self.use_async and hasattr(client, "transact"):
+            try:
+                client.transact(code, 0, req, replied, lambda: None)
+                return
+            except TypeError as e:  # another binding version: the synchronous call
+                log("asynchronous binder calls unavailable (%s): calling synchronously" % e)
+                self.use_async = False
+        reply, status = client.transact_sync_reply(code, req)
+        replied(reply, status)
+
+    def oneway(self, client, code, payload):
+        req = client.new_request()
+        append_payload(req, payload)
+        return client.transact_sync_oneway(code, req)
+
+    def stuck(self):
+        return self.busy is not None and time.monotonic() > self.busy[1]
+
+    def set_frozen(self, frozen):
+        if frozen == self.frozen:
+            return
+        self.frozen = frozen
+        if not frozen:
+            if self.busy is not None:  # the wait for an answer starts again at the thaw
+                self.busy = (self.busy[0], time.monotonic() + CALL_TIMEOUT_S)
+            self.pump()
+
+    # -- coming and going --
+
+    def poll(self, frozen):
+        """Every few seconds: is Android there (and was it there before)?
+        Never while frozen (a call would wait for the thaw)."""
+        if frozen:
+            return
+        if self.up and self.remote is not None and self.remote.is_dead():
+            self.down("Android's location service died")
+        if self.stuck():
+            self.down("a call to Android got no answer (%s)" % self.busy[0])
+        if self.up or self.setting_up or self.broken:
+            return
+        if time.monotonic() < self.retry_at:
+            return
+        device = binder_device()
+        if device is None:
+            return
+        try:
+            rdev = os.stat(device).st_rdev
+        except OSError:
+            return
+        if self.sm is None or rdev != self.dev:
+            self.reset()
+            self.dev = rdev
+            try:
+                self.sm = self.gbinder.ServiceManager(device, "aidl3", "aidl3")
+            except TypeError:
+                self.sm = self.gbinder.ServiceManager(device)
+            except Exception as e:
+                log("binder: %s" % e)
+                self.sm = None
+                return
+        if not self.sm.is_present():
+            return
+        remote, _status = self.sm.get_service_sync(locmgr.LOCATION_SERVICE)
+        appops, _status = self.sm.get_service_sync(locmgr.APPOPS_SERVICE)
+        if remote is None or appops is None:
+            return  # Android still booting
+        self.remote = remote
+        self.loc = self.gbinder.Client(remote, locmgr.LOCATION_IFACE)
+        self.appops = self.gbinder.Client(appops, locmgr.APPOPS_IFACE)
+        self.listener = self.sm.new_local_object(locmgr.LISTENER_IFACE, self.incoming)
+        gen = self.gen
+
+        def died():
+            if gen == self.gen:
+                self.down("Android's location service died")
+            return False
+
+        remote.add_death_handler(lambda: GLib.idle_add(died))
+        self.setting_up = True
+        self.setup_check()
+
+    def down(self, why):
+        was = self.up
+        self.reset()
+        if was:
+            log("Android gone: %s" % why)
+            self.on_down()
+
+    def fail(self, step, err):
+        log("setup: %s: %s (again in %d s)" % (step, err, SETUP_RETRY_S))
+        self.reset()  # start over (the queued rest of the setup is dropped)
+        self.retry_at = time.monotonic() + SETUP_RETRY_S
+
+    # -- the setup, one call after the other --
+
+    def setup_check(self):
+        def has(reader, err):
+            if err:
+                return self.fail("hasProvider", err)
+            passive = locmgr.read_bool(reader)
+            self.call(
+                self.loc,
+                locmgr.GET_ALL_PROVIDERS,
+                b"",
+                lambda r, e: listed(passive, r, e),
+                "getAllProviders",
+            )
+
+        def listed(passive, reader, err):
+            if err:
+                return self.fail("getAllProviders", err)
+            names = locmgr.read_string_list(reader)
+            if not locmgr.self_check_ok(passive, names):
+                self.broken = "the transaction codes do not fit this Android image"
+                self.setting_up = False
+                log(
+                    "setup: %s (hasProvider(passive)=%s, providers=%s): not touching Android"
+                    % (self.broken, passive, names)
+                )
+                return
+            self.providers_before = names
+            self.setup_appop()
+
+        self.call(self.loc, locmgr.HAS_PROVIDER, locmgr.has_provider("passive"), has, "hasProvider")
+
+    def setup_appop(self):
+        def checked(reader, err):
+            if err:
+                return self.fail("checkOperation", err)
+            mode = locmgr.read_int(reader)
+            if mode == locmgr.MODE_ALLOWED:
+                return self.setup_providers()
+            log("setup: allowing mock locations for the system package (app op mode was %d)" % mode)
+            self.call(self.appops, locmgr.SET_MODE, locmgr.set_mode_allowed(), set_, "setMode")
+
+        def set_(reader, err):
+            if err:
+                return self.fail("setMode", err)
+            locmgr.check_exception(reader)
+            self.setup_providers()
+
+        self.call(
+            self.appops, locmgr.CHECK_OPERATION, locmgr.check_operation(), checked, "checkOperation"
+        )
+
+    def setup_providers(self):
+        boot = system_server_id()
+        ours = boot is not None and read_file(self.marker) == boot
+        wanted = pol.providers(self.cfg)
+        self.mocked = []
+        for name in wanted:
+            if name == pol.GPS and name in self.providers_before and not ours:
+                log("setup: Android has a gps provider of its own: leaving it")
+                continue
+            self.mocked.append(name)
+        if not self.mocked:
+            return self.setup_listener()
+        pending = list(self.mocked)
+
+        def added(name, reader, err):
+            if err:
+                return self.fail("addTestProvider(%s)" % name, err)
+            locmgr.check_exception(reader)
+            pending.remove(name)
+            if not pending:
+                try:
+                    with open(self.marker, "w") as f:
+                        f.write(boot or "")
+                except OSError:
+                    pass
+                self.setup_listener()
+
+        for name in self.mocked:
+            self.call(
+                self.loc,
+                locmgr.ADD_TEST_PROVIDER,
+                locmgr.add_test_provider(name),
+                lambda r, e, n=name: added(n, r, e),
+                "addTestProvider",
+            )
+
+    def setup_listener(self):
+        def done(reader, err):
+            if err:
+                return self.fail("addProviderRequestListener", err)
+            locmgr.check_exception(reader)
+            self.setting_up = False
+            self.up = True
+            log("Android is up: test providers %s" % (", ".join(self.mocked) or "none"))
+            # Off, then as the host says: the listener hears the requests
+            # that already exist (a bridge restarted under a running app).
+            for name in self.mocked:
+                self.set_enabled_one(name, False)
+            self.enabled = None
+            self.on_up()
+
+        self.call(
+            self.loc,
+            locmgr.ADD_PROVIDER_REQUEST_LISTENER,
+            b"",
+            done,
+            "addProviderRequestListener",
+            obj=self.listener,
+        )
+
+    # -- running --
+
+    def set_enabled_one(self, name, on):
+        def done(reader, err):
+            if err:
+                log("setTestProviderEnabled(%s): %s" % (name, err))
+            else:
+                locmgr.check_exception(reader)
+
+        self.call(
+            self.loc,
+            locmgr.SET_TEST_PROVIDER_ENABLED,
+            locmgr.set_test_provider_enabled(name, on),
+            done,
+            "setTestProviderEnabled",
+        )
+
+    def set_enabled(self, on):
+        if not self.up or self.enabled == on:
+            return
+        self.enabled = on
+        for name in self.mocked:
+            self.set_enabled_one(name, on)
+
+    def send(self, provider, fix, checked):
+        payload = locmgr.set_test_provider_location(
+            provider, fix, boottime_ns() - pol.age_ns(fix, wall_ms())
+        )
+        if checked:
+
+            def done(reader, err):
+                if err:
+                    log("setTestProviderLocation(%s): %s" % (provider, err))
+                else:
+                    locmgr.check_exception(reader)
+
+            self.call(
+                self.loc,
+                locmgr.SET_TEST_PROVIDER_LOCATION,
+                payload,
+                done,
+                "setTestProviderLocation",
+            )
+        else:
+            self.oneway(self.loc, locmgr.SET_TEST_PROVIDER_LOCATION, payload)
+
+    def incoming(self, req, code, _flags):
+        reply = self.listener.new_reply() if self.listener is not None else None
+        if code != locmgr.ON_PROVIDER_REQUEST_CHANGED:
+            return reply, 0
+        if getattr(req, "sender_euid", None) is not None:
+            try:
+                euid = req.sender_euid()
+            except TypeError:
+                euid = req.sender_euid
+            if euid not in (0, 1000):  # system_server runs as Android's system uid
+                log("ignored a provider request report from uid %s" % euid)
+                return reply, 0
+        try:
+            provider, active, interval = locmgr.read_provider_request(reader_of(req))
+        except (ValueError, TypeError) as e:
+            log("provider request report: %s" % e)
+            return reply, 0
+        GLib.idle_add(lambda: self.on_request(provider, active, interval) and False)
+        return reply, 0
+
+    def shutdown(self, frozen):
+        """Leaving: the gps provider off (it stays until Android stops:
+        removing it would drop the apps' requests), our network provider
+        removed (Android's own comes back), the listener removed. Oneway,
+        and nothing while frozen: the session is ending anyway."""
+        if not self.up or frozen:
+            return
+        try:
+            for name in self.mocked:
+                if name == pol.GPS:
+                    self.oneway(
+                        self.loc,
+                        locmgr.SET_TEST_PROVIDER_ENABLED,
+                        locmgr.set_test_provider_enabled(name, False),
+                    )
+                else:
+                    self.oneway(
+                        self.loc, locmgr.REMOVE_TEST_PROVIDER, locmgr.remove_test_provider(name)
+                    )
+            req = self.loc.new_request()
+            req.append_local_object(self.listener)
+            self.loc.transact_sync_oneway(locmgr.REMOVE_PROVIDER_REQUEST_LISTENER, req)
+        except Exception as e:
+            log("shutdown: %s" % e)
+
+
+# -- geoclue -----------------------------------------------------------------------------------
+
+
+class Geoclue:
+    """One geoclue client, run at the level asked for (NONE: stopped)."""
+
+    def __init__(self, bus, on_fix, on_state):
+        self.bus = bus
+        self.on_fix = on_fix
+        self.on_state = on_state
+        self.path = None
+        self.sub = None
+        self.wanted = pol.NONE
+        self.running = pol.NONE
+        self.busy = False
+        self.error = None
+        self.retry_id = None
+        self.configured = False
+        self.level_ready = None
+        Gio.bus_watch_name_on_connection(bus, GC, Gio.BusNameWatcherFlags.NONE, None, self.vanished)
+
+    def vanished(self, *_a):
+        if self.path is not None:
+            log("geoclue went away")
+        self.drop_client()
+        self.running = pol.NONE
+        self.busy = False
+        if self.wanted != pol.NONE:
+            self.later(2)
+
+    def drop_client(self):
+        if self.sub is not None:
+            self.bus.signal_unsubscribe(self.sub)
+            self.sub = None
+        self.path = None
+        self.configured = False
+        self.level_ready = None
+
+    def later(self, seconds):
+        if self.retry_id is None:
+
+            def again():
+                self.retry_id = None
+                self.sync()
+                return False
+
+            self.retry_id = GLib.timeout_add_seconds(seconds, again)
+
+    def want(self, level):
+        if level != self.wanted:
+            self.wanted = level
+            self.sync()
+
+    def _call(self, path, iface, method, args, done):
+        self.busy = True
+
+        def finished(bus, result):
+            self.busy = False
+            try:
+                value = bus.call_finish(result)
+                err = None
+            except GLib.Error as e:
+                value, err = None, e.message
+            done(value, err)
+            if self.retry_id is None:  # unless a retry is scheduled: the next step
+                self.sync()
+
+        self.bus.call(
+            GC, path, iface, method, args, None, Gio.DBusCallFlags.NONE, 30000, None, finished
+        )
+
+    def _set(self, prop, variant, done):
+        self._call(
+            self.path, PROPS, "Set", GLib.Variant("(ssv)", (GC + ".Client", prop, variant)), done
+        )
+
+    def sync(self):
+        """One step toward what is wanted; each reply comes back here."""
+        if self.busy:
+            return
+        if self.wanted == self.running:
+            return
+        if self.running != pol.NONE:
+
+            def stopped(_v, err):
+                if err:
+                    log("geoclue Stop: %s" % err)
+                self.running = pol.NONE
+                self.on_state()
+
+            self._call(self.path, GC + ".Client", "Stop", None, stopped)
+            return
+        if self.path is None:
+
+            def got(value, err):
+                if err:
+                    self.error = "geoclue: %s" % err
+                    log(self.error)
+                    self.on_state()
+                    self.later(30)
+                    return
+                self.path = value.unpack()[0]
+                self.sub = self.bus.signal_subscribe(
+                    GC,
+                    GC + ".Client",
+                    "LocationUpdated",
+                    self.path,
+                    None,
+                    Gio.DBusSignalFlags.NONE,
+                    self.updated,
+                )
+
+            self._call(GC_MANAGER_PATH, GC + ".Manager", "GetClient", None, got)
+            return
+        if not self.configured:
+
+            def configured(_v, err):
+                if err:
+                    log("geoclue DesktopId: %s" % err)
+                self.configured = True
+
+            self._set("DesktopId", GLib.Variant("s", pol.DESKTOP_ID), configured)
+            return
+        level = self.wanted
+
+        def level_set(_v, err):
+            if err:
+                log("geoclue level: %s" % err)
+            self.level_ready = level
+
+        if self.level_ready != level:
+            self._set("RequestedAccuracyLevel", GLib.Variant("u", level), level_set)
+            return
+
+        def started(_v, err):
+            if err:
+                self.error = "geoclue refused: %s" % err
+                log(self.error)
+                self.running = pol.NONE
+                self.on_state()
+                self.later(30)
+                return
+            self.error = None
+            self.running = level
+            log("geoclue started (level %d)" % level)
+            self.on_state()
+
+        self._call(self.path, GC + ".Client", "Start", None, started)
+
+    def updated(self, _conn, _sender, _path, _iface, _signal, params):
+        new = params.unpack()[1]
+
+        def got(bus, result):
+            try:
+                props = bus.call_finish(result).unpack()[0]
+            except GLib.Error as e:
+                log("geoclue location: %s" % e.message)
+                return
+            self.on_fix(props)
+
+        self.bus.call(
+            GC,
+            new,
+            PROPS,
+            "GetAll",
+            GLib.Variant("(s)", (GC + ".Location",)),
+            None,
+            Gio.DBusCallFlags.NONE,
+            5000,
+            None,
+            got,
+        )
+
+    def stop_now(self):
+        if self.running != pol.NONE and self.path is not None:
+            try:
+                self.bus.call_sync(
+                    GC,
+                    self.path,
+                    GC + ".Client",
+                    "Stop",
+                    None,
+                    None,
+                    Gio.DBusCallFlags.NONE,
+                    3000,
+                    None,
+                )
+            except GLib.Error:
+                pass
+        self.running = pol.NONE
+
+
+# -- staying awake -------------------------------------------------------------------------------
+
+
+class Inhibitor:
+    def __init__(self, bus):
+        self.bus = bus
+        self.fd = None
+        self.failed = False
+
+    def hold(self, on):
+        if on and self.fd is None:
+            try:
+                ret, fds = self.bus.call_with_unix_fd_list_sync(
+                    "org.freedesktop.login1",
+                    "/org/freedesktop/login1",
+                    "org.freedesktop.login1.Manager",
+                    "Inhibit",
+                    GLib.Variant(
+                        "(ssss)",
+                        ("sleep", "Android apps", "An Android app is using the GPS", "block"),
+                    ),
+                    GLib.VariantType("(h)"),
+                    Gio.DBusCallFlags.NONE,
+                    5000,
+                    None,
+                    None,
+                )
+                self.fd = fds.get(ret.unpack()[0])
+                self.failed = False
+                log("holding the phone awake (an Android app uses the GPS)")
+            except GLib.Error as e:
+                if not self.failed:
+                    log("cannot hold the phone awake: %s" % e.message)
+                self.failed = True
+        elif not on and self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+            log("no longer holding the phone awake")
+
+
+# -- the bridge --------------------------------------------------------------------------------------
+
+
+def load_config():
+    cfg = pol.Config()
+    for path in CONFIGS:
+        cfg = pol.apply_config(cfg, pol.parse_config(read_file(path)))
+    return cfg
+
+
+class Bridge:
+    def __init__(self):
+        self.cfg = load_config()
+        self.policy = pol.Policy(self.cfg)
+        self.st = pol.State()
+        self.bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+        self.host = HostPermission(self.evaluate)
+        self.st.allowed = self.host.allowed
+        self.geoclue = Geoclue(self.bus, self.fix, self.evaluate)
+        self.inhibitor = Inhibitor(self.bus)
+        self.android = Android(self.cfg, self.android_up, self.android_down, self.request)
+        self.counts = {}
+        self.level_since = None
+        self.first_fix_s = None
+        self.last_accuracy = None
+        self.sent_since_check = 0
+        self.linger_id = None
+        self.decision = pol.Decision(pol.NONE, False, False)
+        self.status_path = os.path.join(runtime_dir(), "duo2-android-location.json")
+        GLib.timeout_add_seconds(ANDROID_POLL_S, self.tick)
+        self.tick()
+
+    def tick(self):
+        frozen = container_frozen()
+        if frozen is None and self.st.android:
+            self.android.down("the container stopped")
+        frozen = bool(frozen)
+        self.android.set_frozen(frozen)
+        if frozen != self.st.frozen:
+            self.st.frozen = frozen
+            log("container %s" % ("frozen" if frozen else "running"))
+            self.evaluate()
+        try:
+            self.android.poll(frozen)
+        except Exception as e:  # keep polling whatever one round did
+            log("android: %s: %s" % (type(e).__name__, e))
+            self.android.fail("poll", e)
+        return True
+
+    def android_up(self):
+        self.st.android = True
+        self.st.requests = {}
+        self.evaluate()
+
+    def android_down(self):
+        self.st.android = False
+        self.st.requests = {}
+        self.evaluate()
+
+    def request(self, provider, active, interval):
+        if provider not in (pol.GPS, pol.NETWORK):
+            return
+        if bool(self.st.requests.get(provider)) != active:
+            log(
+                "Android %s the %s provider%s"
+                % (
+                    "asks" if active else "no longer asks",
+                    provider,
+                    " (every %d ms)" % interval if active else "",
+                )
+            )
+        self.st.requests[provider] = active
+        self.evaluate()
+
+    def evaluate(self):
+        self.st.allowed = self.host.allowed
+        now = time.monotonic()
+        d = self.policy.decide(self.st, now)
+        if d.level != self.decision.level:
+            self.level_since = now if d.level != pol.NONE else None
+            self.first_fix_s = None
+            self.sent_since_check = 0
+        self.decision = d
+        self.android.set_enabled(d.providers_enabled)
+        self.geoclue.want(d.level)
+        self.inhibitor.hold(d.inhibit)
+        if self.linger_id is not None:
+            GLib.source_remove(self.linger_id)
+            self.linger_id = None
+        wait = self.policy.next_check(now)
+        if wait is not None:
+
+            def again():
+                self.linger_id = None
+                self.evaluate()
+                return False
+
+            self.linger_id = GLib.timeout_add(int(wait * 1000) + 50, again)
+        self.write_status()
+
+    def fix(self, props):
+        fix = pol.fix_from_geoclue(props, wall_ms())
+        if fix is None:
+            return
+        targets = self.policy.route(self.st, fix["accuracy"])
+        if not targets or not self.android.up:
+            return
+        if self.first_fix_s is None and pol.GPS in targets and self.level_since is not None:
+            self.first_fix_s = time.monotonic() - self.level_since
+            log(
+                "first satellite-grade fix for Android after %.1f s (accuracy %d m)"
+                % (self.first_fix_s, round(fix["accuracy"]))
+            )
+        self.last_accuracy = fix["accuracy"]
+        for provider in targets:
+            # every 30th send waits for Android's answer (a refusal shows in the log)
+            checked = self.sent_since_check == 0
+            self.sent_since_check = (self.sent_since_check + 1) % 30
+            try:
+                self.android.send(provider, fix, checked)
+            except Exception as e:
+                log("send: %s" % e)
+                continue
+            self.counts[provider] = self.counts.get(provider, 0) + 1
+        self.write_status()
+
+    def write_status(self):
+        data = pol.status(
+            self.st,
+            self.decision,
+            self.counts,
+            self.first_fix_s,
+            self.last_accuracy,
+            self.android.broken or self.geoclue.error,
+        )
+        tmp = self.status_path + ".tmp"
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                json.dump(data, f, indent=1, sort_keys=True)
+                f.write("\n")
+            os.replace(tmp, self.status_path)
+        except OSError:
+            pass
+
+    def shutdown(self):
+        self.geoclue.stop_now()
+        self.inhibitor.hold(False)
+        self.android.shutdown(self.st.frozen)
+        try:
+            os.unlink(self.status_path)
+        except OSError:
+            pass
+
+
+def make_undumpable():
+    import ctypes
+
+    try:
+        ctypes.CDLL(None, use_errno=True).prctl(4, 0)  # PR_SET_DUMPABLE 0
+    except (OSError, AttributeError):
+        pass
+
+
+def main():
+    make_undumpable()
+    try:
+        bridge = Bridge()
+    except ImportError as e:
+        log("cannot start: %s (python3-gbinder missing?)" % e)
+        return 1
+    except GLib.Error as e:
+        log("cannot start: %s" % e.message)
+        return 1
+    loop = GLib.MainLoop()
+
+    def stop(*_a):
+        loop.quit()
+        return False
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        GLib.unix_signal_add(GLib.PRIORITY_HIGH, sig, stop)
+    log("ready")
+    loop.run()
+    bridge.shutdown()
+    log("stopped")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

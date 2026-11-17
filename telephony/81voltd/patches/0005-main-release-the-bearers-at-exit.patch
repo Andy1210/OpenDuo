@@ -1,0 +1,160 @@
+From e7758a1eb7e56b9998ba4ca4e2d719dff92b7f32 Mon Sep 17 00:00:00 2001
+From: duo2-os <duo2-os@localhost>
+Date: Thu, 12 Nov 2026 16:19:59 +0100
+Subject: [PATCH 5/5] main: release the bearers at exit
+
+On SIGTERM or SIGINT the server is closed (its signal handlers on the
+modem object go with it) and the bearers this program created are
+disconnected and deleted. Before, stopping 81voltd left the IMS
+connection up in ModemManager (a README known issue), and a test needed
+the modem put into low power and back to get rid of it.
+---
+ main.c           | 14 ++++++++++++++
+ qvd-connection.c |  7 +++++++
+ qvd-connection.h |  1 +
+ qvd-modem.c      | 39 +++++++++++++++++++++++++++++++++++++++
+ qvd-modem.h      |  1 +
+ qvd-server.c     |  2 ++
+ 6 files changed, 64 insertions(+)
+
+diff --git a/main.c b/main.c
+index 0bd584e..528faf8 100644
+--- a/main.c
++++ b/main.c
+@@ -4,10 +4,19 @@
+  */
+ 
+ #include <glib.h>
++#include <glib-unix.h>
++#include <signal.h>
+ 
+ #include "qvd-modem.h"
+ #include "qvd-server.h"
+ 
++static gboolean quit_loop(gpointer data)
++{
++	g_main_loop_quit(data);
++
++	return G_SOURCE_REMOVE;
++}
++
+ int main(void)
+ {
+ 	GMainLoop *loop;
+@@ -32,9 +41,14 @@ int main(void)
+ 	}
+ 
+ 	loop = g_main_loop_new(NULL, FALSE);
++	g_unix_signal_add(SIGTERM, quit_loop, loop);
++	g_unix_signal_add(SIGINT, quit_loop, loop);
+ 	g_main_loop_run(loop);
+ 
++	g_info("81voltd stopping\n");
++	/* The server first: the modem sees the service go before its PDN. */
+ 	g_object_unref(server);
++	qvd_modem_release_bearers(modem);
+ 	g_object_unref(modem);
+ 
+ 	return 0;
+diff --git a/qvd-connection.c b/qvd-connection.c
+index e196b3c..97cdbd9 100644
+--- a/qvd-connection.c
++++ b/qvd-connection.c
+@@ -91,6 +91,13 @@ const gchar *qvd_connection_get_path(QVDConnection *conn)
+ 	return g_dbus_proxy_get_object_path(G_DBUS_PROXY(conn->bearer));
+ }
+ 
++MMBearer *qvd_connection_get_bearer(QVDConnection *conn)
++{
++	g_assert(conn != NULL);
++
++	return conn->bearer;
++}
++
+ MMBearerIpFamily qvd_connection_get_ip_type(const QVDConnection *conn)
+ {
+ 	g_assert(conn != NULL);
+diff --git a/qvd-connection.h b/qvd-connection.h
+index 8eceb51..2b7643f 100644
+--- a/qvd-connection.h
++++ b/qvd-connection.h
+@@ -19,6 +19,7 @@ QVDConnection *qvd_connection_new(MMBearerIpFamily ip_type);
+ 
+ const gchar *qvd_connection_get_path(QVDConnection *conn);
+ MMBearerIpFamily qvd_connection_get_ip_type(const QVDConnection *conn);
++MMBearer *qvd_connection_get_bearer(QVDConnection *conn);
+ 
+ void qvd_connection_get_handles(const QVDConnection *conn,
+ 				guint32 *sub_id, guint32 *conn_id,
+diff --git a/qvd-modem.c b/qvd-modem.c
+index efee61f..38d4997 100644
+--- a/qvd-modem.c
++++ b/qvd-modem.c
+@@ -453,3 +453,42 @@ QVDConnection *qvd_modem_get_connection(QVDModem *ctx,
+ 
+ 	return g_object_ref(conn);
+ }
++
++/*
++ * At exit: disconnect and delete the bearers this program created, so that
++ * stopping it takes the IMS connection down instead of leaving it to
++ * ModemManager (the modem notices its PDN going down by itself).
++ */
++void qvd_modem_release_bearers(QVDModem *ctx)
++{
++	GHashTableIter iter;
++	gpointer k, v;
++	GError *err = NULL;
++
++	if (ctx->bearers == NULL)
++		return;
++
++	g_hash_table_iter_init(&iter, ctx->bearers);
++	while (g_hash_table_iter_next(&iter, &k, &v)) {
++		QVDConnection *conn = QVD_CONNECTION(v);
++		MMBearer *bearer = qvd_connection_get_bearer(conn);
++		const gchar *path;
++
++		if (bearer == NULL)
++			continue;
++		path = mm_bearer_get_path(bearer);
++
++		if (mm_bearer_get_connected(bearer)
++		 && !mm_bearer_disconnect_sync(bearer, NULL, &err)) {
++			g_printerr("Exit: could not disconnect %s: %s\n", path, err->message);
++			g_clear_error(&err);
++		}
++		if (ctx->modem != NULL
++		 && !mm_modem_delete_bearer_sync(ctx->modem, path, NULL, &err)) {
++			g_printerr("Exit: could not delete %s: %s\n", path, err->message);
++			g_clear_error(&err);
++		} else {
++			g_message("Exit: released %s\n", path);
++		}
++	}
++}
+diff --git a/qvd-modem.h b/qvd-modem.h
+index 75b07da..af45c8d 100644
+--- a/qvd-modem.h
++++ b/qvd-modem.h
+@@ -27,6 +27,7 @@ QVDConnection *qvd_modem_get_connection(QVDModem *ctx,
+ 					GAsyncReadyCallback cb,
+ 					gpointer data);
+ gboolean qvd_modem_get_connection_finish(QVDModem *ctx, GAsyncResult *res, GError **err);
++void qvd_modem_release_bearers(QVDModem *ctx);
+ 
+ G_END_DECLS
+ 
+diff --git a/qvd-server.c b/qvd-server.c
+index 381fa1d..b58355b 100644
+--- a/qvd-server.c
++++ b/qvd-server.c
+@@ -170,6 +170,8 @@ static void qvd_server_dispose(GObject *obj)
+ 
+ 	// Close the socket and decrease the modem reference counter.
+ 	g_clear_object(&server->sock);
++	if (server->modem != NULL)
++		g_signal_handlers_disconnect_by_data(server->modem, server);
+ 	g_clear_object(&server->modem);
+ }
+ 

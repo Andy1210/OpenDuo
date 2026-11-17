@@ -1,0 +1,41 @@
+#!/bin/sh
+# duo2-push-poke: duo2-autosleep's sync_hook (as root, once WiFi answers after
+# a WiFi sync wake): ask the push connections that do not notice a sleep by
+# themselves to check in now, while the phone is awake for a few seconds.
+#
+#   - Waydroid's Google Play services: their MCS (FCM) connection lives in the
+#     container, behind the host's NAT, and nothing tells it the host slept;
+#     the MCS / GTalk heartbeat broadcasts make it send its heartbeat at once
+#     (a dead connection is then seen and reopened). Only while the container
+#     RUNS: a frozen one (no Android window, persist.waydroid.suspend) would
+#     freeze the attached shell with it, a stopped one has no connection.
+#
+# Native apps (Chromium / Electron, Telegram, Flare...) watch the network
+# themselves: the WiFi reconnection after a sleep without WoWLAN is the
+# change they react to. Every step is bounded, a failure is reported on
+# stderr (duo2-autosleep logs its last line), never fatal to the others.
+#
+#   duo2-push-poke [--dry-run]
+set -u
+DRY=${1:-}
+rc=0
+LXC=/var/lib/waydroid/lxc
+if command -v lxc-info >/dev/null 2>&1 && [ -d "$LXC/waydroid" ]; then
+    st=$(timeout 5 lxc-info -P "$LXC" -n waydroid -sH 2>/dev/null || true)
+    case $st in
+        RUNNING)
+            for a in com.google.android.intent.action.MCS_HEARTBEAT \
+                     com.google.android.intent.action.GTALK_HEARTBEAT; do
+                if [ "$DRY" = --dry-run ]; then
+                    echo "would broadcast $a"
+                    continue
+                fi
+                timeout 10 lxc-attach -P "$LXC" -n waydroid --clear-env -- \
+                    /system/bin/sh -c "am broadcast -p com.google.android.gms -a $a" \
+                    >/dev/null 2>&1 || { echo "waydroid: broadcast $a failed" >&2; rc=1; }
+            done ;;
+        "") ;;   # no container
+        *) echo "waydroid: container $st, not poked" ;;
+    esac
+fi
+exit $rc

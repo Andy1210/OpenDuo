@@ -1,0 +1,27 @@
+# The style of nibfair's C part (the same as touch/.clang-format; clang-format 18+):
+#   clang-format -i csrc/*.c
+BasedOnStyle: LLVM
+IndentWidth: 4
+ContinuationIndentWidth: 4
+ColumnLimit: 100
+PointerAlignment: Right
+AllowShortFunctionsOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true
+AllowShortBlocksOnASingleLine: Empty
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortEnumsOnASingleLine: true
+AllowShortRecordOnASingleLine: Always
+BreakTemplateDeclarations: Yes
+AccessModifierOffset: -4
+IndentCaseLabels: true
+NamespaceIndentation: None
+FixNamespaceComments: true
+SpacesBeforeTrailingComments: 1
+AlignTrailingComments:
+  Kind: Leave
+ReflowComments: false
+SortIncludes: CaseSensitive
+IncludeBlocks: Preserve
+Cpp11BracedListStyle: false
+BreakBeforeBraces: Attach

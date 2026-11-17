@@ -1,0 +1,17 @@
+# Copy to local.personal-data (never committed) and list what is personal to
+# you: scripts/check-personal-data reports every match. One Python regular
+# expression per line; "#" starts a comment; a line starting with "!" is an
+# allow pattern (a finding whose text or line matches it is dropped).
+# The phone's address and MAC in local.env are added automatically.
+
+# Machines and shares on your network: host names, ssh aliases, NAS mounts
+(?i)\bmy-desktop\b
+(?i)/mnt/my-nas\b
+# Your accounts and names
+(?i)\bmy-login-name\b
+# The phone: its serial number, your WiFi networks' names
+\bSERIAL0123\b
+\bMyHomeWiFi\b
+
+# Allowed: your copyright line is your choice
+!^Copyright \(c\) \d{4} My Name$

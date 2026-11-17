@@ -1,0 +1,241 @@
+#!/bin/bash
+# duo2-volte: the VoLTE session-only trial and its undo.
+# Run as root (the administrator: sudo duo2-volte ...).
+#
+#   duo2-volte status      read-only: rmtfs mode, the modem's active carrier
+#                          config, its data profiles, the IMS data server, the
+#                          bearers (APN, device, no addresses), IMS registration,
+#                          the radio's service per RAT, calls (state only)
+#   duo2-volte start       the trial: checks (rmtfs read-only, an IMS carrier
+#                          config active, no call, duo2-wwan with the IMS fix),
+#                          then 81voltd: the modem's IMS stack gets its PDN and
+#                          registers. Runtime only: no modem setting is written.
+#   duo2-volte watch SECS  while calls happen (in the background, for SECS
+#                          seconds): every few seconds during a call the radio's
+#                          service per RAT, IMS voice, and mobile data over the
+#                          bearer's own device; /run/duo2-volte/watch.log
+#   duo2-volte undo [--force]
+#                          81voltd stopped (it releases its bearers; left-over
+#                          IMS bearers are deleted here), then the modem
+#                          restarted the way a boot starts it (rmtfs restart,
+#                          duo2-modem-lpm, ModemManager, duo2-wwan): what the
+#                          modem's IMS stack wrote goes with rmtfs's memory.
+#                          --force: also during a call (which it ends)
+#
+# The modem selects its carrier config (MCFG) for the SIM by itself: with a
+# SIM on Telekom's network it is Commercial-DT-VOLTE, IMS enabled, waiting for the IMS
+# Data service on the AP (QRTR service 770), which nothing served before.
+# rmtfs runs read-only (-r): whatever the modem writes stays in rmtfs's
+# memory until rmtfs stops; `start` refuses to run otherwise. Nothing here
+# prints an identifier (IMEI, IMSI, ICCID, number, cell, IP address).
+set -u
+STATE=/run/duo2-volte
+NR_STATE=/run/duo2/wwan-nr.json
+IMS_APNS="ims sos hos"
+
+q() { timeout 30 qmicli -d qrtr://0 "$@" 2>&1; }
+say() { echo "$(date +%T) $*"; }
+die() { echo "duo2-volte: $*" >&2; exit 1; }
+[ "$(id -u)" = 0 ] || die "run as root (sudo duo2-volte ...)"
+
+rmtfs_readonly() {
+    local pid
+    pid=$(systemctl show -p MainPID --value rmtfs 2>/dev/null)
+    [ -n "$pid" ] && [ "$pid" != 0 ] && [ -r "/proc/$pid/cmdline" ] || return 1
+    tr '\0' '\n' < "/proc/$pid/cmdline" | grep -qx -- '-r'
+}
+
+# "Description|Status" of every software config (no IDs needed here).
+pdc_configs() {
+    q --pdc-list-configs=software | awk '
+        /Description:/ { sub(/.*Description: */, ""); d = $0 }
+        /Status:/ { sub(/.*Status: */, ""); print d "|" $0 }'
+}
+active_config() { pdc_configs | awk -F'|' '$2 == "Active" { print $1 }'; }
+
+profiles() {
+    q --wds-get-profile-list=3gpp | awk '
+        /^\t\[[0-9]+\]/ { n = $1 }
+        /APN:/ { sub(/.*APN: */, ""); print "  profile " n " APN " $0 }'
+}
+has_ims_profile() { profiles | grep -q "APN 'ims'"; }
+
+ims_server() { qrtr-lookup 2>/dev/null | awk '$1 == 770 { f = 1 } END { exit !f }'; }
+
+# Bearers: "path apn connected interface", from ModemManager (no addresses).
+bearers() {
+    local p kv
+    mmcli -K -m any 2>/dev/null | sed -n 's|^modem\.generic\.bearers\.value\[[0-9]*\] *: *\(/org/freedesktop/ModemManager1/Bearer/[0-9]*\)$|\1|p' |
+    while read -r p; do
+        kv=$(mmcli -K -b "$p" 2>/dev/null)
+        printf '%s %s %s %s\n' "${p##*/}" \
+            "$(echo "$kv" | sed -n 's/^bearer\.properties\.apn *: *//p' | head -1)" \
+            "$(echo "$kv" | sed -n 's/^bearer\.status\.connected *: *//p' | head -1)" \
+            "$(echo "$kv" | sed -n 's/^bearer\.status\.interface *: *//p' | head -1)"
+    done
+}
+is_ims_apn() {
+    local a
+    a=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+    for x in $IMS_APNS; do [ "$a" = "$x" ] && return 0; done
+    return 1
+}
+ims_bearers_up() { bearers | while read -r _n apn conn _if; do
+    is_ims_apn "$apn" && [ "$conn" = yes ] && echo "$_n"; done; }
+ims_bearer_up() { [ -n "$(ims_bearers_up)" ]; }
+
+# The modem's IMS registration and services: duo2-imsa (IMSA from a client
+# bound to the subscription; qmicli's unbound queries get InvalidOperation).
+IMSA=/usr/local/sbin/duo2-imsa
+imsa() { "$IMSA" 2>&1 | sed 's/^/  /'; }
+ims_registered() { "$IMSA" >/dev/null 2>&1; }
+
+# The radio's service per RAT and the cell's IMS voice support (no cell IDs).
+radio() {
+    q --nas-get-system-info | awk '
+        /^\t[A-Za-z0-9 ]+ service:/ { s = $0; sub(/^\t/, "", s); sub(/:$/, "", s); want = 1; next }
+        want && /^\t\tStatus:/ { sub(/^[[:space:]]*/, ""); print "  " s " " $0; want = 0 }
+        /IMS voice support/ { sub(/^[[:space:]]*/, ""); print "  " $0 }'
+}
+
+mm_state() {
+    mmcli -K -m any 2>/dev/null | grep -E '^modem\.(generic\.(state|access-technologies[^ ]*|signal-quality\.value)|3gpp\.(registration-state|packet-service-state)) ' |
+        sed 's/^/  /'
+}
+calls() { mmcli -m any --voice-list-calls 2>/dev/null | grep -o 'Call/[0-9]* .*'; }
+call_busy() { calls | grep -qvE 'terminated|^$'; }
+
+data_dev() { ip route show default metric 4096 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }'; }
+
+status() {
+    echo "== rmtfs: $(rmtfs_readonly && echo 'read-only (-r): modem writes stay in RAM' || echo 'NOT read-only')"
+    echo "== carrier config (PDC, software): active: $(active_config | tr '\n' ' ')"
+    pdc_configs | awk -F'|' '$2 == "Pending" { print "  pending: " $1 }'
+    echo "== data profiles"; profiles
+    echo "== IMS data server (QRTR 770): $(ims_server && echo present || echo absent); 81voltd $(systemctl is-active 81voltd 2>/dev/null)"
+    echo "== bearers (number APN connected device)"; bearers | sed 's/^/  /'
+    echo "== IMS"; imsa
+    echo "== radio"; radio
+    echo "== ModemManager"; mm_state
+    echo "== calls"; calls | sed 's/^/  /'
+}
+
+wait_for() {   # wait_for SECONDS DESCRIPTION command...: true when it held in time
+    local limit=$1 what=$2 t0
+    shift 2
+    t0=$(date +%s)
+    while [ $(( $(date +%s) - t0 )) -lt "$limit" ]; do
+        "$@" && { say "$what (after $(( $(date +%s) - t0 )) s)"; return 0; }
+        sleep 3
+    done
+    say "no $what within $limit s"
+    return 1
+}
+
+mm_registered() { mmcli -K -m any 2>/dev/null | grep -Eq '^modem\.3gpp\.registration-state +: (home|roaming)'; }
+data_up() { [ -n "$(data_dev)" ]; }
+
+start() {
+    rmtfs_readonly || die "rmtfs is not running read-only (-r): not starting"
+    local cfg
+    cfg=$(active_config)
+    [ -n "$cfg" ] || die "the modem has no active carrier config (PDC): it would have to be selected first (not done by this tool)"
+    has_ims_profile || die "the active carrier config ($cfg) has no 'ims' data profile"
+    call_busy && die "a call is in progress: not now"
+    grep -q 'def own_apn' /usr/local/sbin/duo2-wwan ||
+        die "duo2-wwan without the IMS bearer fix: install it first (telephony/volte-trial-install.sh)"
+    [ -x /usr/local/sbin/81voltd ] || die "no /usr/local/sbin/81voltd: install it first"
+    systemctl is-active -q duo2-wwan || die "duo2-wwan is not running"
+    local since mtime
+    since=$(date -d "$(systemctl show -p ExecMainStartTimestamp --value duo2-wwan)" +%s 2>/dev/null || echo 0)
+    mtime=$(stat -c %Y /usr/local/sbin/duo2-wwan)
+    [ "$since" -ge "$mtime" ] || die "duo2-wwan runs an older copy than the installed one: systemctl restart duo2-wwan"
+    mkdir -p "$STATE"
+    status > "$STATE/before.txt" 2>&1
+    say "carrier config: $cfg; starting 81voltd"
+    date +%s > "$STATE/started"
+    systemctl start 81voltd || die "81voltd did not start: journalctl -u 81voltd -b"
+    wait_for 15 "IMS data server announced" ims_server
+    wait_for 90 "IMS bearer connected (81voltd)" ims_bearer_up
+    wait_for 90 "IMS registered" ims_registered
+    status
+    echo
+    echo "log: journalctl -u 81voltd -b; duo2-wwan's: journalctl -u duo2-wwan -b | grep -i bearer"
+}
+
+watch() {
+    local secs=${1:-3600} t0 now last=0 dev
+    mkdir -p "$STATE"
+    t0=$(date +%s)
+    say "watching calls for $secs s" >> "$STATE/watch.log"
+    while now=$(date +%s); [ $((now - t0)) -lt "$secs" ]; do
+        if call_busy; then
+            if [ $((now - last)) -ge 5 ]; then
+                last=$now
+                {
+                    say "call: $(calls | tr '\n' ' ')"
+                    radio
+                    imsa | grep -i voice
+                    dev=$(data_dev)
+                    if [ -n "$dev" ]; then
+                        if ping -q -c 2 -W 2 -I "$dev" 9.9.9.9 >/dev/null 2>&1; then
+                            echo "  mobile data during the call: ping over $dev OK"
+                        else
+                            echo "  mobile data during the call: ping over $dev FAILED"
+                        fi
+                    else
+                        echo "  mobile data during the call: no data device"
+                    fi
+                } >> "$STATE/watch.log" 2>&1
+            fi
+            sleep 1
+        else
+            sleep 3
+        fi
+    done
+    say "watch over" >> "$STATE/watch.log"
+}
+
+undo() {
+    if call_busy && [ "${1:-}" != --force ]; then
+        die "a call is in progress (undo --force ends it)"
+    fi
+    say "stopping 81voltd"
+    systemctl stop 81voltd
+    local n apn conn dev
+    bearers | while read -r n apn conn dev; do
+        is_ims_apn "$apn" || continue
+        say "IMS bearer $n ($apn) left over: disconnecting and deleting it"
+        [ "$conn" = yes ] && mmcli -b "$n" --disconnect >/dev/null 2>&1
+        mmcli -m any --delete-bearer="$n" >/dev/null 2>&1
+    done
+    say "restarting the modem as at boot (duo2-wwan, ModemManager stopped; rmtfs restarted)"
+    systemctl stop duo2-wwan ModemManager
+    # smart 5G's saved state belongs to the modem run that ends here
+    rm -f "$NR_STATE"
+    systemctl restart rmtfs || die "rmtfs did not restart"
+    systemctl restart duo2-modem-lpm
+    systemctl start ModemManager
+    systemctl start duo2-wwan
+    wait_for 240 "registered again" mm_registered
+    wait_for 120 "mobile data up again" data_up
+    rm -f "$STATE/started"
+    status
+    echo
+    if ims_server; then echo "CHECK: an IMS data server (770) is still announced"; fi
+    if ims_bearer_up; then echo "CHECK: an IMS bearer is connected"; fi
+    if [ -f "$STATE/before.txt" ]; then
+        local was now_cfg
+        was=$(sed -n 's/^== carrier config (PDC, software): active: //p' "$STATE/before.txt")
+        now_cfg=$(active_config | tr '\n' ' ')
+        echo "carrier config before the trial: ${was:-?}; now: ${now_cfg:-none}"
+    fi
+}
+
+case ${1:-status} in
+status) status ;;
+start) start ;;
+watch) watch "${2:-3600}" ;;
+undo) undo "${2:-}" ;;
+*) die "usage: duo2-volte status|start|watch SECS|undo [--force]" ;;
+esac

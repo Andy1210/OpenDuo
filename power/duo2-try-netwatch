@@ -1,0 +1,223 @@
+#!/usr/bin/python3 -I
+"""duo2-try-netwatch: a duo2-try kernel that loses the WiFi reboots.
+
+The phone is often reachable over WiFi only. A try kernel (scripts/duo2-try:
+the boot entry duo2-test+1.conf, booted ONCE) that comes up without WiFi, or
+loses it later, would strand the phone until someone presses its buttons. This
+watchdog runs only on such a boot (the unit's ConditionKernelCommandLine=
+duo2.try) and reboots when
+
+  - no check has passed within BOOT_GRACE seconds of boot, or
+  - after one has, none passes for LOSS_LIMIT seconds in a row.
+
+The try entry is used up by then, so the reboot lands on duo2.conf, the
+known-good kernel. A check passes when there is a default route over wlan0
+and its gateway answers a ping on wlan0.
+
+Time is CLOCK_BOOTTIME, wall time since boot, suspends included. (It was
+CLOCK_MONOTONIC, which stands still in suspend, so that a sleeping phone with
+its WiFi off would not count as offline; then a loop of short suspends whose
+awake windows were too short for WiFi to come back starved it for half an
+hour, 2026-11-07. On a try boot there is no long sleep: duo2-autosleep does
+not suspend a try boot by itself, and a test suspend is at most 120 s.)
+
+  duo2-try-netwatch [--dry-run] [--boot-grace S] [--loss-limit S]
+                    [--interval S] [--host ADDR]
+
+--dry-run logs "would reboot" instead (and keeps watching); --host pings that
+address instead of the gateway (a test: an address that never answers shows
+the logic on a healthy phone without touching the WiFi). duo2.netwatch=off on
+the kernel command line switches it off (a try over USB without WiFi), and
+duo2.netwatch.loss=S sets the loss limit (LOSS_MIN..LOSS_MAX s: a try boot
+that sleeps for a measurement, duo2.autosleep.on_try=1, needs it longer than
+a sleep). A loss also needs AWAKE_MIN s of awake time (CLOCK_MONOTONIC)
+without a passing check: right after a long sleep WiFi takes a few seconds
+to come back, and the wall time asleep alone must not reboot the phone.
+"""
+
+import argparse
+import os
+import subprocess
+import sys
+import time
+
+BOOT_GRACE = 300  # s from boot to the first passing check
+LOSS_LIMIT = 600  # s without a passing check, once one has passed
+LOSS_MIN, LOSS_MAX = 600, 7200  # the range duo2.netwatch.loss= may set
+AWAKE_MIN = 60  # s awake without a passing check, for a loss
+INTERVAL = 15  # s between checks
+FALLBACK = 90  # s after "systemctl reboot" before SysRq b
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def boottime():
+    return time.clock_gettime(time.CLOCK_BOOTTIME)
+
+
+class Watch:
+    """The pure decision: feed it (boot time, check passed?, awake time)."""
+
+    def __init__(self, boot_grace=BOOT_GRACE, loss_limit=LOSS_LIMIT, awake_min=AWAKE_MIN):
+        self.boot_grace = boot_grace
+        self.loss_limit = loss_limit
+        self.awake_min = awake_min
+        self.ever_ok = False
+        self.last_ok = None
+        self.last_ok_awake = None
+
+    def step(self, now, ok, awake=None):
+        """Returns 'ok', 'wait' or 'reboot' (with a reason). awake: the
+        CLOCK_MONOTONIC time (default: now, a phone that never slept)."""
+        if awake is None:
+            awake = now
+        if ok:
+            self.ever_ok = True
+            self.last_ok = now
+            self.last_ok_awake = awake
+            return "ok", ""
+        if not self.ever_ok:
+            if now >= self.boot_grace:
+                return "reboot", "no WiFi %d s after boot" % now
+            return "wait", "no WiFi yet (%d s after boot)" % now
+        down = now - self.last_ok
+        if down >= self.loss_limit and awake - self.last_ok_awake >= self.awake_min:
+            return "reboot", "WiFi lost for %d s (%d s of it awake)" % (
+                down,
+                awake - self.last_ok_awake,
+            )
+        return "wait", "WiFi down for %d s" % down
+
+
+def gateway(dev="wlan0"):
+    """The default route's gateway over dev, or None."""
+    try:
+        out = subprocess.run(
+            ["ip", "-4", "route", "show", "default", "dev", dev],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return parse_gateway(out)
+
+
+def parse_gateway(out):
+    for line in out.splitlines():
+        w = line.split()
+        if w[:1] == ["default"] and "via" in w:
+            return w[w.index("via") + 1]
+    return None
+
+
+def ping(host, dev="wlan0"):
+    for _ in range(3):
+        try:
+            if (
+                subprocess.run(
+                    ["ping", "-n", "-q", "-c", "1", "-W", "3", "-I", dev, host],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10,
+                ).returncode
+                == 0
+            ):
+                return True
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return False
+
+
+def check(host=None):
+    gw = gateway()
+    if gw is None:
+        return False, "no default route over wlan0"
+    target = host or gw
+    if ping(target):
+        return True, ""
+    return False, "%s does not answer on wlan0" % target
+
+
+def reboot(reason):
+    log("REBOOT: %s (the try entry is used up: the known-good kernel boots)" % reason)
+    os.sync()
+    subprocess.run(["systemctl", "reboot"], timeout=60, check=False)
+    # A driver that died holding a device lock makes the orderly shutdown
+    # wait forever (scripts/lib/remote.sh duo2_reboot): reset without it.
+    time.sleep(FALLBACK)
+    log("still running %d s after systemctl reboot: SysRq b" % FALLBACK)
+    os.sync()
+    with open("/proc/sys/kernel/sysrq", "w") as f:
+        f.write("1")
+    with open("/proc/sysrq-trigger", "w") as f:
+        f.write("b")
+
+
+def read_cmdline():
+    try:
+        with open("/proc/cmdline") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def cmdline_off(text=None):
+    return "duo2.netwatch=off" in (read_cmdline() if text is None else text).split()
+
+
+def cmdline_loss(text):
+    """duo2.netwatch.loss=S, clamped to LOSS_MIN..LOSS_MAX; None if absent or bad."""
+    for w in text.split():
+        if w.startswith("duo2.netwatch.loss="):
+            try:
+                v = float(w.split("=", 1)[1])
+            except ValueError:
+                return None
+            return min(max(v, LOSS_MIN), LOSS_MAX)
+    return None
+
+
+def main(argv):
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--boot-grace", type=float, default=BOOT_GRACE)
+    ap.add_argument("--loss-limit", type=float, default=LOSS_LIMIT)
+    ap.add_argument("--interval", type=float, default=INTERVAL)
+    ap.add_argument("--host")
+    a = ap.parse_args(argv)
+    if cmdline_off():
+        log("duo2.netwatch=off: not watching")
+        return 0
+    loss = cmdline_loss(read_cmdline())
+    if loss is not None:
+        a.loss_limit = loss
+    w = Watch(a.boot_grace, a.loss_limit)
+    log(
+        "watching wlan0: reboot if no WiFi %d s after boot or lost for %d s%s"
+        % (a.boot_grace, a.loss_limit, " (DRY RUN)" if a.dry_run else "")
+    )
+    if a.dry_run:
+        # a dry run started late in a boot: count from its own start
+        t0 = boottime()
+    else:
+        t0 = 0.0
+    last = None
+    while True:
+        ok, why = check(a.host)
+        action, reason = w.step(boottime() - t0, ok, time.monotonic())
+        if action != last or action == "reboot":
+            log(("WiFi ok" if ok else why) + ("" if action == "ok" else ": " + reason))
+            last = action
+        if action == "reboot":
+            if a.dry_run:
+                log("DRY RUN: would reboot now (%s)" % reason)
+                return 0
+            reboot(reason)
+        time.sleep(a.interval)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

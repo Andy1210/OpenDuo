@@ -1,0 +1,84 @@
+#!/bin/bash
+# The camera bring-up's first steps on a try kernel (docs/hardware/camera.md,
+# steps 1-3), run ON THE PHONE as root, one module at a time, the kernel log
+# after each:
+#
+#   sudo duo2-camera-probe [pmic|camcc|cci|eeprom|sensors|camss|all|camera]
+#
+# camera: everything a stream needs, in order (pmic, camcc, cci, sensors,
+# camss, and the dma-buf system heap of libcamera's software ISP), without
+# the EEPROM reads; then duo2-camera-stream or libcamera's cam.
+#
+# The try boots with the camera modules blacklisted (modprobe.blacklist=...
+# on duo2-try's --append), so nothing of it runs until this does. Nothing
+# here streams, takes a picture, lights a LED or touches the flash: the
+# sensors are powered up only to read their model number (imx48x) and
+# powered down again; the EEPROMs are read-only (the first bytes are counted,
+# not shown).
+set -u
+step=${1:-all}
+log() { echo "== $*"; }
+mark() { MARK=$(dmesg | wc -l); }
+since() { dmesg | tail -n +$((MARK + 1)) | grep -v -E "audit|wlan0|ath11k" | tail -40; }
+load() {
+    mark
+    log "modprobe $1"
+    if ! timeout 60 modprobe "$1"; then echo "modprobe $1: failed or timed out"; fi
+    sleep 1
+    since
+}
+
+pmic() {
+    load qcom_pm8008
+    load qcom_pm8008_regulator
+    log "PM8008 regulators"
+    for r in /sys/class/regulator/regulator.*; do
+        n=$(cat "$r/name" 2>/dev/null)
+        case $n in vreg_l?[ij]_*) echo "$n $(cat "$r/state" 2>/dev/null) $(cat "$r/microvolts" 2>/dev/null) uV";; esac
+    done
+}
+camcc() {
+    load camcc_sm8350
+    log "camcc clocks (enabled ones)"
+    grep -E "^ *cam_cc" /sys/kernel/debug/clk/clk_summary 2>/dev/null | awk '$2 > 0 || $3 > 0' | head -20
+    log "camcc power domains"
+    grep -E "cam_cc|titan|ife_|bps|ipe" /sys/kernel/debug/pm_genpd/pm_genpd_summary 2>/dev/null | head -12
+}
+cci() {
+    load i2c_qcom_cci
+    log "CCI adapters"
+    for a in /sys/bus/i2c/devices/i2c-*; do
+        n=$(cat "$a/name" 2>/dev/null); case $n in *cci*|*CCI*) echo "$(basename "$a") $n";; esac
+    done
+}
+eeprom() {
+    load at24
+    log "EEPROMs (read-only; bytes read, not shown)"
+    for e in /sys/bus/nvmem/devices/*; do
+        case $(readlink -f "$e") in
+            *cci*) echo "$(basename "$e"): $(timeout 10 head -c 8192 "$e/nvmem" 2>/dev/null | wc -c) bytes, $(timeout 10 head -c 8192 "$e/nvmem" 2>/dev/null | tr -d '\377' | wc -c) not 0xff";;
+        esac
+    done
+}
+sensors() {
+    load imx48x
+    log "sensors bound to imx48x"
+    # shellcheck disable=SC2010 # i2c device names (BUS-ADDR), no odd characters
+    ls /sys/bus/i2c/drivers/imx48x/ 2>/dev/null | grep -- - || echo "(none)"
+}
+# shellcheck disable=SC2012 # device node names, listed for the reader
+camss() {
+    load qcom_camss
+    log "media devices"
+    ls /dev/media* /dev/v4l-subdev* 2>/dev/null | head; ls /dev/video* 2>/dev/null | tr '\n' ' '; echo
+    command -v media-ctl >/dev/null && media-ctl -d /dev/media0 -p 2>/dev/null | grep -E "entity|type" | head -40
+}
+
+case $step in
+    pmic|camcc|cci|eeprom|sensors|camss) $step ;;
+    all) pmic; camcc; cci; eeprom; sensors; camss ;;
+    camera) pmic >/dev/null; camcc >/dev/null; cci >/dev/null; sensors; camss >/dev/null
+        modprobe system_heap
+        log "cameras"; media-ctl -d /dev/media0 -p 2>/dev/null | sed -n 's/^- entity [0-9]*: \(imx[0-9]* [0-9]-00[0-9a-f]*\).*/\1/p' ;;
+    *) echo "usage: $0 [pmic|camcc|cci|eeprom|sensors|camss|all|camera]" >&2; exit 2 ;;
+esac

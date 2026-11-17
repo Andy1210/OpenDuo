@@ -1,0 +1,11 @@
+# duo2-os: calendar reminders (evolution-data-server's alarm notifier, what
+# GNOME autostarts), started by shell/duo-apps/session-start once duo-wc's
+# session is up. The display and the bus come from the user manager's
+# environment (duo-wc's session exports them).
+[Unit]
+Description=Calendar reminders (evolution-alarm-notify)
+
+[Service]
+ExecStart=/usr/libexec/evolution-data-server/evolution-alarm-notify
+Restart=on-failure
+RestartSec=10

@@ -1,0 +1,350 @@
+From 8d1b4618f0f0883f921cc2c10eeb7136c6a4de6c Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 00:50:40 +0100
+Subject: [PATCH 068/137] media: qcom: camss: Add the TPG 1.0.2 of SM8350
+
+Titan 580 (SM8350) has its two test pattern generators as separate TPG
+1.0.2 blocks (0xac97000, 0xac98000) in front of the CSI receivers. When
+the camera top mux (CPAS top + 0x90) selects TPG n, the CSID reading
+CSIPHY n gets the generator's packets instead of the PHY's. A TPG 1.0.2
+sends one data type on virtual channel 0, with no lane, VC or payload
+settings of its own, which makes it a different block from the TPG 2.x
+of camss-tpg-gen1.c.
+
+Add its ops (programming as in the vendor driver's cam_top_tpg_ver2.c,
+GPL-2.0) to the TPG framework, a second, shared register region for a
+TPG (the camera top, mapped without a request), the two SM8350 TPGs on
+their PHYs' clocks, and the regions in the binding.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../bindings/media/qcom,sm8350-camss.yaml     |   5 +-
+ drivers/media/platform/qcom/camss/Makefile    |   1 +
+ .../media/platform/qcom/camss/camss-tpg-1-0.c | 174 ++++++++++++++++++
+ drivers/media/platform/qcom/camss/camss-tpg.c |  16 ++
+ drivers/media/platform/qcom/camss/camss-tpg.h |   2 +
+ drivers/media/platform/qcom/camss/camss.c     |  37 ++++
+ 6 files changed, 234 insertions(+), 1 deletion(-)
+ create mode 100644 drivers/media/platform/qcom/camss/camss-tpg-1-0.c
+
+diff --git a/Documentation/devicetree/bindings/media/qcom,sm8350-camss.yaml b/Documentation/devicetree/bindings/media/qcom,sm8350-camss.yaml
+index e3a2dfdc2784..8a50ffeea5d5 100644
+--- a/Documentation/devicetree/bindings/media/qcom,sm8350-camss.yaml
++++ b/Documentation/devicetree/bindings/media/qcom,sm8350-camss.yaml
+@@ -18,7 +18,7 @@ properties:
+     const: qcom,sm8350-camss
+ 
+   reg:
+-    maxItems: 11
++    maxItems: 14
+ 
+   reg-names:
+     items:
+@@ -33,6 +33,9 @@ properties:
+       - const: vfe2
+       - const: vfe_lite0
+       - const: vfe_lite1
++      - const: tpg0
++      - const: tpg1
++      - const: cpas_top
+ 
+   clocks:
+     maxItems: 42
+diff --git a/drivers/media/platform/qcom/camss/Makefile b/drivers/media/platform/qcom/camss/Makefile
+index 27898b3cc7d3..00681496b373 100644
+--- a/drivers/media/platform/qcom/camss/Makefile
++++ b/drivers/media/platform/qcom/camss/Makefile
+@@ -17,6 +17,7 @@ qcom-camss-objs += \
+ 		camss-ispif.o \
+ 		camss-tpg.o \
+ 		camss-tpg-gen1.o \
++		camss-tpg-1-0.o \
+ 		camss-vfe.o \
+ 		camss-vfe-4-1.o \
+ 		camss-vfe-4-7.o \
+diff --git a/drivers/media/platform/qcom/camss/camss-tpg-1-0.c b/drivers/media/platform/qcom/camss/camss-tpg-1-0.c
+new file mode 100644
+index 000000000000..afd19d989240
+--- /dev/null
++++ b/drivers/media/platform/qcom/camss/camss-tpg-1-0.c
+@@ -0,0 +1,174 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Qualcomm MSM Camera Subsystem - TPG 1.0.2 (Test Pattern Generator)
++ *
++ * Titan 580 (SM8350) has two of these in front of the CSI receivers. When
++ * the camera top mux selects TPG n, the CSID that reads CSIPHY n receives
++ * the generator's packets instead of the PHY's. A generator sends one data
++ * type on virtual channel 0, continuously; it has no lane, VC or payload
++ * settings of its own (unlike the TPG 2.x blocks of camss-tpg-gen1.c).
++ *
++ * The programming follows the vendor camera driver's TPG 1.0.2 support
++ * (cam_top_tpg_ver2.c and cam_top_tpg102.h, GPL-2.0).
++ */
++#include <linux/bitfield.h>
++#include <linux/io.h>
++#include <linux/kernel.h>
++
++#include "camss-tpg.h"
++#include "camss.h"
++
++#define TPG_1_0_HW_VERSION		0x0
++#define TPG_1_0_HW_STATUS		0x4
++
++#define TPG_1_0_MODULE_CFG		0x60
++# define MODULE_CFG_EN				BIT(0)
++
++#define TPG_1_0_CFG_0			0x68
++# define CFG_0_FRAME_HEIGHT			GENMASK(13, 0)
++# define CFG_0_FRAME_WIDTH			GENMASK(29, 16)
++
++#define TPG_1_0_CFG_1			0x6c
++# define CFG_1_V_BLANK				GENMASK(17, 0)
++# define CFG_1_H_BLANK				GENMASK(30, 20)
++
++#define TPG_1_0_CFG_2			0x70
++# define CFG_2_PAYLOAD_MODE			GENMASK(3, 0)
++# define CFG_2_DATA_TYPE			GENMASK(16, 11)
++
++#define TPG_1_0_CFG_3			0x74
++# define CFG_3_NUM_FRAMES			GENMASK(19, 0)
++
++/* In the camera top (CPAS) register space: which TPG replaces its CSIPHY */
++#define CAM_TOP_TPG_MUX_SEL		0x90
++# define TPG_MUX_SEL_EN(n)			BIT((n) * 8)
++
++#define TPG_1_0_H_BLANK_DEFAULT		500
++#define TPG_1_0_V_BLANK_DEFAULT		600
++
++/* the test pattern menu (tpg_testgen_config.mode) */
++#define TPG_1_0_MODE_DISABLED		0
++#define TPG_1_0_MODE_DEFAULT		1
++#define TPG_1_0_MODE_COLOR_BARS		2
++#define TPG_1_0_MODE_NUM		3
++
++static const char * const tpg_1_0_modes[] = {
++	[TPG_1_0_MODE_DISABLED]		= "Disabled",
++	[TPG_1_0_MODE_DEFAULT]		= "Default pattern",
++	[TPG_1_0_MODE_COLOR_BARS]	= "Color bars",
++};
++
++/* The payload mode the vendor driver names for colour bars */
++#define TPG_1_0_PAYLOAD_COLOR_BARS	0x8
++
++static int tpg_1_0_stream_on(struct tpg_device *tpg)
++{
++	const struct tpg_format_info *format;
++	struct v4l2_mbus_framefmt *fmt = &tpg->fmt;
++	u32 val;
++
++	format = tpg_get_fmt_entry(tpg->res->formats->formats,
++				   tpg->res->formats->nformats, fmt->code);
++	if (IS_ERR(format))
++		return -EINVAL;
++
++	if (!tpg->top)
++		return -ENODEV;
++
++	if (tpg->testgen.mode == TPG_1_0_MODE_DISABLED) {
++		dev_err(tpg->camss->dev, "tpg%u: no test pattern selected\n", tpg->id);
++		return -EINVAL;
++	}
++
++	writel(0, tpg->base + TPG_1_0_MODULE_CFG);
++
++	val = readl(tpg->top + CAM_TOP_TPG_MUX_SEL);
++	writel(val | TPG_MUX_SEL_EN(tpg->id), tpg->top + CAM_TOP_TPG_MUX_SEL);
++
++	val = FIELD_PREP(CFG_0_FRAME_WIDTH, fmt->width) |
++	      FIELD_PREP(CFG_0_FRAME_HEIGHT, fmt->height);
++	writel(val, tpg->base + TPG_1_0_CFG_0);
++
++	val = FIELD_PREP(CFG_1_H_BLANK, TPG_1_0_H_BLANK_DEFAULT) |
++	      FIELD_PREP(CFG_1_V_BLANK, TPG_1_0_V_BLANK_DEFAULT);
++	writel(val, tpg->base + TPG_1_0_CFG_1);
++
++	val = FIELD_PREP(CFG_2_DATA_TYPE, format->data_type);
++	if (tpg->testgen.mode == TPG_1_0_MODE_COLOR_BARS)
++		val |= FIELD_PREP(CFG_2_PAYLOAD_MODE, TPG_1_0_PAYLOAD_COLOR_BARS);
++	writel(val, tpg->base + TPG_1_0_CFG_2);
++
++	/* as many frames as the counter holds: until stopped, in practice */
++	writel(CFG_3_NUM_FRAMES, tpg->base + TPG_1_0_CFG_3);
++
++	writel(MODULE_CFG_EN, tpg->base + TPG_1_0_MODULE_CFG);
++
++	dev_dbg(tpg->camss->dev, "tpg%u: %ux%u dt 0x%02x, status 0x%08x\n",
++		tpg->id, fmt->width, fmt->height, format->data_type,
++		readl(tpg->base + TPG_1_0_HW_STATUS));
++
++	return 0;
++}
++
++static int tpg_1_0_reset(struct tpg_device *tpg)
++{
++	writel(0, tpg->base + TPG_1_0_MODULE_CFG);
++
++	return 0;
++}
++
++static void tpg_1_0_stream_off(struct tpg_device *tpg)
++{
++	u32 val;
++
++	tpg_1_0_reset(tpg);
++
++	if (tpg->top) {
++		val = readl(tpg->top + CAM_TOP_TPG_MUX_SEL);
++		writel(val & ~TPG_MUX_SEL_EN(tpg->id), tpg->top + CAM_TOP_TPG_MUX_SEL);
++	}
++}
++
++static int tpg_1_0_configure_stream(struct tpg_device *tpg, u8 enable)
++{
++	if (enable)
++		return tpg_1_0_stream_on(tpg);
++
++	tpg_1_0_stream_off(tpg);
++
++	return 0;
++}
++
++static int tpg_1_0_configure_testgen_pattern(struct tpg_device *tpg, s32 val)
++{
++	if (val < 0 || val >= TPG_1_0_MODE_NUM)
++		return -EINVAL;
++
++	tpg->testgen.mode = val;
++
++	return 0;
++}
++
++static u32 tpg_1_0_hw_version(struct tpg_device *tpg)
++{
++	tpg->hw_version = readl(tpg->base + TPG_1_0_HW_VERSION);
++	dev_dbg(tpg->camss->dev, "tpg%u: HW version 0x%08x\n", tpg->id,
++		tpg->hw_version);
++
++	return tpg->hw_version;
++}
++
++static void tpg_1_0_subdev_init(struct tpg_device *tpg)
++{
++	tpg->testgen.modes = tpg_1_0_modes;
++	/* the highest menu index */
++	tpg->testgen.nmodes = TPG_1_0_MODE_NUM - 1;
++}
++
++const struct tpg_hw_ops tpg_ops_1_0 = {
++	.configure_stream = tpg_1_0_configure_stream,
++	.configure_testgen_pattern = tpg_1_0_configure_testgen_pattern,
++	.hw_version = tpg_1_0_hw_version,
++	.reset = tpg_1_0_reset,
++	.subdev_init = tpg_1_0_subdev_init,
++};
+diff --git a/drivers/media/platform/qcom/camss/camss-tpg.c b/drivers/media/platform/qcom/camss/camss-tpg.c
+index c5b75132add4..39b0385d56f5 100644
+--- a/drivers/media/platform/qcom/camss/camss-tpg.c
++++ b/drivers/media/platform/qcom/camss/camss-tpg.c
+@@ -364,6 +364,22 @@ int msm_tpg_subdev_init(struct camss *camss,
+ 	if (IS_ERR(tpg->base))
+ 		return PTR_ERR(tpg->base);
+ 
++	/*
++	 * A second region, shared by all TPGs (and so not requested): the
++	 * camera top registers that route a TPG into a CSI receiver.
++	 */
++	if (res->reg[1]) {
++		struct resource *r;
++
++		r = platform_get_resource_byname(pdev, IORESOURCE_MEM, res->reg[1]);
++		if (!r)
++			return -ENODEV;
++
++		tpg->top = devm_ioremap(dev, r->start, resource_size(r));
++		if (!tpg->top)
++			return -ENOMEM;
++	}
++
+ 	tpg->nclocks = 0;
+ 	while (res->clock[tpg->nclocks])
+ 		tpg->nclocks++;
+diff --git a/drivers/media/platform/qcom/camss/camss-tpg.h b/drivers/media/platform/qcom/camss/camss-tpg.h
+index 7fb35a97dd06..831cafa578d5 100644
+--- a/drivers/media/platform/qcom/camss/camss-tpg.h
++++ b/drivers/media/platform/qcom/camss/camss-tpg.h
+@@ -86,6 +86,7 @@ struct tpg_device {
+ 	struct v4l2_subdev subdev;
+ 	struct media_pad pad;
+ 	void __iomem *base;
++	void __iomem *top;
+ 	struct camss_clock *clock;
+ 	int nclocks;
+ 	struct tpg_testgen_config testgen;
+@@ -114,5 +115,6 @@ void msm_tpg_unregister_entity(struct tpg_device *tpg);
+ extern const struct tpg_formats tpg_formats_gen1;
+ 
+ extern const struct tpg_hw_ops tpg_ops_gen1;
++extern const struct tpg_hw_ops tpg_ops_1_0;
+ 
+ #endif /* QC_MSM_CAMSS_TPG_H */
+diff --git a/drivers/media/platform/qcom/camss/camss.c b/drivers/media/platform/qcom/camss/camss.c
+index cd3686ded85e..64b85ebe07c6 100644
+--- a/drivers/media/platform/qcom/camss/camss.c
++++ b/drivers/media/platform/qcom/camss/camss.c
+@@ -2252,6 +2252,41 @@ static const struct resources_icc icc_res_sm8250[] = {
+ 	},
+ };
+ 
++/*
++ * SM8350 (Titan 580): two TPG 1.0.2 blocks, TPG n in place of CSIPHY n, on
++ * that PHY's clocks.
++ */
++static const struct camss_subdev_resources tpg_res_8350[] = {
++	/* TPG0 */
++	{
++		.regulators = {},
++		.clock = { "cpas_ahb", "csiphy0", "csiphy0_timer" },
++		.clock_rate = { { 0 },
++				{ 400000000 },
++				{ 300000000 } },
++		.reg = { "tpg0", "cpas_top" },
++		.tpg = {
++			.lane_cnt = 4,
++			.formats = &tpg_formats_gen1,
++			.hw_ops = &tpg_ops_1_0
++		}
++	},
++	/* TPG1 */
++	{
++		.regulators = {},
++		.clock = { "cpas_ahb", "csiphy1", "csiphy1_timer" },
++		.clock_rate = { { 0 },
++				{ 400000000 },
++				{ 300000000 } },
++		.reg = { "tpg1", "cpas_top" },
++		.tpg = {
++			.lane_cnt = 4,
++			.formats = &tpg_formats_gen1,
++			.hw_ops = &tpg_ops_1_0
++		}
++	},
++};
++
+ /*
+  * SM8350 (Titan 580): the vendor driver runs CSID580 with the CSID480 data and
+  * VFE580 with the VFE480 tables, so the SM8250 ops serve. Three full IFEs
+@@ -5899,11 +5934,13 @@ static const struct camss_resources sm8350_resources = {
+ 	.version = CAMSS_8350,
+ 	.pd_name = "top",
+ 	.csiphy_res = csiphy_res_8250,
++	.tpg_res = tpg_res_8350,
+ 	.csid_res = csid_res_8350,
+ 	.vfe_res = vfe_res_8350,
+ 	.icc_res = icc_res_sm8250,
+ 	.icc_path_num = ARRAY_SIZE(icc_res_sm8250),
+ 	.csiphy_num = ARRAY_SIZE(csiphy_res_8250),
++	.tpg_num = ARRAY_SIZE(tpg_res_8350),
+ 	.csid_num = ARRAY_SIZE(csid_res_8350),
+ 	.vfe_num = ARRAY_SIZE(vfe_res_8350),
+ };

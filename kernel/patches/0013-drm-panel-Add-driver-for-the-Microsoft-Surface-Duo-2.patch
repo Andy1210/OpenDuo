@@ -1,0 +1,387 @@
+From cd292a07ac792bbcc0badcca9e92122fb6acad0d Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Fri, 6 Nov 2026 14:22:31 +0100
+Subject: [PATCH 013/137] drm/panel: Add driver for the Microsoft Surface Duo 2
+ panels
+
+The Surface Duo 2 has two 1344x1892 AMOLED panels ("elgin" in the vendor
+tree) with a Samsung display driver IC, one per DSI link. They run in
+command mode with DSC 1.1 (two 672x946 slices, 8 bpc, 8 bpp) and take
+their brightness as an 11-bit DCS value.
+
+The init and exit sequences are the ones of the vendor device tree for
+the retail board; the picture parameter set is built from the DSC
+configuration the DSI host completes.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/gpu/drm/panel/Kconfig                 |  13 +
+ drivers/gpu/drm/panel/Makefile                |   1 +
+ drivers/gpu/drm/panel/panel-microsoft-elgin.c | 322 ++++++++++++++++++
+ 3 files changed, 336 insertions(+)
+ create mode 100644 drivers/gpu/drm/panel/panel-microsoft-elgin.c
+
+diff --git a/drivers/gpu/drm/panel/Kconfig b/drivers/gpu/drm/panel/Kconfig
+index cbdf7b8f7f7a..bc600ab9605d 100644
+--- a/drivers/gpu/drm/panel/Kconfig
++++ b/drivers/gpu/drm/panel/Kconfig
+@@ -573,6 +573,19 @@ config DRM_PANEL_MANTIX_MLAF057WE51
+ 	  has a resolution of 720x1440 pixels, a built in backlight and touch
+ 	  controller.
+ 
++config DRM_PANEL_MICROSOFT_ELGIN
++	tristate "Microsoft Surface Duo 2 elgin AMOLED panels"
++	depends on OF
++	depends on DRM_MIPI_DSI
++	depends on BACKLIGHT_CLASS_DEVICE
++	select DRM_DISPLAY_DSC_HELPER
++	select DRM_DISPLAY_HELPER
++	help
++	  Say Y or M here if you want to enable support for the two
++	  1344x1892 "elgin" AMOLED panels of the Microsoft Surface Duo 2.
++	  They run in MIPI DSI command mode with DSC compression, one panel
++	  per DSI link.
++
+ config DRM_PANEL_MOTOROLA_MOT
+ 	tristate "Atrix 4G and Droid X2 540x960 DSI video mode panel"
+ 	depends on OF
+diff --git a/drivers/gpu/drm/panel/Makefile b/drivers/gpu/drm/panel/Makefile
+index 3b523cf37833..14ac5ed4a804 100644
+--- a/drivers/gpu/drm/panel/Makefile
++++ b/drivers/gpu/drm/panel/Makefile
+@@ -55,6 +55,7 @@ obj-$(CONFIG_DRM_PANEL_LG_LG4573) += panel-lg-lg4573.o
+ obj-$(CONFIG_DRM_PANEL_LG_SW43408) += panel-lg-sw43408.o
+ obj-$(CONFIG_DRM_PANEL_LXD_M9189A) += panel-lxd-m9189a.o
+ obj-$(CONFIG_DRM_PANEL_MAGNACHIP_D53E6EA8966) += panel-magnachip-d53e6ea8966.o
++obj-$(CONFIG_DRM_PANEL_MICROSOFT_ELGIN) += panel-microsoft-elgin.o
+ obj-$(CONFIG_DRM_PANEL_MOTOROLA_MOT) += panel-motorola-mot.o
+ obj-$(CONFIG_DRM_PANEL_NEC_NL8048HL11) += panel-nec-nl8048hl11.o
+ obj-$(CONFIG_DRM_PANEL_NEWVISION_NV3051D) += panel-newvision-nv3051d.o
+diff --git a/drivers/gpu/drm/panel/panel-microsoft-elgin.c b/drivers/gpu/drm/panel/panel-microsoft-elgin.c
+new file mode 100644
+index 000000000000..2a170632c237
+--- /dev/null
++++ b/drivers/gpu/drm/panel/panel-microsoft-elgin.c
+@@ -0,0 +1,322 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Panel driver for the two "elgin" AMOLED panels of the Microsoft Surface
++ * Duo 2: 1344x1892, MIPI DSI command mode, DSC 1.1 (two 672x946 slices,
++ * 8 bpc, 8 bpp), Samsung display driver IC, DCS brightness (11 bits).
++ *
++ * Each panel sits on its own DSI link (left: DSI0, right: DSI1) with its own
++ * reset and TE line; both share the same supplies. The command sequences are
++ * the ones the vendor device tree carries for the retail ("MP") board.
++ */
++
++#include <linux/backlight.h>
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/regulator/consumer.h>
++
++#include <drm/display/drm_dsc.h>
++#include <drm/display/drm_dsc_helper.h>
++#include <drm/drm_mipi_dsi.h>
++#include <drm/drm_modes.h>
++#include <drm/drm_panel.h>
++#include <drm/drm_probe_helper.h>
++
++#include <video/mipi_display.h>
++
++#define ELGIN_WIDTH	1344
++#define ELGIN_HEIGHT	1892
++
++struct elgin {
++	struct drm_panel panel;
++	struct mipi_dsi_device *dsi;
++	struct drm_dsc_config dsc;
++	struct gpio_desc *reset_gpio;
++	struct regulator_bulk_data *supplies;
++};
++
++/* In the vendor's power-on order. */
++static const struct regulator_bulk_data elgin_supplies[] = {
++	{ .supply = "vdda" },	/* 3.072 V */
++	{ .supply = "vddio" },	/* 1.8 V */
++	{ .supply = "vdd" },	/* 3.0 V */
++	{ .supply = "ddic" },	/* 1.216 V */
++};
++
++static inline struct elgin *to_elgin(struct drm_panel *panel)
++{
++	return container_of(panel, struct elgin, panel);
++}
++
++static void elgin_reset(struct elgin *ctx)
++{
++	/* reset-gpios is active low: assert 10 ms, release, wait 10 ms */
++	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++	usleep_range(10000, 11000);
++	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
++	usleep_range(10000, 11000);
++}
++
++/* The vendor sequence up to the DSC picture parameter set (low-power mode). */
++static int elgin_init(struct elgin *ctx)
++{
++	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++
++	ctx->dsi->mode_flags |= MIPI_DSI_MODE_LPM;
++
++	/* vendor command access (Samsung level keys) */
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x7f, 0x5a, 0x5a);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf0, 0x5a, 0x5a);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf1, 0x5a, 0x5a);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf2, 0x5a, 0x5a);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xe7, 0x00);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x02, 0x01);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x59, 0x00);
++	mipi_dsi_dcs_set_column_address_multi(&dsi_ctx, 0, ELGIN_WIDTH - 1);
++	mipi_dsi_dcs_set_page_address_multi(&dsi_ctx, 0, ELGIN_HEIGHT - 1);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_SET_DISPLAY_BRIGHTNESS,
++				     0x05, 0x87);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_WRITE_CONTROL_DISPLAY,
++				     0x20);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_WRITE_POWER_SAVE, 0x04);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x57, 0x20, 0x01, 0x00, 0xf8,
++				     0xff, 0xf0, 0x00);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x58, 0x00, 0x00, 0x00, 0xf8,
++				     0xff, 0xfc);
++	/* refresh rate: 0x00 = 60 Hz, 0x01 = 90 Hz */
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x76, 0x00);
++
++	return dsi_ctx.accum_err;
++}
++
++static int elgin_prepare(struct drm_panel *panel)
++{
++	struct elgin *ctx = to_elgin(panel);
++	int ret;
++
++	ret = regulator_bulk_enable(ARRAY_SIZE(elgin_supplies), ctx->supplies);
++	if (ret < 0)
++		return ret;
++	/* the vendor waits 10 ms after the DDIC supply */
++	usleep_range(10000, 11000);
++
++	elgin_reset(ctx);
++
++	ret = elgin_init(ctx);
++	if (ret < 0) {
++		dev_err(panel->dev, "init sequence failed: %d\n", ret);
++		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++		regulator_bulk_disable(ARRAY_SIZE(elgin_supplies), ctx->supplies);
++		return ret;
++	}
++
++	return 0;
++}
++
++/* PPS, then the rest of the vendor sequence: sleep out and display on. */
++static int elgin_enable(struct drm_panel *panel)
++{
++	struct elgin *ctx = to_elgin(panel);
++	struct mipi_dsi_device *dsi = ctx->dsi;
++	struct mipi_dsi_multi_context dsi_ctx = { .dsi = dsi };
++	struct drm_dsc_picture_parameter_set pps;
++
++	if (!dsi->dsc) {
++		dev_err(&dsi->dev, "DSC not attached to DSI\n");
++		return -ENODEV;
++	}
++
++	drm_dsc_pps_payload_pack(&pps, dsi->dsc);
++	mipi_dsi_picture_parameter_set_multi(&dsi_ctx, &pps);
++
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x74, 0x05, 0x00, 0x34);
++	mipi_dsi_dcs_set_tear_on_multi(&dsi_ctx, MIPI_DSI_DCS_TEAR_MODE_VBLANK);
++	mipi_dsi_dcs_set_tear_scanline_multi(&dsi_ctx, 0);
++
++	mipi_dsi_dcs_exit_sleep_mode_multi(&dsi_ctx);
++	mipi_dsi_msleep(&dsi_ctx, 130);
++
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xe5, 0x00, 0x20);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb0, 0x08);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xe1, 0x00, 0x04, 0x4c);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb0, 0x10);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xe1, 0x00, 0x00, 0x18);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb0, 0x70);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xec, 0x01);
++
++	/* the vendor sends display on in high-speed mode */
++	dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
++	mipi_dsi_dcs_set_display_on_multi(&dsi_ctx);
++
++	return dsi_ctx.accum_err;
++}
++
++static int elgin_disable(struct drm_panel *panel)
++{
++	struct elgin *ctx = to_elgin(panel);
++	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++
++	ctx->dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
++
++	mipi_dsi_dcs_set_display_off_multi(&dsi_ctx);
++	mipi_dsi_msleep(&dsi_ctx, 20);
++	mipi_dsi_dcs_enter_sleep_mode_multi(&dsi_ctx);
++	mipi_dsi_msleep(&dsi_ctx, 110);
++
++	return dsi_ctx.accum_err;
++}
++
++static int elgin_unprepare(struct drm_panel *panel)
++{
++	struct elgin *ctx = to_elgin(panel);
++
++	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++	regulator_bulk_disable(ARRAY_SIZE(elgin_supplies), ctx->supplies);
++
++	return 0;
++}
++
++/* 60 Hz; porches from the vendor timing node (they only pace the link). */
++static const struct drm_display_mode elgin_mode = {
++	.clock = (ELGIN_WIDTH + 32 + 32 + 32) * (ELGIN_HEIGHT + 32 + 10 + 32) * 60 / 1000,
++	.hdisplay = ELGIN_WIDTH,
++	.hsync_start = ELGIN_WIDTH + 32,
++	.hsync_end = ELGIN_WIDTH + 32 + 32,
++	.htotal = ELGIN_WIDTH + 32 + 32 + 32,
++	.vdisplay = ELGIN_HEIGHT,
++	.vsync_start = ELGIN_HEIGHT + 32,
++	.vsync_end = ELGIN_HEIGHT + 32 + 10,
++	.vtotal = ELGIN_HEIGHT + 32 + 10 + 32,
++	.width_mm = 85,
++	.height_mm = 120,
++	.type = DRM_MODE_TYPE_DRIVER,
++};
++
++static int elgin_get_modes(struct drm_panel *panel,
++			   struct drm_connector *connector)
++{
++	return drm_connector_helper_get_modes_fixed(connector, &elgin_mode);
++}
++
++static const struct drm_panel_funcs elgin_panel_funcs = {
++	.prepare = elgin_prepare,
++	.enable = elgin_enable,
++	.disable = elgin_disable,
++	.unprepare = elgin_unprepare,
++	.get_modes = elgin_get_modes,
++};
++
++static int elgin_bl_update_status(struct backlight_device *bl)
++{
++	struct mipi_dsi_device *dsi = bl_get_data(bl);
++	u16 brightness = backlight_get_brightness(bl);
++
++	/* big endian on the wire, like the vendor's "inverted dbv" */
++	return mipi_dsi_dcs_set_display_brightness_large(dsi, brightness);
++}
++
++static const struct backlight_ops elgin_bl_ops = {
++	.update_status = elgin_bl_update_status,
++};
++
++static struct backlight_device *elgin_create_backlight(struct mipi_dsi_device *dsi)
++{
++	struct device *dev = &dsi->dev;
++	const struct backlight_properties props = {
++		.type = BACKLIGHT_RAW,
++		.brightness = 0x587,
++		.max_brightness = 0x7ff,
++	};
++
++	return devm_backlight_device_register(dev, dev_name(dev), dev, dsi,
++					      &elgin_bl_ops, &props);
++}
++
++static int elgin_probe(struct mipi_dsi_device *dsi)
++{
++	struct device *dev = &dsi->dev;
++	struct elgin *ctx;
++	int ret;
++
++	ctx = devm_drm_panel_alloc(dev, struct elgin, panel, &elgin_panel_funcs,
++				   DRM_MODE_CONNECTOR_DSI);
++	if (IS_ERR(ctx))
++		return PTR_ERR(ctx);
++
++	ret = devm_regulator_bulk_get_const(dev, ARRAY_SIZE(elgin_supplies),
++					    elgin_supplies, &ctx->supplies);
++	if (ret < 0)
++		return dev_err_probe(dev, ret, "failed to get regulators\n");
++
++	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
++	if (IS_ERR(ctx->reset_gpio))
++		return dev_err_probe(dev, PTR_ERR(ctx->reset_gpio),
++				     "failed to get reset-gpios\n");
++
++	ctx->dsi = dsi;
++	mipi_dsi_set_drvdata(dsi, ctx);
++
++	dsi->lanes = 4;
++	dsi->format = MIPI_DSI_FMT_RGB888;
++	dsi->mode_flags = MIPI_DSI_MODE_LPM | MIPI_DSI_CLOCK_NON_CONTINUOUS;
++
++	ctx->panel.prepare_prev_first = true;
++
++	ctx->panel.backlight = elgin_create_backlight(dsi);
++	if (IS_ERR(ctx->panel.backlight))
++		return dev_err_probe(dev, PTR_ERR(ctx->panel.backlight),
++				     "failed to create backlight\n");
++
++	/* DSC 1.1: two slices of 672x946, 8 bpc in, 8 bpp out */
++	ctx->dsc.dsc_version_major = 1;
++	ctx->dsc.dsc_version_minor = 1;
++	ctx->dsc.slice_width = 672;
++	ctx->dsc.slice_height = 946;
++	ctx->dsc.slice_count = ELGIN_WIDTH / 672;
++	ctx->dsc.bits_per_component = 8;
++	ctx->dsc.bits_per_pixel = 8 << 4;
++	ctx->dsc.block_pred_enable = true;
++	dsi->dsc = &ctx->dsc;
++
++	drm_panel_add(&ctx->panel);
++
++	ret = mipi_dsi_attach(dsi);
++	if (ret < 0) {
++		drm_panel_remove(&ctx->panel);
++		return dev_err_probe(dev, ret, "failed to attach to DSI host\n");
++	}
++
++	return 0;
++}
++
++static void elgin_remove(struct mipi_dsi_device *dsi)
++{
++	struct elgin *ctx = mipi_dsi_get_drvdata(dsi);
++	int ret;
++
++	ret = mipi_dsi_detach(dsi);
++	if (ret < 0)
++		dev_err(&dsi->dev, "failed to detach from DSI host: %d\n", ret);
++
++	drm_panel_remove(&ctx->panel);
++}
++
++static const struct of_device_id elgin_of_match[] = {
++	{ .compatible = "microsoft,elgin-panel" },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, elgin_of_match);
++
++static struct mipi_dsi_driver elgin_driver = {
++	.probe = elgin_probe,
++	.remove = elgin_remove,
++	.driver = {
++		.name = "panel-microsoft-elgin",
++		.of_match_table = elgin_of_match,
++	},
++};
++module_mipi_dsi_driver(elgin_driver);
++
++MODULE_DESCRIPTION("Microsoft Surface Duo 2 \"elgin\" AMOLED panel driver");
++MODULE_LICENSE("GPL");

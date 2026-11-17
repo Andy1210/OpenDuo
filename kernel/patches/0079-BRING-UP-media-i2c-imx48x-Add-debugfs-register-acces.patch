@@ -1,0 +1,108 @@
+From 7616048f448e5400a5cd8a5908a80a3e8aebc632 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 01:40:28 +0100
+Subject: [PATCH 079/137] BRING-UP: media: i2c: imx48x: Add debugfs register
+ access
+
+/sys/kernel/debug/<i2c device>/addr and val read and write one 8-bit
+sensor register, only while the sensor is powered (streaming), to try
+settings without a rebuild. Not for upstream.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/media/i2c/imx48x.c | 54 ++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 54 insertions(+)
+
+diff --git a/drivers/media/i2c/imx48x.c b/drivers/media/i2c/imx48x.c
+index 8385a0f393d9..d19b144501fd 100644
+--- a/drivers/media/i2c/imx48x.c
++++ b/drivers/media/i2c/imx48x.c
+@@ -27,6 +27,7 @@
+  */
+ 
+ #include <linux/clk.h>
++#include <linux/debugfs.h>
+ #include <linux/delay.h>
+ #include <linux/firmware.h>
+ #include <linux/gpio/consumer.h>
+@@ -205,6 +206,10 @@ struct imx48x {
+ 	struct v4l2_ctrl *vblank;
+ 	struct v4l2_ctrl *hblank;
+ 	struct v4l2_ctrl *exposure;
++
++	/* BRING-UP: register access while streaming */
++	struct dentry *debugfs;
++	u16 dbg_addr;
+ };
+ 
+ static const char * const imx48x_test_pattern_menu[] = {
+@@ -990,6 +995,52 @@ static int imx48x_identify(struct imx48x *sensor)
+ 	return 0;
+ }
+ 
++/* -----------------------------------------------------------------------------
++ * BRING-UP: debugfs register access, only while the sensor is powered
++ *
++ *   echo 0x0600 > addr; cat val		read the 8-bit register 0x0600
++ *   echo 0x0600 > addr; echo 0x02 > val	write it
++ */
++
++static int imx48x_dbg_val_get(void *data, u64 *val)
++{
++	struct imx48x *sensor = data;
++	int ret;
++
++	if (pm_runtime_get_if_in_use(sensor->dev) <= 0)
++		return -EAGAIN;
++	ret = cci_read(sensor->regmap, CCI_REG8(sensor->dbg_addr), val, NULL);
++	pm_runtime_put(sensor->dev);
++
++	return ret;
++}
++
++static int imx48x_dbg_val_set(void *data, u64 val)
++{
++	struct imx48x *sensor = data;
++	int ret;
++
++	if (val > 0xff)
++		return -EINVAL;
++	if (pm_runtime_get_if_in_use(sensor->dev) <= 0)
++		return -EAGAIN;
++	ret = cci_write(sensor->regmap, CCI_REG8(sensor->dbg_addr), val, NULL);
++	pm_runtime_put(sensor->dev);
++
++	return ret;
++}
++
++DEFINE_DEBUGFS_ATTRIBUTE(imx48x_dbg_val_fops, imx48x_dbg_val_get,
++			 imx48x_dbg_val_set, "0x%02llx\n");
++
++static void imx48x_dbg_init(struct imx48x *sensor)
++{
++	sensor->debugfs = debugfs_create_dir(dev_name(sensor->dev), NULL);
++	debugfs_create_x16("addr", 0600, sensor->debugfs, &sensor->dbg_addr);
++	debugfs_create_file_unsafe("val", 0600, sensor->debugfs, sensor,
++				   &imx48x_dbg_val_fops);
++}
++
+ static int imx48x_probe(struct i2c_client *client)
+ {
+ 	struct device *dev = &client->dev;
+@@ -1096,6 +1147,8 @@ static int imx48x_probe(struct i2c_client *client)
+ 	pm_runtime_set_autosuspend_delay(dev, 1000);
+ 	pm_runtime_use_autosuspend(dev);
+ 
++	imx48x_dbg_init(sensor);
++
+ 	dev_info(dev, "%u modes, the first %ux%u\n", sensor->num_modes,
+ 		 sensor->modes[0].width, sensor->modes[0].height);
+ 
+@@ -1121,6 +1174,7 @@ static void imx48x_remove(struct i2c_client *client)
+ 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
+ 	struct imx48x *sensor = to_imx48x(sd);
+ 
++	debugfs_remove_recursive(sensor->debugfs);
+ 	v4l2_async_unregister_subdev(sd);
+ 	v4l2_subdev_cleanup(sd);
+ 	media_entity_cleanup(&sd->entity);

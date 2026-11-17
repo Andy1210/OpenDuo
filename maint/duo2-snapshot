@@ -1,0 +1,315 @@
+#!/usr/bin/python3 -I
+"""duo2-snapshot: the system's configuration and package state, kept on
+the phone (/var/backups/duo2/snapshots/, root only). docs/UPDATES.md.
+
+  duo2-snapshot create [--label L] [--repack PKG...] [--keep N]
+                              a new snapshot (the packages named rebuilt into
+                              debs/ by dpkg-repack: the way back for an upgrade);
+                              the oldest beyond N (default 3) are removed
+  duo2-snapshot list
+  duo2-snapshot show NAME     what is in it, how the packages moved since
+  duo2-snapshot diff NAME     the files of /etc that differ now from it
+  duo2-snapshot restore NAME PART... [--yes]
+                              PART: etc, usr-local, opt, var-lib. A
+                              pre-restore snapshot is taken first; files
+                              made since are left (listed), not deleted
+  duo2-snapshot prune [--keep N]
+
+The kernel is not in here: it has its own way back (scripts/duo2-promote
+--rollback from the build machine, the rescue boot entry). The ESP's
+copy (esp.tar.gz) is for a manual repair, never restored by this.
+"""
+
+import glob
+import json
+import os
+import shutil
+import sys
+import time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+for _p in (HERE, "/usr/local/lib/duo2-maint"):  # the repo's maint/, or installed
+    if os.path.isdir(os.path.join(_p, "duo2maint")):
+        sys.path.insert(0, _p)
+        break
+
+from duo2maint import snapshot as snap  # noqa: E402
+from duo2maint import system  # noqa: E402
+
+KEEP = 3
+
+
+def log(*args):
+    print("duo2-snapshot:", *args, flush=True)
+
+
+def snapshots():
+    try:
+        return sorted(n for n in os.listdir(snap.ROOT) if snap.is_name(n))
+    except OSError:
+        return []
+
+
+def path_of(name):
+    if not snap.is_name(name) or name not in snapshots():
+        raise SystemExit("duo2-snapshot: no snapshot %r (duo2-snapshot list)" % name)
+    return os.path.join(snap.ROOT, name)
+
+
+def tar_part(dest, part, patterns):
+    members = []
+    for pat in patterns:
+        members += [m.lstrip("/") for m in sorted(glob.glob(pat)) if os.path.exists(m)]
+    if not members:
+        return None
+    out = os.path.join(dest, part + ".tar.gz")
+    rc, _o, err = system.run(
+        [
+            "tar",
+            "-C",
+            "/",
+            "--numeric-owner",
+            "--xattrs",
+            "--acls",
+            "--exclude=__pycache__",
+            "--warning=no-file-ignored",
+            "-czf",
+            out,
+        ]
+        + members
+    )
+    if rc not in (0, 1):  # 1: a file changed while being read (a log): still a snapshot
+        raise RuntimeError("tar %s: %s" % (part, err.strip()))
+    return out
+
+
+def repack(dest, packages):
+    if not packages:
+        return [], []
+    if shutil.which("dpkg-repack") is None:
+        raise RuntimeError(
+            "dpkg-repack is not installed (sudo apt-get install --no-install-recommends "
+            "dpkg-repack): no way back for the packages"
+        )
+    debs = os.path.join(dest, "debs")
+    os.makedirs(debs, mode=0o700, exist_ok=True)
+    done, failed = [], []
+    for pkg in packages:
+        rc, _o, err = system.run(["dpkg-repack", "--deb-option=-Zgzip", pkg], cwd=debs, timeout=900)
+        if rc != 0:
+            rc, _o, err = system.run(["dpkg-repack", pkg], cwd=debs, timeout=1800)
+        (done if rc == 0 else failed).append(pkg)
+        if rc != 0:
+            log("dpkg-repack %s: %s" % (pkg, err.strip().splitlines()[-1:] or "failed"))
+    return done, failed
+
+
+def create(label=None, packages=(), keep=KEEP, parts=None):
+    os.makedirs(snap.ROOT, mode=0o700, exist_ok=True)
+    os.chmod(os.path.dirname(snap.ROOT), 0o700)
+    name = snap.name_for(time.time(), label)
+    while name in snapshots():
+        time.sleep(1)
+        name = snap.name_for(time.time(), label)
+    dest = os.path.join(snap.ROOT, name + ".partial")
+    shutil.rmtree(dest, ignore_errors=True)
+    os.makedirs(dest, mode=0o700)
+    t0 = time.monotonic()
+    with open(os.path.join(dest, "packages.tsv"), "w") as f:
+        f.write(system.dpkg_packages_text())
+    for fname, argv in (
+        ("manual.txt", ["apt-mark", "showmanual"]),
+        ("holds.txt", ["apt-mark", "showhold"]),
+    ):
+        with open(os.path.join(dest, fname), "w") as f:
+            f.write(system.run(argv)[1])
+    for part, patterns in snap.PARTS.items():
+        if parts is None or part in parts:
+            tar_part(dest, part, patterns)
+    with open(os.path.join(dest, "protected.sha256"), "w") as f:
+        f.write(system.sums_text(system.protected_sums()))
+    done, failed = repack(dest, list(packages))
+    info = {
+        "name": name,
+        "label": label,
+        "created": time.time(),
+        "kernel": system.kernel(),
+        "repacked": done,
+        "repack_failed": failed,
+    }
+    with open(os.path.join(dest, "info.json"), "w") as f:
+        json.dump(info, f, indent=1)
+    os.rename(dest, os.path.join(snap.ROOT, name))
+    log(
+        "%s made in %.0f s (%s)"
+        % (name, time.monotonic() - t0, size_of(os.path.join(snap.ROOT, name)))
+    )
+    for old in snap.to_prune(snapshots(), keep):
+        shutil.rmtree(os.path.join(snap.ROOT, old), ignore_errors=True)
+        log("removed the old snapshot %s" % old)
+    if failed:
+        raise RuntimeError("could not repack: %s" % ", ".join(failed))
+    return name
+
+
+def size_of(path):
+    total = 0
+    for d, _dirs, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(d, f))
+            except OSError:
+                pass
+    return "%.0f MB" % (total / 1e6)
+
+
+def read(path, name):
+    try:
+        with open(os.path.join(path, name)) as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def cmd_list():
+    for name in snapshots():
+        info = json.loads(read(os.path.join(snap.ROOT, name), "info.json") or "{}")
+        print(
+            "%-36s %-8s kernel %s, %d packages repacked"
+            % (
+                name,
+                size_of(os.path.join(snap.ROOT, name)),
+                info.get("kernel", "?"),
+                len(info.get("repacked", [])),
+            )
+        )
+    return 0
+
+
+def cmd_show(name):
+    path = path_of(name)
+    info = json.loads(read(path, "info.json") or "{}")
+    print("snapshot %s (%s), kernel %s" % (name, size_of(path), info.get("kernel")))
+    print(
+        "parts: %s" % ", ".join(sorted(f[:-7] for f in os.listdir(path) if f.endswith(".tar.gz")))
+    )
+    print("repacked packages: %s" % (", ".join(info.get("repacked", [])) or "none"))
+    ch = snap.changes(
+        snap.parse_packages(read(path, "packages.tsv")),
+        snap.parse_packages(system.dpkg_packages_text()),
+    )
+    print(
+        "since then: %d changed, %d new, %d removed packages"
+        % (len(ch["changed"]), len(ch["added"]), len(ch["removed"]))
+    )
+    for n, old, new in ch["changed"]:
+        print("  %s %s -> %s" % (n, old, new))
+    for n, new in ch["added"]:
+        print("  + %s %s" % (n, new))
+    for n, old in ch["removed"]:
+        print("  - %s %s" % (n, old))
+    return 0
+
+
+def cmd_diff(name):
+    path = path_of(name)
+    rc, out, err = system.run(
+        ["tar", "-C", "/", "--numeric-owner", "-dzf", os.path.join(path, "etc.tar.gz")]
+    )
+    lines = sorted({line.split(":", 1)[0] for line in (out + err).splitlines() if ":" in line})
+    for line in lines:
+        print(line)
+    print("%d files of /etc differ from %s" % (len(lines), name))
+    return 0
+
+
+def cmd_restore(name, parts, yes):
+    path = path_of(name)
+    bad = [p for p in parts if p not in snap.RESTORABLE]
+    if not parts or bad:
+        raise SystemExit(
+            "duo2-snapshot: restore NAME PART... (PART: %s)" % ", ".join(snap.RESTORABLE)
+        )
+    missing = [p for p in parts if not os.path.exists(os.path.join(path, p + ".tar.gz"))]
+    if missing:
+        raise SystemExit("duo2-snapshot: %s has no %s" % (name, ", ".join(missing)))
+    if not yes:
+        if not sys.stdin.isatty():
+            raise SystemExit("duo2-snapshot: restoring needs --yes (no terminal to ask)")
+        answer = input(
+            "Restore %s from %s over the running system? [y/N] " % (", ".join(parts), name)
+        )
+        if answer.strip().lower() not in ("y", "yes", "i", "igen"):
+            return 1
+    before = create("pre-restore", parts=set(parts), keep=KEEP + 1)
+    for part in parts:
+        rc, _o, err = system.run(
+            [
+                "tar",
+                "-C",
+                "/",
+                "--numeric-owner",
+                "--xattrs",
+                "--acls",
+                "-xpzf",
+                os.path.join(path, part + ".tar.gz"),
+            ]
+        )
+        if rc != 0:
+            log("%s: %s" % (part, err.strip()))
+            return 1
+        log("%s restored from %s (the state before is %s)" % (part, name, before))
+    log(
+        "files made after %s are still there: duo2-snapshot diff %s shows them for /etc"
+        % (name, name)
+    )
+    log("restart what reads the restored files (or reboot)")
+    return 0
+
+
+def main(argv):
+    if os.geteuid() != 0:
+        print("duo2-snapshot: run as root (sudo)", file=sys.stderr)
+        return 2
+    if not argv:
+        print(__doc__.strip().split("\n\n")[1], file=sys.stderr)
+        return 2
+    cmd, rest = argv[0], argv[1:]
+    keep = KEEP
+    if "--keep" in rest:
+        i = rest.index("--keep")
+        keep = int(rest[i + 1])
+        del rest[i : i + 2]
+    try:
+        if cmd == "create":
+            label = None
+            if "--label" in rest:
+                i = rest.index("--label")
+                label = rest[i + 1]
+                del rest[i : i + 2]
+            pkgs = rest[rest.index("--repack") + 1 :] if "--repack" in rest else []
+            print(create(label, pkgs, keep))
+            return 0
+        if cmd == "list":
+            return cmd_list()
+        if cmd == "show" and len(rest) == 1:
+            return cmd_show(rest[0])
+        if cmd == "diff" and len(rest) == 1:
+            return cmd_diff(rest[0])
+        if cmd == "restore" and rest:
+            yes = "--yes" in rest
+            return cmd_restore(rest[0], [p for p in rest[1:] if p != "--yes"], yes)
+        if cmd == "prune":
+            for old in snap.to_prune(snapshots(), keep):
+                shutil.rmtree(os.path.join(snap.ROOT, old), ignore_errors=True)
+                log("removed %s" % old)
+            return 0
+    except (RuntimeError, ValueError, IndexError) as e:
+        log(str(e))
+        return 1
+    print(__doc__.strip().split("\n\n")[1], file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

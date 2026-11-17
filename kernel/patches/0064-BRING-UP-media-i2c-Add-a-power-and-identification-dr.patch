@@ -1,0 +1,287 @@
+From 5fe18e600dcc5235a57fbab4b94e09d4e73ace08 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 00:03:58 +0100
+Subject: [PATCH 064/137] BRING-UP: media: i2c: Add a power and identification
+ driver for the IMX481 / IMX563
+
+The Surface Duo 2's four camera modules carry a Sony IMX481 (tele,
+ultrawide, front) or IMX563 (wide), neither of which has a driver. As a
+first step of the camera bring-up, power a sensor up in its module's
+order (the I/O, analogue, IMX563 second 1.8 V and digital supplies 1 ms
+apart, MCLK at 19.2 MHz, XCLR released, 9 or 11 ms), read its model
+number at 0x0016 over the camera control interface and power it down.
+
+No V4L2 subdevice: streaming needs the vendor's initialisation sequence.
+Not for upstream in this form.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/media/i2c/Kconfig  |  12 ++
+ drivers/media/i2c/Makefile |   1 +
+ drivers/media/i2c/imx48x.c | 222 +++++++++++++++++++++++++++++++++++++
+ 3 files changed, 235 insertions(+)
+ create mode 100644 drivers/media/i2c/imx48x.c
+
+diff --git a/drivers/media/i2c/Kconfig b/drivers/media/i2c/Kconfig
+index 5c52007f9cbe..f0aa4bf4bd55 100644
+--- a/drivers/media/i2c/Kconfig
++++ b/drivers/media/i2c/Kconfig
+@@ -289,6 +289,18 @@ config VIDEO_IMX415
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called imx415.
+ 
++config VIDEO_IMX48X
++	tristate "Sony IMX481 and IMX563 sensors (power and identification only)"
++	depends on OF
++	select V4L2_CCI_I2C
++	help
++	  Bring-up driver for the Sony IMX481 and IMX563 camera sensors of
++	  the Surface Duo 2: it powers a sensor up, reads its model number
++	  and powers it down. It does not stream.
++
++	  To compile this driver as a module, choose M here: the
++	  module will be called imx48x.
++
+ config VIDEO_IMX471
+ 	tristate "Sony IMX471 sensor support"
+ 	select V4L2_CCI_I2C
+diff --git a/drivers/media/i2c/Makefile b/drivers/media/i2c/Makefile
+index d04bd5724552..796d36ccb1e3 100644
+--- a/drivers/media/i2c/Makefile
++++ b/drivers/media/i2c/Makefile
+@@ -61,6 +61,7 @@ obj-$(CONFIG_VIDEO_IMX335) += imx335.o
+ obj-$(CONFIG_VIDEO_IMX355) += imx355.o
+ obj-$(CONFIG_VIDEO_IMX412) += imx412.o
+ obj-$(CONFIG_VIDEO_IMX415) += imx415.o
++obj-$(CONFIG_VIDEO_IMX48X) += imx48x.o
+ obj-$(CONFIG_VIDEO_IMX678) += imx678.o
+ obj-$(CONFIG_VIDEO_IMX471) += imx471.o
+ obj-$(CONFIG_VIDEO_IR_I2C) += ir-kbd-i2c.o
+diff --git a/drivers/media/i2c/imx48x.c b/drivers/media/i2c/imx48x.c
+new file mode 100644
+index 000000000000..0e6371daeb3c
+--- /dev/null
++++ b/drivers/media/i2c/imx48x.c
+@@ -0,0 +1,222 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Sony IMX481 and IMX563 camera sensors: power and identification.
++ *
++ * BRING-UP ONLY (Surface Duo 2): the sensor is powered up in its module's
++ * order, its model number read over the camera control interface and the
++ * sensor powered down again. There is no V4L2 subdevice yet: streaming
++ * needs the vendor's initialisation, which is not in the kernel.
++ *
++ * The power sequence is the one the Surface Duo 2's camera module
++ * descriptions give (all four modules, 19.2 MHz MCLK): the I/O supply, the
++ * analogue supply, (IMX563: its second 1.8 V supply,) the digital supply,
++ * 1 ms apart, then MCLK, then XCLR released 1 ms later; the sensor answers
++ * after 9 ms (IMX563: 11 ms). Off in the opposite order: XCLR, MCLK, the
++ * supplies.
++ *
++ * Both sensors keep their model number in the 16-bit register 0x0016
++ * (Sony's standard layout, 16-bit register addresses).
++ */
++
++#include <linux/clk.h>
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/regulator/consumer.h>
++
++#include <media/v4l2-cci.h>
++
++#define IMX48X_REG_MODEL_ID		CCI_REG16(0x0016)
++#define IMX48X_REG_REVISION		CCI_REG8(0x0018)
++#define IMX48X_MCLK_RATE		19200000
++
++struct imx48x_variant {
++	const char *name;
++	u16 model;
++	bool vcustom;			/* the IMX563's second 1.8 V supply */
++	unsigned int settle_ms;		/* from XCLR released to the first access */
++};
++
++static const struct imx48x_variant imx481_variant = {
++	.name = "IMX481",
++	.model = 0x0481,
++	.settle_ms = 9,
++};
++
++static const struct imx48x_variant imx563_variant = {
++	.name = "IMX563",
++	.model = 0x0563,
++	.vcustom = true,
++	.settle_ms = 11,
++};
++
++struct imx48x {
++	struct device *dev;
++	const struct imx48x_variant *variant;
++	struct regmap *regmap;
++	struct clk *mclk;
++	struct gpio_desc *reset;
++	struct regulator *dovdd;
++	struct regulator *avdd;
++	struct regulator *vcustom;
++	struct regulator *dvdd;
++};
++
++static void imx48x_power_off(struct imx48x *sensor)
++{
++	gpiod_set_value_cansleep(sensor->reset, 1);
++	usleep_range(1000, 1500);
++	clk_disable_unprepare(sensor->mclk);
++	usleep_range(1000, 1500);
++	regulator_disable(sensor->dovdd);
++	regulator_disable(sensor->dvdd);
++	if (sensor->vcustom)
++		regulator_disable(sensor->vcustom);
++	regulator_disable(sensor->avdd);
++}
++
++static int imx48x_power_on(struct imx48x *sensor)
++{
++	int ret;
++
++	ret = regulator_enable(sensor->dovdd);
++	if (ret)
++		return dev_err_probe(sensor->dev, ret, "dovdd\n");
++	usleep_range(1000, 1500);
++
++	ret = regulator_enable(sensor->avdd);
++	if (ret) {
++		dev_err(sensor->dev, "avdd: %d\n", ret);
++		goto err_dovdd;
++	}
++	usleep_range(1000, 1500);
++
++	if (sensor->vcustom) {
++		ret = regulator_enable(sensor->vcustom);
++		if (ret) {
++			dev_err(sensor->dev, "vcustom: %d\n", ret);
++			goto err_avdd;
++		}
++		usleep_range(1000, 1500);
++	}
++
++	ret = regulator_enable(sensor->dvdd);
++	if (ret) {
++		dev_err(sensor->dev, "dvdd: %d\n", ret);
++		goto err_vcustom;
++	}
++	usleep_range(1000, 1500);
++
++	ret = clk_prepare_enable(sensor->mclk);
++	if (ret) {
++		dev_err(sensor->dev, "mclk: %d\n", ret);
++		goto err_dvdd;
++	}
++	usleep_range(1000, 1500);
++
++	gpiod_set_value_cansleep(sensor->reset, 0);
++	msleep(sensor->variant->settle_ms);
++
++	return 0;
++
++err_dvdd:
++	regulator_disable(sensor->dvdd);
++err_vcustom:
++	if (sensor->vcustom)
++		regulator_disable(sensor->vcustom);
++err_avdd:
++	regulator_disable(sensor->avdd);
++err_dovdd:
++	regulator_disable(sensor->dovdd);
++	return ret;
++}
++
++static int imx48x_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct imx48x *sensor;
++	u64 model = 0, revision = 0;
++	unsigned long rate;
++	int ret;
++
++	sensor = devm_kzalloc(dev, sizeof(*sensor), GFP_KERNEL);
++	if (!sensor)
++		return -ENOMEM;
++	sensor->dev = dev;
++	sensor->variant = of_device_get_match_data(dev);
++
++	sensor->regmap = devm_cci_regmap_init_i2c(client, 16);
++	if (IS_ERR(sensor->regmap))
++		return dev_err_probe(dev, PTR_ERR(sensor->regmap), "regmap\n");
++
++	sensor->dovdd = devm_regulator_get(dev, "dovdd");
++	if (IS_ERR(sensor->dovdd))
++		return dev_err_probe(dev, PTR_ERR(sensor->dovdd), "dovdd\n");
++	sensor->avdd = devm_regulator_get(dev, "avdd");
++	if (IS_ERR(sensor->avdd))
++		return dev_err_probe(dev, PTR_ERR(sensor->avdd), "avdd\n");
++	sensor->dvdd = devm_regulator_get(dev, "dvdd");
++	if (IS_ERR(sensor->dvdd))
++		return dev_err_probe(dev, PTR_ERR(sensor->dvdd), "dvdd\n");
++	if (sensor->variant->vcustom) {
++		sensor->vcustom = devm_regulator_get(dev, "vcustom");
++		if (IS_ERR(sensor->vcustom))
++			return dev_err_probe(dev, PTR_ERR(sensor->vcustom), "vcustom\n");
++	}
++
++	/* XCLR held (the line low) from the start */
++	sensor->reset = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
++	if (IS_ERR(sensor->reset))
++		return dev_err_probe(dev, PTR_ERR(sensor->reset), "reset gpio\n");
++
++	sensor->mclk = devm_clk_get(dev, NULL);
++	if (IS_ERR(sensor->mclk))
++		return dev_err_probe(dev, PTR_ERR(sensor->mclk), "mclk\n");
++	rate = clk_get_rate(sensor->mclk);
++	if (rate != IMX48X_MCLK_RATE)
++		return dev_err_probe(dev, -EINVAL, "mclk at %lu Hz, not %u\n",
++				     rate, IMX48X_MCLK_RATE);
++
++	ret = imx48x_power_on(sensor);
++	if (ret)
++		return ret;
++
++	ret = cci_read(sensor->regmap, IMX48X_REG_MODEL_ID, &model, NULL);
++	cci_read(sensor->regmap, IMX48X_REG_REVISION, &revision, &ret);
++
++	imx48x_power_off(sensor);
++
++	if (ret)
++		return dev_err_probe(dev, ret, "%s: no answer at 0x%02x\n",
++				     sensor->variant->name, client->addr);
++	if (model != sensor->variant->model) {
++		dev_err(dev, "model 0x%04llx at 0x0016, not the %s's 0x%04x\n", model,
++			sensor->variant->name, sensor->variant->model);
++		return -ENODEV;
++	}
++
++	dev_info(dev, "Sony %s, revision 0x%02llx (powered down again; no streaming yet)\n",
++		 sensor->variant->name, revision);
++	return 0;
++}
++
++static const struct of_device_id imx48x_of_match[] = {
++	{ .compatible = "sony,imx481", .data = &imx481_variant },
++	{ .compatible = "sony,imx563", .data = &imx563_variant },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, imx48x_of_match);
++
++static struct i2c_driver imx48x_driver = {
++	.driver = {
++		.name = "imx48x",
++		.of_match_table = imx48x_of_match,
++	},
++	.probe = imx48x_probe,
++};
++module_i2c_driver(imx48x_driver);
++
++MODULE_DESCRIPTION("Sony IMX481 / IMX563 camera sensors: power and identification (bring-up)");
++MODULE_LICENSE("GPL");

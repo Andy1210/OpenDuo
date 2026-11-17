@@ -1,0 +1,69 @@
+#!/bin/bash
+# One bring-up round, run on the computer the Duo is plugged into (USB), from
+# fastboot (Power ~20 s, then Volume Down + Power):
+#   1. RAM-boot the WOA headless recovery (writes nothing by itself)
+#   2. save the previous boot's rescue logs from the ESP to $DUO2_STAGE/logs/
+#   3. write $DUO2_STAGE/esp.img.gz to the ESP with dd, only if its hash
+#      differs (no `fastboot flash`: that wedges this ABL), verify it
+#   4. back to fastboot, RAM-boot the UEFI (the default menu entry starts)
+#   5. watch USB for the rescue gadget (1d6b:0104) for $WAIT seconds
+#
+# DUO2_TOOLS: the directory with adb and fastboot (default ~/duo2-tools);
+# DUO2_STAGE: the images (surfaceduo2-headless.img, uefi_nosb.img,
+# esp.img.gz + esp.img.sha256) and the saved logs (default ~/duo2-stage).
+T=${DUO2_TOOLS:-$HOME/duo2-tools}
+S=${DUO2_STAGE:-$HOME/duo2-stage}
+A=$T/adb; F=$T/fastboot
+set -u
+WAIT=${WAIT:-240}
+log() { echo "$(date +%T) $*"; }
+# shellcheck disable=SC2329 # run by the trap
+cleanup() { timeout 5 "$A" kill-server >/dev/null 2>&1; for p in $(pgrep -x fastboot); do sudo kill "$p"; done; }
+trap cleanup EXIT
+
+timeout 8 "$F" getvar unlocked 2>&1 | grep -q "unlocked: yes" || { log "the Duo is not in (responsive) fastboot"; exit 1; }
+log "recovery"
+timeout 60 "$F" boot "$S/surfaceduo2-headless.img" >/dev/null 2>&1
+for _ in $(seq 1 30); do timeout 5 "$A" devices 2>/dev/null | grep -q recovery && break; sleep 3; done
+timeout 5 "$A" devices 2>/dev/null | grep -q recovery || { log "recovery did not come up"; exit 1; }
+
+D=$S/logs/$(date +%Y%m%d-%H%M%S); mkdir -p "$D"
+timeout 30 "$A" shell "mkdir -p /tmp/esp; mount -t vfat /dev/block/by-name/esp /tmp/esp 2>/dev/null; ls /tmp/esp/logs 2>/dev/null" > "$D/list.txt"
+if [ -s "$D/list.txt" ]; then
+    timeout 60 "$A" pull /tmp/esp/logs "$D/" >/dev/null 2>&1
+    log "previous boot logs: $D/logs ($(find "$D/logs" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l) files)"
+else
+    log "no rescue logs on the ESP from the previous boot"; rmdir "$D" 2>/dev/null; rm -f "$D/list.txt"
+fi
+timeout 20 "$A" shell "umount /tmp/esp 2>/dev/null; true"
+
+want=$(cut -c1-64 "$S/esp.img.sha256")
+have=$(timeout 60 "$A" shell "sha256sum /dev/block/by-name/esp" | cut -c1-64)
+if [ "$want" != "$have" ]; then
+    log "writing the ESP"
+    zcat "$S/esp.img.gz" | timeout 200 "$A" exec-in "dd of=/dev/block/by-name/esp bs=4194304" >/dev/null 2>&1
+    have=$(timeout 60 "$A" shell "sync; sha256sum /dev/block/by-name/esp" | cut -c1-64)
+    [ "$want" = "$have" ] || { log "ESP hash mismatch after dd: $have"; exit 1; }
+    log "ESP written and verified"
+else
+    log "ESP already current"
+fi
+
+log "fastboot + UEFI"
+timeout 15 "$A" reboot bootloader >/dev/null 2>&1
+for _ in $(seq 1 40); do timeout 5 "$F" devices 2>/dev/null | grep -q fastboot && break; sleep 2; done
+timeout 8 "$F" getvar unlocked >/dev/null 2>&1 || { log "fastboot did not answer after recovery"; exit 1; }
+timeout 60 "$F" boot "$S/uefi_nosb.img" >/dev/null 2>&1 && log "UEFI booting"
+
+end=$(( $(date +%s) + WAIT ))
+while [ "$(date +%s)" -lt "$end" ]; do
+    if lsusb | grep -q 1d6b:0104; then
+        log "RESCUE GADGET UP"; sleep 5
+        ls /dev/ttyACM* 2>/dev/null
+        ip -br addr | grep -E "usb|enx" || true
+        exit 0
+    fi
+    sleep 2
+done
+log "no rescue gadget within $WAIT s (USB: $(lsusb | grep -E '045e|05c6|18d1' || echo nothing))"
+exit 2

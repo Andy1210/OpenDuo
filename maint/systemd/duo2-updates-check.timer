@@ -1,0 +1,11 @@
+[Unit]
+Description=OpenDuo: the daily look for system updates
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=4h
+Persistent=true
+Unit=duo2-updates-check-timer.service
+
+[Install]
+WantedBy=timers.target

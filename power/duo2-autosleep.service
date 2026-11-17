@@ -1,0 +1,12 @@
+[Unit]
+Description=duo2-os: suspend when both panels are dark (the switch: /etc/duo2/autosleep-hold)
+After=duo-wc.service systemd-logind.service ModemManager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/duo2-autosleep
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

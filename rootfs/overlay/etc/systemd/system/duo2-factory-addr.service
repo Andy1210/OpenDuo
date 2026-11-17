@@ -1,0 +1,17 @@
+# First boot of a fresh image: read the phone's factory WLAN MAC and Bluetooth
+# address from its sfpd partition (read-only) into root-only files. The BT
+# address is applied in this very boot (duo2-bt-addr@.service), the WLAN MAC
+# from the next one on (a .link drop-in udev applies while wlan0 is down).
+[Unit]
+Description=Factory WLAN MAC and Bluetooth address from the sfpd partition
+Documentation=file:/usr/local/sbin/duo2-factory-addr
+ConditionPathExists=!/etc/duo2/factory-addresses
+Wants=dev-disk-by\x2dpartlabel-sfpd.device
+After=dev-disk-by\x2dpartlabel-sfpd.device
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/duo2-factory-addr install
+
+[Install]
+WantedBy=multi-user.target

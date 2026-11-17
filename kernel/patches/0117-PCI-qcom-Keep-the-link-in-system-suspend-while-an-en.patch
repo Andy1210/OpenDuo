@@ -1,0 +1,73 @@
+From 3267a27138f8c1887585b94d7d0767626d4cd57e Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 22:00:45 +0100
+Subject: [PATCH 117/137] PCI: qcom: Keep the link in system suspend while an
+ endpoint may wake it
+
+With every endpoint in D3hot, dw_pcie_suspend_noirq() sends
+PME_Turn_Off, waits for L2 and deinitialises the host, which asserts
+PERST#. An endpoint armed for wakeup is reset by that: a WCN6851 set up
+for WoWLAN by ath11k (its firmware kept running, MHI in M3) came back in
+MHI state RESET, the suspend was aborted, and qrtr failed to resume
+("Resuming from non M3 state (RESET)"). PME from D3cold does not help
+when PERST# resets the device, and there is no WAKE# handling here.
+
+When a device below the host is armed for wakeup, leave the link up:
+the endpoint stays in D3hot with the link in L1 and can wake the system
+with a PME message (the Root Port's PME interrupt is a wakeup interrupt
+then). The interconnect votes are lowered as for any suspend that keeps
+the link. Without such a device nothing changes.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/pci/controller/dwc/pcie-qcom.c | 28 +++++++++++++++++++++++++-
+ 1 file changed, 27 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/pci/controller/dwc/pcie-qcom.c b/drivers/pci/controller/dwc/pcie-qcom.c
+index d4aea99f4b35..28dfdbdcb5d1 100644
+--- a/drivers/pci/controller/dwc/pcie-qcom.c
++++ b/drivers/pci/controller/dwc/pcie-qcom.c
+@@ -2349,16 +2349,42 @@ static int qcom_pcie_probe(struct platform_device *pdev)
+ 	return ret;
+ }
+ 
++static int qcom_pcie_wakeup_armed(struct pci_dev *pdev, void *data)
++{
++	bool *armed = data;
++
++	if (pci_pcie_type(pdev) == PCI_EXP_TYPE_ROOT_PORT ||
++	    !device_may_wakeup(&pdev->dev))
++		return 0;
++
++	*armed = true;
++	return 1;
++}
++
+ static int qcom_pcie_suspend_noirq(struct device *dev)
+ {
+ 	struct qcom_pcie *pcie;
++	bool wakeup = false;
+ 	int ret = 0;
+ 
+ 	pcie = dev_get_drvdata(dev);
+ 	if (!pcie)
+ 		return 0;
+ 
+-	ret = dw_pcie_suspend_noirq(pcie->pci);
++	/*
++	 * Powering the host down asserts PERST#, which resets the endpoints:
++	 * one that is to wake the system (a WLAN chip in WoWLAN, its firmware
++	 * kept running for it) would lose that state and could not signal
++	 * anything. Keep the link then: the endpoint sits in D3hot with the
++	 * link in L1 and wakes the system with a PME message.
++	 */
++	if (pcie->pci->pp.bridge && dw_pcie_link_up(pcie->pci))
++		pci_walk_bus(pcie->pci->pp.bridge->bus, qcom_pcie_wakeup_armed, &wakeup);
++
++	if (wakeup)
++		dev_dbg(dev, "a device is armed for wakeup: keeping the link\n");
++	else
++		ret = dw_pcie_suspend_noirq(pcie->pci);
+ 	if (ret)
+ 		return ret;
+ 

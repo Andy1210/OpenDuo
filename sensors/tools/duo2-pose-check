@@ -1,0 +1,256 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""duo2-pose-check: check duo-posed against the phone held in six positions,
+before switching it on (`duo2-sensors-mode on`).
+
+    duo2-pose-check list                 the positions and how to hold the phone
+    duo2-pose-check POSITION [SECONDS]   sample `duo-posed --monitor` for SECONDS
+                                         (default 4) with the phone held so, print
+                                         what the sensors say and whether duo-posed
+                                         would do the right thing; the result is
+                                         kept in /tmp/duo2-pose-check.log
+    duo2-pose-check summary              all kept results, and the config lines
+                                         that would fix a swapped side
+    duo2-pose-check all                  every position in turn (press Enter
+                                         when the phone is in place)
+    duo2-pose-check reset                forget the kept results
+
+Positions: flat, closed, back-left, back-right, tent, book (and peek, the
+phone opened just a little, for the peek screen). It only reads the sensors:
+duo-posed --monitor never calls duo-wc.
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+LOG = "/tmp/duo2-pose-check.log"
+
+# name: (how to hold it, the postures that are right, the pose duo-posed should want)
+POSITIONS = {
+    "flat": (
+        "Open, flat on the table, screens up.",
+        ("open_dpm", "open_dlm"),
+        "dual",
+    ),
+    "closed": ("Folded closed (any way it lies).", ("closed",), "blank"),
+    "back-left": (
+        "Open like a book, keep the LEFT screen facing you, fold the right one "
+        "all the way back; hold it in your hand.",
+        ("flip_p_left", "flip_l_left", "flip_p_right", "flip_l_right"),
+        "single DSI-1",
+    ),
+    "back-right": (
+        "The same, the RIGHT screen facing you, the left one folded back.",
+        ("flip_p_left", "flip_l_left", "flip_p_right", "flip_l_right"),
+        "single DSI-2",
+    ),
+    "tent": (
+        "Standing as a tent (inverted V), the LEFT screen facing you.",
+        ("tent_left", "tent_right"),
+        "single DSI-1",
+    ),
+    "book": (
+        "Held like an open book, about 100-120 degrees, upright.",
+        ("read", "compose", "open_dpm", "open_dlm"),
+        "dual",
+    ),
+    "peek": (
+        "Opened just a little, about 20-30 degrees, as if peeking in.",
+        ("peek_left", "peek_right"),
+        None,
+    ),
+}
+ORDER = ["flat", "closed", "back-left", "back-right", "tent", "book", "peek"]
+
+LINE = re.compile(
+    r"monitor: hinge (?P<hinge>\S+) sensor (?P<sensor>\S+) class (?P<cls>\S+) \| "
+    r"(?P<l>\S+) (?P<lacc>-|\([^)]*\)) tilt (?P<ltilt>\S+) rot (?P<lrot>\S+) \| "
+    r"(?P<r>\S+) (?P<racc>-|\([^)]*\)) tilt (?P<rtilt>\S+) rot (?P<rrot>\S+) \| "
+    r"halls (?P<halls>.*?) \| posture (?P<posture>\S+) \| would pose (?P<pose>.+)$"
+)
+
+
+def sample(seconds):
+    """Run duo-posed --monitor, return its parsed lines after the sensors
+    settled (the first 2 s are dropped: the accelerometers start then)."""
+    proc = subprocess.Popen(
+        ["duo-posed", "--monitor"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    rows = []
+    start = time.monotonic()
+    try:
+        while time.monotonic() - start < seconds + 2.5:
+            line = proc.stdout.readline()
+            if not line:
+                break
+            m = LINE.search(line.strip())
+            if m and time.monotonic() - start > 2.0:
+                rows.append(m.groupdict())
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    return rows
+
+
+def most(values):
+    values = [v for v in values if v not in (None, "-", "None")]
+    return max(set(values), key=values.count) if values else "-"
+
+
+def judge(name, rows):
+    how, postures, pose = POSITIONS[name]
+    if not rows:
+        return {"position": name, "ok": False, "note": "no monitor lines (sensors not up?)"}
+    posture = most([r["posture"] for r in rows])
+    would = most([r["pose"] for r in rows])
+    res = {
+        "position": name,
+        "posture": posture,
+        "would": would,
+        "hinge_sensor": most([r["sensor"] for r in rows]),
+        "hinge_accel": most([r["hinge"] for r in rows]),
+        "halls": rows[-1]["halls"],
+        "acc_left": rows[-1]["lacc"],
+        "acc_right": rows[-1]["racc"],
+        "rot": "%s/%s" % (rows[-1]["lrot"], rows[-1]["rrot"]),
+        "time": time.strftime("%H:%M:%S"),
+    }
+    notes = []
+    if posture not in postures:
+        notes.append("posture %s, expected one of %s" % (posture, ", ".join(postures)))
+    if pose is not None and would != pose:
+        notes.append("duo-posed would do '%s', expected '%s'" % (would, pose))
+    if name == "closed" and res["hinge_accel"] not in ("-",):
+        try:
+            if float(res["hinge_accel"]) > 300:
+                notes.append("the accelerometer hinge reads ~360 when closed: set accel_left = 1")
+        except ValueError:
+            pass
+    res["ok"] = not notes
+    res["note"] = "; ".join(notes) or "as expected"
+    return res
+
+
+def keep(res):
+    with open(LOG, "a") as f:
+        f.write(json.dumps(res) + "\n")
+
+
+def kept():
+    out = {}
+    try:
+        with open(LOG) as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                    out[r["position"]] = r
+                except (ValueError, KeyError):
+                    pass
+    except OSError:
+        pass
+    return out
+
+
+def show(res):
+    print(
+        "%-10s %s  posture=%s would=%s hinge(sensor)=%s hinge(accel)=%s halls=%s acc L=%s R=%s rot=%s"
+        % (
+            res["position"],
+            "OK " if res["ok"] else "BAD",
+            res.get("posture"),
+            res.get("would"),
+            res.get("hinge_sensor"),
+            res.get("hinge_accel"),
+            res.get("halls"),
+            res.get("acc_left"),
+            res.get("acc_right"),
+            res.get("rot"),
+        )
+    )
+    print("           %s" % res["note"])
+
+
+def suggestions(results):
+    """Config lines for /etc/duo-posed.conf when a side came out swapped."""
+    lines = []
+    for name, want in (
+        ("back-left", "single left"),
+        ("back-right", "single right"),
+        ("tent", "single left"),
+    ):
+        r = results.get(name)
+        if not r or r["ok"] or not r.get("posture", "").startswith(("flip", "tent")):
+            continue
+        if r.get("would", "").startswith("single "):
+            lines.append("posture.%s = %s" % (r["posture"], want))
+    return lines
+
+
+def cmd_position(name, seconds):
+    print("%s: %s" % (name, POSITIONS[name][0]))
+    print("sampling %d s ..." % seconds, flush=True)
+    res = judge(name, sample(seconds))
+    keep(res)
+    show(res)
+    return 0 if res["ok"] else 1
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+    cmd = argv[0]
+    if cmd == "list":
+        for name in ORDER:
+            print("%-10s %s" % (name, POSITIONS[name][0]))
+        return 0
+    if cmd == "reset":
+        try:
+            os.unlink(LOG)
+        except OSError:
+            pass
+        return 0
+    if cmd == "summary":
+        results = kept()
+        for name in ORDER:
+            if name in results:
+                show(results[name])
+            else:
+                print("%-10s (not checked)" % name)
+        fix = suggestions(results)
+        if fix:
+            print("\nSides came out swapped; in /etc/duo-posed.conf:")
+            for line in fix:
+                print("  " + line)
+        six = [n for n in ORDER[:6] if n in results]
+        good = all(results[n]["ok"] for n in six) and len(six) == 6
+        print(
+            "\nall six as expected: %s%s"
+            % ("yes" if good else "no", " -> sudo duo2-sensors-mode on" if good else "")
+        )
+        return 0 if good else 1
+    if cmd == "all":
+        for name in ORDER:
+            input("\n%s: %s\n  Enter when ready... " % (name, POSITIONS[name][0]))
+            cmd_position(name, 4)
+        return main(["summary"])
+    if cmd in POSITIONS:
+        seconds = int(argv[1]) if len(argv) > 1 else 4
+        return cmd_position(cmd, max(2, min(seconds, 30)))
+    print("unknown: %s (duo2-pose-check list)" % cmd, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

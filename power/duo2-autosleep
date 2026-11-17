@@ -1,0 +1,1920 @@
+#!/usr/bin/python3 -I
+"""duo2-autosleep: sleep like a phone.
+
+When both panels are dark (duo-wc's event stream: nothing lit, no peek or
+glance), wait DELAY seconds, then suspend (s2idle, through logind, so its
+delay inhibitors and the system-sleep hooks run) unless something holds the
+phone awake:
+
+  - the maintenance file /etc/duo2/autosleep-hold exists (the switch: while it
+    is there nothing is ever suspended),
+  - a timed hold has not lapsed yet (/etc/duo2/autosleep-hold-until: an end
+    time, written by `duo2-autosleep-switch hold 2h` for remote work; it
+    survives a reboot, lapses by itself, and an end more than HOLD_MAX_S
+    ahead is not trusted: a clock that was wrong when it was written),
+  - external power is connected (a charger, a computer's USB port) and
+    STAY_AWAKE_CHARGING is on (the default): the panels still go dark on
+    their timeout, the phone stays reachable over the network. Not at or
+    below CHARGING_HOLD_FLOOR % while the battery is not charging (a source
+    too weak for the awake phone: asleep it charges). This setting is read
+    again whenever autosleep.conf changes (the switch's `charging on|off`,
+    Duo Settings), not only at start. A --test-max run leaves it out
+    unless --charging-hold on says otherwise (a test suspend is asked for),
+  - a call is dialling, ringing or active (ModemManager),
+  - audio plays or records (an ALSA PCM is running) or an MPRIS player says
+    Playing,
+  - a logind "sleep" inhibitor in block mode (systemd-inhibit, PackageKit, ...),
+  - a USB host has the phone's gadget configured,
+  - an ssh session of one of SSH_USERS is open,
+  - a Clocks alarm rings within the next DELAY + ALARM_LEAD seconds,
+  - the torch is lit (the camera's flash LED as a light, the quick menu's
+    Flashlight): it stays lit with the panels dark, as on Android, and a
+    suspend would switch it off (the system-sleep hook duo2-torch-off: the
+    kernel leaves it as it was, and the flash module's supply in s2idle is
+    not something to rely on).
+
+Dark is duo-wc's word: a panel lit for any reason is not dark, so an app
+that keeps the screen on (duo-wc's idle inhibit: a video, a map; its state's
+`idle_inhibit`) keeps the phone awake too, through the lit panels and
+nothing else. With the panels dark on purpose (the power key) an idle
+inhibitor holds nothing here: a video's sound does (the ALSA PCM), and an
+app that must run on with the panels dark (navigation with voice
+guidance) takes a logind sleep inhibitor (`systemd-inhibit --what=sleep
+--mode=block APP`, or its own Inhibit call to logind; duo2-android-location
+takes one for an Android app that uses the GPS).
+
+Before it suspends it arms a CLOCK_REALTIME_ALARM timer (the kernel's
+alarmtimer, on the PMIC RTC rtc1) ALARM_LEAD seconds before the next Clocks
+alarm (gnome-clocks rings only while it runs, and only after the phone is
+awake), and WAKE_EVERY seconds ahead if set. systemd timers with
+WakeSystem=true program the same RTC themselves. The other wake sources are
+the kernel's: the power key, the RTC, the modem, the WiFi (WoWLAN, if set).
+
+After a resume it stays awake until WiFi answers again (at most WIFI_WAIT
+seconds) and RESUME_GRACE seconds after that (longer up to a Clocks alarm it
+woke for), then sleeps again while the panels stay dark. On a duo2-try boot
+(duo2.try= on the command line) it never suspends by itself: a try kernel
+must stay reachable. It
+logs every suspend and resume: how long it slept, what fired (the wake
+interrupts that moved), when WiFi answered again and when a panel lit.
+
+WiFi in sleep (WIFI_SLEEP). "off": the WLAN chip is powered off in every
+sleep and WiFi reconnects after the resume (~4.5 s); nothing that arrives
+over WiFi wakes the phone, so with WIFI_SYNC_EVERY set it wakes that often
+on WiFi to let the push connections deliver (SYNC_GRACE seconds from WiFi's
+answer, then SYNC_HOOK, a command that pokes them). "wowlan": the chip stays
+associated (WoWLAN) and wakes the phone for what WOWLAN_WAKE lets through
+(tcp: TCP to the phone's own addresses, the push connections; unicast: any
+frame to its MAC; ping: echo requests to it; magic: a Wake-on-LAN packet;
+disconnect: the access point drops it); after such a wake it stays up
+WIFI_GRACE seconds. Before every suspend the patterns are made from the
+addresses wlan0 has then (nothing is logged of them), and the Root Port's
+power/wakeup is set to match (it arms the chip's WAKE# where the DT has it).
+WoWLAN needs a kernel that keeps the PCIe link up for a wakeup and lets the
+MSIs wake; WOWLAN_MAX_FAILURES sleeps in a row after which WiFi did not
+answer within WIFI_WAIT switch it off until the daemon restarts. The kernel
+command line overrides any setting for one boot: duo2.autosleep.KEY=VALUE
+(a duo2-try of WoWLAN without touching autosleep.conf), /run/duo2/autosleep.conf
+(same format, read after autosleep.conf at start) until the next boot, and
+duo2.autosleep.on_try=1 lets a try boot sleep (a measurement series; its
+netwatch then needs duo2.netwatch.loss= longer than a sleep).
+
+An empty battery powers the phone off cleanly (a phone that runs dry in
+suspend loses whatever was not on disk). On battery power at or below
+POWEROFF_LEVEL percent it powers off: at once with the panels dark, after a
+notification and POWEROFF_NOTICE seconds with a panel lit (a charger plugged
+in meanwhile calls it off), after the call during a call (down to 1 %); a
+lit torch is switched off first (duo2-torch-off.service does it at every
+shutdown too, but not when systemctl poweroff has to be --force). The
+level is read every minute awake, right before every suspend and right
+after every resume; and every suspend on battery is bounded by an RTC wake
+to look again: half the time the margin above POWEROFF_LEVEL lasts at
+SLEEP_DRAIN_MA (or at the drain measured in the last long sleep, if more):
+~40 min at 15 %, ~7 min at 5 %. Such a battery check wakes for a moment
+(REQUEST_GRACE, no WiFi wait). The hold file and a try boot do not stop
+this: it is a safety net, not automatic sleep.
+
+  duo2-autosleep [--dry-run] [--test-max S] [--once] [--no-ssh-inhibit]
+                 [--delay S] [--resume-grace S] [--poweroff-test LEVEL]
+                 [--wifi-sleep off|wowlan] [--wowlan-wake LIST]
+                 [--charging-hold on|off]
+
+--dry-run decides as usual but logs "would suspend" instead. --test-max S
+(1-120) bounds every suspend with an RTC wake alarm S seconds ahead, set with
+rtcwake before the suspend (a test must always come back by itself).
+--once exits after the first resume (always so with --test-max: a test is
+one suspend; a --test-max or --dry-run run also ends after 300 s of wall
+clock). --no-ssh-inhibit ignores ssh sessions
+(a test started over ssh); --ignore-hold ignores the hold file (only with
+--test-max or --dry-run). --poweroff-test LEVEL never suspends and does only
+the empty-battery part, with LEVEL as the threshold (a test of the
+notification and the power-off on a charged phone, for 300 s of wall clock;
+with --dry-run it logs "would power off" instead). Without it, --test-max
+and --dry-run only log what the battery would make them do. --wifi-sleep and
+--wowlan-wake override the settings for this run; a --test-max run that set
+WoWLAN up switches it off again before it ends. --charging-hold sets
+STAY_AWAKE_CHARGING for this run. --ignore-hold ignores the hold file only:
+a timed hold holds a test run too (another agent may be working on the
+phone).
+
+Settings: /etc/duo2/autosleep.conf (key = value; see autosleep.conf).
+"""
+
+import argparse
+import datetime
+import json
+import os
+import re
+import selectors
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+HOLD = "/etc/duo2/autosleep-hold"
+HOLD_UNTIL = "/etc/duo2/autosleep-hold-until"  # a timed hold's end (epoch s, first line)
+HOLD_MAX_S = 24 * 3600  # the longest timed hold; an end further ahead is not trusted
+HOLD_SLACK_S = 300  # ... plus this (a clock corrected by NTP after the hold was set)
+CHARGING_HOLD_FLOOR = 10  # % at or below which a battery not charging ends the charging hold
+LEDS = "/sys/class/leds"
+TEST_WALL = 300  # s: a --test-max / --dry-run run ends after this, wall clock
+CONF = "/etc/duo2/autosleep.conf"
+RUN_CONF = "/run/duo2/autosleep.conf"  # settings until the next boot (tmpfs), over CONF
+SOCK = "/run/duo-wc/admin.sock"
+CLOCK_REALTIME_ALARM = 8
+
+DEFAULTS = {
+    "delay": 20,  # s dark before the first suspend
+    "resume_grace": 15,  # s awake after a resume at least, counted from WiFi's return
+    "wifi_wait": 45,  # s after a resume to wait for WiFi before sleeping without it
+    "modem_grace": 8,  # s awake after a wake by the modem alone (no WiFi wait)
+    "request_grace": 3,  # s awake after a wake by a modem request alone (rmtfs: its EFS)
+    "check_interval": 10,  # s between checks while something holds it awake
+    "alarm_lead": 45,  # s before a Clocks alarm to wake
+    "wake_every": 0,  # s, 0 = no periodic wake
+    "ssh_users": "duo2admin",
+    "user": "",  # the GUI user (Clocks, MPRIS); empty: duo-wc.service's User=
+    "poweroff_level": 3,  # % on battery at or below which it powers off (0 = never)
+    "poweroff_notice": 30,  # s the notification shows before that, with a panel lit
+    "sleep_drain_ma": 300,  # mA assumed drawn asleep, for the battery check wakes
+    "wifi_sleep": "off",  # off (the WLAN chip powered off) | wowlan (it stays associated)
+    "wowlan_wake": "tcp,disconnect",  # what wakes the phone in WoWLAN (WOWLAN_TRIGGERS)
+    "wifi_grace": 12,  # s awake after a wake by the WiFi (WoWLAN), from WiFi's answer
+    "wowlan_max_failures": 2,  # WoWLAN sleeps in a row WiFi did not survive: WoWLAN off
+    "wifi_sync_every": 0,  # s, on WiFi without WoWLAN: wake this often for the push (0 = never)
+    "sync_grace": 20,  # s awake after such a sync wake, from WiFi's answer
+    "sync_hook": "",  # a command run once WiFi answers after a sync wake
+    "stay_awake_charging": "on",  # on external power the phone does not sleep (on | off)
+}
+
+# Settings read again while the daemon runs (when autosleep.conf or the
+# run-time one changes); the rest is read at start.
+LIVE_KEYS = ("stay_awake_charging",)
+
+POWER_SUPPLY = "/sys/class/power_supply"
+DESIGN_MAH = 3600  # the battery's design capacity (its model name says 3600 mAh)
+BATTERY_CHECK_S = 60  # s between battery checks while awake
+BATTERY_PENDING_S = 5  # ... while a power-off is announced
+BOUND_MIN_S = 120  # the shortest battery-check sleep
+BOUND_SAFETY = 0.5  # the part of the margin a sleep may use up at the assumed drain
+DRAIN_MIN_SLEEP_S = 600  # a sleep this long measures the drain asleep (1 mAh steps)
+
+# Interrupts that can end a suspend, by their /proc/interrupts name (the
+# wake reason: which of them moved while the phone slept).
+WAKE_IRQS = {
+    "pmic_pwrkey": "power key",
+    "pm8xxx_rtc_alarm": "RTC alarm",
+    "pmic_resin": "volume key",
+    "gpio-keys": "gpio key",
+    "PCIe PME": "WiFi (PCIe PME)",
+    "0000:00:00.0:wakeup": "WiFi (WAKE#)",
+    "ipa": "modem data (IPA)",
+}
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def set_conf(conf, k, v):
+    """conf[k] = v as DEFAULTS[k]'s type; False for an unknown key or a bad value."""
+    if k not in DEFAULTS:
+        return False
+    if isinstance(DEFAULTS[k], int):
+        try:
+            conf[k] = int(v)
+        except ValueError:
+            return False
+    else:
+        conf[k] = v
+    return True
+
+
+def read_conf(path=CONF, conf=None):
+    conf = dict(DEFAULTS) if conf is None else conf
+    try:
+        with open(path) as f:
+            text = f.read()
+    except OSError:
+        return conf
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if "=" not in line:
+            continue
+        k, v = (x.strip() for x in line.split("=", 1))
+        set_conf(conf, k, v)
+    return conf
+
+
+CMDLINE_PREFIX = "duo2.autosleep."
+
+
+def cmdline_overrides(text):
+    """The duo2.autosleep.KEY=VALUE words of a kernel command line, as
+    {KEY: VALUE} (on_try included: it is not a setting)."""
+    out = {}
+    for w in text.split():
+        if not w.startswith(CMDLINE_PREFIX) or "=" not in w:
+            continue
+        k, v = w[len(CMDLINE_PREFIX) :].split("=", 1)
+        if k:
+            out[k] = v
+    return out
+
+
+def read_cmdline():
+    try:
+        with open("/proc/cmdline") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def is_on(v):
+    return str(v).strip().lower() in ("1", "yes", "on", "true")
+
+
+def load_conf(a=None, say=None, conf_path=None, run_conf=None, cmdline=None):
+    """The settings in force: autosleep.conf, then the run-time file, then
+    the kernel command line's duo2.autosleep.KEY=VALUE, then this run's
+    options (a: the parsed arguments, or None). Returns (conf, on_try).
+    say(msg) is told what came from where (None: nothing logged, a reload)."""
+    say = say or (lambda msg: None)
+    conf_path, run_conf = conf_path or CONF, run_conf or RUN_CONF
+    conf = read_conf(conf_path)
+    if os.path.exists(run_conf):
+        # a measurement's settings: gone with the next boot
+        read_conf(run_conf, conf)
+        say("%s read (settings until the next boot)" % run_conf)
+    ov = cmdline_overrides(read_cmdline() if cmdline is None else cmdline)
+    on_try = ov.pop("on_try", "").lower() in ("1", "yes", "on", "true")
+    for k, v in sorted(ov.items()):
+        if set_conf(conf, k, v):
+            say("kernel command line: %s = %s" % (k, conf[k]))
+        else:
+            say("kernel command line: duo2.autosleep.%s=%s ignored" % (k, v))
+    if a is None:
+        return conf, on_try
+    opt = lambda name: getattr(a, name, None)  # noqa: E731
+    if opt("wifi_sleep"):
+        conf["wifi_sleep"] = a.wifi_sleep
+    if opt("wowlan_wake"):
+        conf["wowlan_wake"] = a.wowlan_wake
+    if opt("poweroff_test"):
+        conf["poweroff_level"] = a.poweroff_test
+    if opt("delay") is not None:
+        conf["delay"] = a.delay
+    if opt("resume_grace") is not None:
+        conf["resume_grace"] = a.resume_grace
+    if opt("charging_hold") is not None:
+        conf["stay_awake_charging"] = a.charging_hold
+    elif opt("test_max"):
+        # a test suspend is asked for: the charger (where tests run) must not stop it
+        conf["stay_awake_charging"] = "off"
+    return conf, on_try
+
+
+def conf_stamp(paths=None):
+    """What changes when a settings file is written (or appears, or goes)."""
+    out = []
+    for p in paths or (CONF, RUN_CONF):
+        try:
+            st = os.stat(p)
+            out.append((st.st_mtime_ns, st.st_size, st.st_ino))
+        except OSError:
+            out.append(None)
+    return tuple(out)
+
+
+# --- the switches: a timed hold, the charging hold -------------------------
+
+
+def read_hold_until(path=None):
+    """A timed hold's end (epoch seconds), or None: no file, or not a number."""
+    try:
+        with open(path or HOLD_UNTIL) as f:
+            first = f.readline().split()
+    except OSError:
+        return None
+    try:
+        return float(first[0])
+    except (IndexError, ValueError):
+        return None
+
+
+def hold_left(until, now):
+    """Seconds a timed hold still keeps the phone awake (0: none, lapsed, or
+    an end too far ahead to trust: the clock was wrong when it was set, or
+    is now)."""
+    if until is None:
+        return 0
+    left = until - now
+    if left <= 0 or left > HOLD_MAX_S + HOLD_SLACK_S:
+        return 0
+    return left
+
+
+def hold_text(until, now):
+    """The timed hold in words, for the log and `duo2-autosleep-switch status`."""
+    if until is None:
+        return "none"
+    at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(until))
+    left = until - now
+    if left <= 0:
+        return "lapsed at %s" % at
+    if left > HOLD_MAX_S + HOLD_SLACK_S:
+        return "ignored: it ends at %s, more than %d h from now (a wrong clock?)" % (
+            at,
+            HOLD_MAX_S // 3600,
+        )
+    return "until %s, %s more" % (at, duration_text(left))
+
+
+def duration_text(s):
+    s = int(round(s))
+    if s < 60:
+        return "%d s" % s
+    m = s // 60
+    if m < 60:
+        return "%d min %d s" % (m, s % 60) if m < 10 and s % 60 else "%d min" % m
+    return "%d h %d min" % (m // 60, m % 60)
+
+
+def charging_hold(conf, b):
+    """(holds, why): does external power keep the phone awake? why says so,
+    or why not (None: the setting is off, or on battery)."""
+    if not is_on(conf.get("stay_awake_charging", "on")) or not b["external"]:
+        return False, None
+    if (
+        b["level"] is not None
+        and b["level"] <= CHARGING_HOLD_FLOOR
+        and b["status"] not in ("Charging", "Full")
+    ):
+        return False, (
+            "on external power, but the battery is not charging at %d %%: "
+            "it may sleep (asleep it charges)" % b["level"]
+        )
+    return True, "on external power (stay awake while charging)"
+
+
+def run(argv, user=None, timeout=5, env=None):
+    """stdout of a command, '' on any failure."""
+    kw = {}
+    if user is not None:
+        kw.update(user=user, group=user, extra_groups=[])
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env, **kw)
+    except (OSError, subprocess.SubprocessError, KeyError):
+        return ""
+    return p.stdout if p.returncode == 0 else ""
+
+
+def user_env(user):
+    import pwd
+
+    try:
+        pw = pwd.getpwnam(user)
+    except KeyError:
+        return None
+    rt = "/run/user/%d" % pw.pw_uid
+    return {
+        "HOME": pw.pw_dir,
+        "USER": user,
+        "XDG_RUNTIME_DIR": rt,
+        "DBUS_SESSION_BUS_ADDRESS": "unix:path=%s/bus" % rt,
+        "PATH": "/usr/bin:/bin",
+    }
+
+
+# --- what holds the phone awake ------------------------------------------
+
+
+def calls_active():
+    """'call ringing-in' etc. for every call that is not over."""
+    out = run(["mmcli", "-J", "-m", "any", "--voice-list-calls"])
+    try:
+        paths = json.loads(out).get("modem.voice.call", []) if out else []
+    except ValueError:
+        return []
+    found = []
+    for p in paths:
+        o = run(["mmcli", "-J", "-o", p])
+        try:
+            st = json.loads(o)["call"]["properties"]["state"]
+        except (ValueError, KeyError, TypeError):
+            st = "unknown"
+        if st not in ("terminated", "unknown"):
+            found.append(st)
+    return found
+
+
+def pcm_running(root="/proc/asound"):
+    """The ALSA substreams in state RUNNING (or DRAINING)."""
+    busy = []
+    try:
+        cards = [c for c in os.listdir(root) if c.startswith("card")]
+    except OSError:
+        return busy
+    for c in cards:
+        try:
+            pcms = [p for p in os.listdir(os.path.join(root, c)) if p.startswith("pcm")]
+        except OSError:
+            continue
+        for p in pcms:
+            d = os.path.join(root, c, p)
+            try:
+                subs = [s for s in os.listdir(d) if s.startswith("sub")]
+            except OSError:
+                continue
+            for s in subs:
+                try:
+                    with open(os.path.join(d, s, "status")) as f:
+                        first = f.readline()
+                except OSError:
+                    continue
+                if parse_pcm_state(first) in ("RUNNING", "DRAINING"):
+                    busy.append("%s/%s" % (c, p))
+    return busy
+
+
+def parse_pcm_state(line):
+    m = re.match(r"\s*state:\s*(\S+)", line)
+    return m.group(1) if m else None
+
+
+def mpris_playing(user):
+    env = user_env(user)
+    if env is None:
+        return []
+    out = run(["busctl", "--user", "--json=short", "list", "--acquired"], user=user, env=env)
+    try:
+        names = [n["name"] for n in json.loads(out)] if out else []
+    except (ValueError, KeyError, TypeError):
+        names = []
+    playing = []
+    for n in names:
+        if not n.startswith("org.mpris.MediaPlayer2."):
+            continue
+        o = run(
+            [
+                "busctl",
+                "--user",
+                "--json=short",
+                "get-property",
+                n,
+                "/org/mpris/MediaPlayer2",
+                "org.mpris.MediaPlayer2.Player",
+                "PlaybackStatus",
+            ],
+            user=user,
+            env=env,
+        )
+        try:
+            if json.loads(o).get("data") == "Playing":
+                playing.append(n[len("org.mpris.MediaPlayer2.") :])
+        except (ValueError, AttributeError):
+            pass
+    return playing
+
+
+def sleep_blockers(out):
+    """From logind's ListInhibitors (busctl --json=short): who blocks sleep."""
+    try:
+        rows = json.loads(out)["data"][0]
+    except (ValueError, KeyError, IndexError, TypeError):
+        return []
+    found = []
+    for what, who, why, mode, _uid, _pid in rows:
+        if mode == "block" and "sleep" in what.split(":"):
+            found.append("%s (%s)" % (who, why))
+    return found
+
+
+def logind_blockers():
+    return sleep_blockers(
+        run(
+            [
+                "busctl",
+                "--json=short",
+                "call",
+                "org.freedesktop.login1",
+                "/org/freedesktop/login1",
+                "org.freedesktop.login1.Manager",
+                "ListInhibitors",
+            ]
+        )
+    )
+
+
+def usb_host(root="/sys/class/udc"):
+    try:
+        udcs = os.listdir(root)
+    except OSError:
+        return []
+    found = []
+    for u in udcs:
+        try:
+            with open(os.path.join(root, u, "state")) as f:
+                st = f.read().strip()
+        except OSError:
+            continue
+        if st in ("configured", "addressed"):
+            found.append("%s %s" % (u, st))
+    return found
+
+
+def ssh_sessions(users):
+    out = run(["loginctl", "list-sessions", "-j"])
+    try:
+        rows = json.loads(out) if out else []
+    except ValueError:
+        return []
+    found = []
+    for r in rows:
+        if r.get("user") not in users or r.get("class") != "user":
+            continue
+        svc = run(
+            [
+                "loginctl",
+                "show-session",
+                str(r.get("session")),
+                "-p",
+                "Service",
+                "-p",
+                "State",
+                "--value",
+            ]
+        ).split()
+        if svc[:1] == ["sshd"] and "closing" not in svc[1:]:
+            found.append("%s (session %s)" % (r["user"], r["session"]))
+    return found
+
+
+def clocks_alarms(text):
+    """Every ring_time / snooze_time in gnome-clocks' alarms setting (the
+    GVariant text gsettings prints), as epoch seconds."""
+    times = []
+    for m in re.finditer(r"'(?:ring_time|snooze_time)': <'([^']+)'>", text):
+        try:
+            times.append(datetime.datetime.fromisoformat(m.group(1)).timestamp())
+        except ValueError:
+            pass
+    return sorted(times)
+
+
+def next_clocks_alarm(user, now):
+    env = user_env(user)
+    if env is None:
+        return None
+    out = run(["gsettings", "get", "org.gnome.clocks", "alarms"], user=user, env=env)
+    future = [t for t in clocks_alarms(out) if t > now - 60]
+    return future[0] if future else None
+
+
+# --- the battery -----------------------------------------------------------
+
+
+def _read(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:  # a battery manager not up yet answers EAGAIN
+        return None
+
+
+TORCH_SUFFIXES = (":torch", ":flash")
+
+
+def torch_lit(root=LEDS):
+    """The torch LEDs (LED class <colour>:torch / <colour>:flash: the camera's
+    flash LED lit as a light) whose brightness is not 0."""
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return []
+    return [
+        n
+        for n in names
+        if n.endswith(TORCH_SUFFIXES) and (_read(os.path.join(root, n, "brightness")) or "0") != "0"
+    ]
+
+
+def torch_off(root=LEDS):
+    """Switch every lit torch LED off (brightness 0); the names switched off."""
+    done = []
+    for n in torch_lit(root):
+        try:
+            with open(os.path.join(root, n, "brightness"), "w") as f:
+                f.write("0\n")
+            done.append(n)
+        except OSError as e:
+            log("torch %s: %s" % (n, e))
+    return done
+
+
+def read_battery(root=POWER_SUPPLY):
+    """The battery: {"level": % or None (no reading), "status", "charge_mah"
+    (the charge counter, or None), "external": a charger (USB, mains,
+    wireless) online, or the battery says it is charging / full}."""
+    b = {"level": None, "status": None, "charge_mah": None, "external": False}
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return b
+    for n in names:
+        d = os.path.join(root, n)
+        kind = _read(d + "/type")
+        if kind == "Battery":
+            if b["level"] is not None or _read(d + "/present") == "0":
+                continue
+            try:
+                b["level"] = int(_read(d + "/capacity"))
+            except (TypeError, ValueError):
+                continue
+            b["status"] = _read(d + "/status")
+            try:
+                b["charge_mah"] = int(_read(d + "/charge_counter")) / 1000.0
+            except (TypeError, ValueError):
+                pass
+        elif kind in ("USB", "Mains", "Wireless") and _read(d + "/online") == "1":
+            b["external"] = True
+    if b["status"] in ("Charging", "Full"):
+        b["external"] = True
+    return b
+
+
+def battery_low(b, threshold):
+    """On battery power at or below the threshold (an unreadable battery, a
+    charger, a threshold of 0: never)."""
+    return (
+        threshold > 0 and b["level"] is not None and not b["external"] and b["level"] <= threshold
+    )
+
+
+def battery_bound(b, threshold, drain_ma, capacity_mah=DESIGN_MAH):
+    """Seconds the phone may sleep on battery before it looks at the level
+    again (None: no bound: charging, no reading, no threshold): half the
+    time the margin above the threshold lasts at drain_ma."""
+    if threshold <= 0 or b["level"] is None or b["external"]:
+        return None
+    margin = b["level"] - threshold
+    if margin <= 0:
+        return BOUND_MIN_S
+    hours = margin * capacity_mah / 100.0 / max(1.0, drain_ma)
+    return max(BOUND_MIN_S, hours * 3600 * BOUND_SAFETY)
+
+
+def sleep_drain(b0, b1, slept):
+    """mA drawn in a sleep from the charge counter at its two ends (None: too
+    short to tell, on a charger, no counter)."""
+    if slept < DRAIN_MIN_SLEEP_S or b0["external"] or b1["external"]:
+        return None
+    if b0["charge_mah"] is None or b1["charge_mah"] is None:
+        return None
+    ma = (b0["charge_mah"] - b1["charge_mah"]) / (slept / 3600.0)
+    return ma if 0 <= ma <= 5000 else None
+
+
+def check_wake_only(reasons):
+    """Woken by the RTC alone (the modem's GLINK interrupts and the sensor
+    DSP come with any resume): a battery check, nothing for anyone else."""
+    r = _telling(reasons)
+    return any(x.startswith("RTC alarm") for x in r) and all(
+        x.startswith(("RTC alarm", "modem glink")) for x in r
+    )
+
+
+def notify(user, summary, body, timeout_ms, icon="battery-level-0-symbolic"):
+    """A critical notification to the GUI user's session (the shell's
+    org.freedesktop.Notifications); its id, or None."""
+    env = user_env(user)
+    if env is None:
+        return None
+    out = run(
+        [
+            "busctl",
+            "--user",
+            "call",
+            "org.freedesktop.Notifications",
+            "/org/freedesktop/Notifications",
+            "org.freedesktop.Notifications",
+            "Notify",
+            "susssasa{sv}i",
+            "Battery",
+            "0",
+            icon,
+            summary,
+            body,
+            "0",
+            "2",
+            "urgency",
+            "y",
+            "2",
+            "category",
+            "s",
+            "device.error",
+            str(timeout_ms),
+        ],
+        user=user,
+        env=env,
+    )
+    w = out.split()
+    return int(w[1]) if len(w) == 2 and w[0] == "u" and w[1].isdigit() else None
+
+
+def close_notification(user, nid):
+    env = user_env(user)
+    if env is not None and nid:
+        run(
+            [
+                "busctl",
+                "--user",
+                "call",
+                "org.freedesktop.Notifications",
+                "/org/freedesktop/Notifications",
+                "org.freedesktop.Notifications",
+                "CloseNotification",
+                "u",
+                str(nid),
+            ],
+            user=user,
+            env=env,
+        )
+
+
+# --- the decision ----------------------------------------------------------
+
+
+class Plan:
+    """When may the phone sleep? Pure: times are monotonic seconds."""
+
+    def __init__(self, delay, resume_grace):
+        self.delay = delay
+        self.resume_grace = resume_grace
+        self.dark_since = None
+        self.awake_until = 0.0  # no sleep before this (a resume, an alarm)
+
+    def set_dark(self, dark, now):
+        if dark and self.dark_since is None:
+            self.dark_since = now
+        elif not dark:
+            self.dark_since = None
+
+    def resumed(self, now, hold_until=None, grace=None):
+        """After a resume: no suspend for grace seconds (default the resume
+        grace; the WiFi wait and the rest are Sleeper.reasons') or until
+        hold_until."""
+        g = self.resume_grace if grace is None else grace
+        self.awake_until = max(now + g, hold_until or 0.0)
+        if self.dark_since is not None:
+            # dark through the resume: only the grace applies, not a new delay
+            self.dark_since = min(self.dark_since, now - self.delay)
+
+    def due(self):
+        """Monotonic time from which a suspend may be tried, or None (lit)."""
+        if self.dark_since is None:
+            return None
+        return max(self.dark_since + self.delay, self.awake_until)
+
+
+# --- the duo-wc event stream ---------------------------------------------
+
+
+def is_dark(state):
+    return not state.get("lit") and not state.get("ambient")
+
+
+class DuoWc:
+    def __init__(self, path=SOCK):
+        self.path = path
+        self.sock = None
+        self.buf = b""
+        self.state = None
+
+    def connect(self):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(5)
+        s.connect(self.path)
+        s.sendall(b'{"id":1,"request":"subscribe"}\n')
+        s.setblocking(False)
+        self.sock = s
+        self.buf = b""
+
+    def close(self):
+        if self.sock:
+            self.sock.close()
+        self.sock = None
+        self.state = None
+
+    def read(self):
+        """Read what is there; returns False when the connection ended."""
+        try:
+            data = self.sock.recv(65536)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return False
+        if not data:
+            return False
+        self.buf += data
+        while b"\n" in self.buf:
+            line, self.buf = self.buf.split(b"\n", 1)
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            st = None
+            if isinstance(msg.get("ok"), dict) and "state" in msg["ok"]:
+                st = msg["ok"]["state"]
+            elif msg.get("event") == "state":
+                st = msg.get("state")
+            if isinstance(st, dict):
+                self.state = st
+        return True
+
+
+# --- suspend and resume ----------------------------------------------------
+
+
+def irq_counts():
+    counts = {}
+    try:
+        with open("/proc/interrupts") as f:
+            lines = f.read().splitlines()[1:]
+    except OSError:
+        return counts
+    for line in lines:
+        w = line.split()
+        if not w:
+            continue
+        n = 0
+        i = 1
+        while i < len(w) and w[i].isdigit():
+            n += int(w[i])
+            i += 1
+        counts[w[0].rstrip(":") + " " + " ".join(w[i:])] = n
+    return counts
+
+
+# Wakeup sources whose events say why the phone woke, by a part of their
+# name (/sys/class/wakeup/*/name), the first match counts (the most specific
+# first): the IPC router's wakeups of the modem's and the sensor DSP's IPCRTR
+# channels, split by the kernel into requests (the modem asking the remote
+# file system for its EFS) and indications (a call, an SMS; the fold); an
+# older kernel has the channel's own wakeup source only. The charger
+# (qcom_battmgr).
+WAKE_SOURCES = (
+    ("4080000.remoteproc:glink-edge.IPCRTR.-1.-1:request", "modem request"),
+    ("4080000.remoteproc:glink-edge.IPCRTR.-1.-1:indication", "modem call/SMS"),
+    ("4080000.remoteproc:glink-edge.IPCRTR", "modem call/SMS"),
+    ("5c00000.remoteproc:glink-edge.IPCRTR", "sensor DSP"),
+    ("qcom-battmgr-usb", "charger (USB)"),
+    ("qcom-battmgr-wls", "charger (wireless)"),
+)
+
+# Reasons that come with every resume and do not say why it woke: the sensor
+# DSP hands over the wakeup sensors' events it held while the phone slept (a
+# fold that did wake it lights a panel, and lit panels hold the phone awake
+# by themselves).
+NEUTRAL_REASONS = ("sensor DSP",)
+
+
+def wake_source_label(name):
+    for k, what in WAKE_SOURCES:
+        if k in name:
+            return what
+    return None
+
+
+def wakeup_counts(base="/sys/class/wakeup"):
+    """event_count of the wakeup sources in WAKE_SOURCES, by their name."""
+    counts = {}
+    try:
+        entries = os.listdir(base)
+    except OSError:
+        return counts
+    for e in entries:
+        try:
+            with open(os.path.join(base, e, "name")) as f:
+                name = f.read().strip()
+            if wake_source_label(name) is None:
+                continue
+            with open(os.path.join(base, e, "event_count")) as f:
+                counts[name] = int(f.read())
+        except (OSError, ValueError):
+            continue
+    return counts
+
+
+def source_reasons(before, after):
+    found = []
+    for name, n in sorted(after.items()):
+        d = n - before.get(name, n)
+        what = wake_source_label(name)
+        if d > 0 and what:
+            found.append("%s +%d" % (what, d))
+    return found
+
+
+def _telling(reasons):
+    return [r for r in reasons if not r.startswith(NEUTRAL_REASONS)]
+
+
+def modem_only(reasons):
+    """Woken by the modem alone (its GLINK edge, its IPC router or its data
+    path), apart from what comes with every resume (the sensor DSP)?"""
+    r = _telling(reasons)
+    return bool(r) and all(
+        x.startswith(("modem glink", "modem data", "modem call", "modem request")) for x in r
+    )
+
+
+def request_only(reasons):
+    """Woken by a modem request alone (the remote file system): nothing for
+    ModemManager, Calls or the network, rmtfs answers it in a moment. The
+    modem's GLINK interrupts come with any of its messages."""
+    r = _telling(reasons)
+    return any(x.startswith("modem request") for x in r) and all(
+        x.startswith(("modem request", "modem glink")) for x in r
+    )
+
+
+def wake_reasons(before, after):
+    """The wake interrupts that moved, by name; also the modem's glink edge."""
+    found = []
+    for key, n in after.items():
+        d = n - before.get(key, n)
+        if d <= 0:
+            continue
+        for name, what in WAKE_IRQS.items():
+            if name in key:
+                found.append("%s +%d" % (what, d))
+        if "glink-smem" in key and "131072" in key:
+            found.append("modem glink +%d" % d)
+    return found
+
+
+def stats():
+    out = []
+    for f in ("success", "fail"):
+        try:
+            with open("/sys/power/suspend_stats/" + f) as fh:
+                out.append(int(fh.read()))
+        except (OSError, ValueError):
+            out.append(-1)
+    return tuple(out)
+
+
+SUSPEND_WAIT_S = 90  # s for the suspend to happen after logind took the request
+RETRY_WAIT_S = 5  # s for systemd-sleep's next state after a failed first one
+
+
+def wait_suspend(st0, read=stats, clock=time.monotonic, nap=time.sleep):
+    """Wait for the suspend's outcome in the suspend statistics, from st0 =
+    (success, fail) taken before the request. A first state can fail at
+    once (mem -> -EBUSY on a pending wakeup event) and systemd-sleep then
+    tries the next one (freeze), which may go through: so a failure alone is
+    not the end until the retry had RETRY_WAIT_S to show up (the clock stops
+    while it sleeps). Returns (stats, outcome): 'slept' (a success, no
+    failure), 'retried' (a failure, then a success), 'failed' (failures
+    only) or 'nothing' (no change within SUSPEND_WAIT_S)."""
+    t0 = clock()
+    t_fail = None
+    st1 = st0
+    while clock() - t0 < SUSPEND_WAIT_S:
+        st1 = read()
+        if st1[0] != st0[0]:
+            return st1, ("retried" if st1[1] != st0[1] else "slept")
+        if st1[1] != st0[1]:
+            if t_fail is None:
+                t_fail = clock()
+            elif clock() - t_fail >= RETRY_WAIT_S:
+                return st1, "failed"
+        nap(0.2)
+    return st1, ("failed" if st1[1] != st0[1] else "nothing")
+
+
+def last_failed():
+    try:
+        with open("/sys/power/suspend_stats/last_failed_dev") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def slept_s():
+    """CLOCK_BOOTTIME - CLOCK_MONOTONIC: grows by the time spent suspended."""
+    return time.clock_gettime(time.CLOCK_BOOTTIME) - time.clock_gettime(time.CLOCK_MONOTONIC)
+
+
+class WakeAlarm:
+    """A CLOCK_REALTIME_ALARM timerfd: the kernel arms the RTC for it."""
+
+    def __init__(self):
+        self.fd = None
+        try:
+            self.fd = os.timerfd_create(
+                CLOCK_REALTIME_ALARM, flags=os.TFD_CLOEXEC | os.TFD_NONBLOCK
+            )
+        except (AttributeError, OSError) as e:
+            log("no alarm timer (%s): Clocks alarms will not wake the phone" % e)
+
+    def arm(self, epoch):
+        if self.fd is None:
+            return False
+        os.timerfd_settime(self.fd, flags=os.TFD_TIMER_ABSTIME, initial=epoch)
+        return True
+
+    def disarm(self):
+        if self.fd is not None:
+            os.timerfd_settime(self.fd, initial=0)
+
+
+def wifi_ok():
+    out = run(["ip", "-4", "route", "show", "default", "dev", "wlan0"])
+    gw = None
+    for line in out.splitlines():
+        w = line.split()
+        if "via" in w:
+            gw = w[w.index("via") + 1]
+            break
+    if not gw:
+        return False
+    return (
+        subprocess.run(
+            ["ping", "-n", "-q", "-c", "1", "-W", "1", "-I", "wlan0", gw],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).returncode
+        == 0
+    )
+
+
+def time_wifi(t0, sleeper):
+    def work():
+        while time.monotonic() - t0 < 60:
+            if wifi_ok():
+                sleeper.wifi_back = time.monotonic()
+                log("resume: WiFi answers %.1f s after the resume" % (sleeper.wifi_back - t0))
+                sleeper.wifi_answered()
+                return
+            time.sleep(0.25)
+        log("resume: WiFi not back 60 s after the resume")
+
+    threading.Thread(target=work, daemon=True).start()
+
+
+def try_boot():
+    try:
+        with open("/proc/cmdline") as f:
+            return any(w.startswith("duo2.try=") for w in f.read().split())
+    except OSError:
+        return False
+
+
+def after_resume(now, resume_t, wifi_back, grace, wifi_wait):
+    """Why the phone must stay up after a resume (None: it may sleep): WiFi
+    first (a push, an ssh login need it), then the grace from its return."""
+    if resume_t is None:
+        return None
+    if wifi_back is None or wifi_back < resume_t:
+        if now - resume_t < wifi_wait:
+            return "waiting for WiFi (%.0f s since the resume)" % (now - resume_t)
+        return None if now - resume_t >= wifi_wait + grace else "grace after the resume"
+    if now - wifi_back < grace:
+        return "grace (WiFi back %.0f s ago)" % (now - wifi_back)
+    return None
+
+
+# --- WiFi in sleep (WoWLAN) -------------------------------------------------
+
+WLAN = "wlan0"
+NET = "/sys/class/net"
+ROOT_PORT_WAKEUP = "/sys/bus/pci/devices/0000:00:00.0/power/wakeup"
+WOWLAN_TRIGGERS = ("tcp", "unicast", "ping", "magic", "disconnect")
+WOWLAN_MAX_PATTERNS = 22  # the firmware's (iw phy: "maximum number of patterns")
+
+
+def parse_addrs(text):
+    """`ip -j addr show dev wlan0` -> (IPv4 addresses, IPv6 /64 prefixes as
+    8 bytes), global scope only, without tentative or failed IPv6 ones (a
+    deprecated one stays: its connections still live)."""
+    v4, v6 = [], []
+    try:
+        links = json.loads(text) if text.strip() else []
+    except ValueError:
+        return v4, v6
+    for link in links if isinstance(links, list) else []:
+        for a in link.get("addr_info", []):
+            if a.get("scope") != "global" or not a.get("local"):
+                continue
+            if a.get("family") == "inet":
+                try:
+                    b = socket.inet_pton(socket.AF_INET, a["local"])
+                except OSError:
+                    continue
+                if b not in v4:
+                    v4.append(b)
+            elif a.get("family") == "inet6":
+                if a.get("tentative") or a.get("dadfailed"):
+                    continue
+                try:
+                    b = socket.inet_pton(socket.AF_INET6, a["local"])[:8]
+                except OSError:
+                    continue
+                if b not in v6:
+                    v6.append(b)
+    return v4, v6
+
+
+def iw_pattern(offset, cells):
+    """An iw WoWLAN pattern: OFFSET+xx:xx:-:... (None = any byte); offsets in
+    the Ethernet frame (ath11k converts them to the 802.11 frame)."""
+    return "%d+%s" % (offset, ":".join("-" if c is None else "%02x" % c for c in cells))
+
+
+def _ipv4(proto, addr, after=()):
+    # from the EtherType (12): 08 00, IPv4 header (14..33): protocol at 23,
+    # destination at 30..33; then the first bytes of the payload (34..)
+    return iw_pattern(
+        12, [0x08, 0x00] + [None] * 9 + [proto] + [None] * 6 + list(addr) + list(after)
+    )
+
+
+def _ipv6(next_header, prefix, after=()):
+    # 86 dd, IPv6 header (14..53): next header at 20, destination at 38..53
+    # (its /64 prefix: 38..45); then the payload (54..)
+    cells = [0x86, 0xDD] + [None] * 6 + [next_header] + [None] * 17 + list(prefix)
+    if after:
+        cells += [None] * 8 + list(after)
+    return iw_pattern(12, cells)
+
+
+def wowlan_args(phy, wake, mac, v4, v6):
+    """The iw command that sets WoWLAN up for the triggers in WAKE (a comma
+    list of WOWLAN_TRIGGERS), and a summary for the log without addresses;
+    (None, why) when nothing would wake the phone."""
+    want = [t.strip() for t in wake.split(",") if t.strip()]
+    flags, pats, said = [], [], []
+    for t in want:
+        if t == "disconnect":
+            flags.append("disconnect")
+            said.append("disconnect")
+        elif t == "magic":
+            flags.append("magic-packet")
+            said.append("magic packet")
+        elif t == "unicast":
+            if mac:
+                pats.append(iw_pattern(0, bytes.fromhex(mac.replace(":", ""))))
+                said.append("unicast")
+        elif t == "tcp":
+            pats += [_ipv4(6, a) for a in v4] + [_ipv6(6, p) for p in v6]
+            if v4 or v6:
+                said.append("tcp (%d IPv4, %d IPv6 /64)" % (len(v4), len(v6)))
+        elif t == "ping":
+            pats += [_ipv4(1, a, (8,)) for a in v4] + [_ipv6(0x3A, p, (128,)) for p in v6]
+            if v4 or v6:
+                said.append("ping")
+        else:
+            said.append("unknown trigger %r ignored" % t)
+    if len(pats) > WOWLAN_MAX_PATTERNS:
+        said.append("%d patterns cut to %d" % (len(pats), WOWLAN_MAX_PATTERNS))
+        pats = pats[:WOWLAN_MAX_PATTERNS]
+    if not flags and not pats:
+        return None, "nothing to wake for (%s)" % (", ".join(said) or "no triggers")
+    argv = ["iw", "phy", phy, "wowlan", "enable"] + flags
+    if pats:
+        argv += ["patterns"] + pats
+    return argv, "%s; %d patterns" % (", ".join(said), len(pats))
+
+
+def wowlan_shown(text):
+    """`iw phy X wowlan show`: is WoWLAN set up? (None: no answer.)"""
+    if "WoWLAN is enabled" in text:
+        return True
+    if "WoWLAN is disabled" in text:
+        return False
+    return None
+
+
+def wowlan_verdict(resume_t, wifi_back, now, wifi_wait):
+    """After a sleep with WoWLAN: 'ok' (WiFi answered after the resume),
+    'failed' (not within wifi_wait) or None (too early to tell)."""
+    if resume_t is None:
+        return None
+    if wifi_back is not None and wifi_back >= resume_t:
+        return "ok"
+    if now - resume_t >= wifi_wait:
+        return "failed"
+    return None
+
+
+def wifi_only(reasons):
+    """Woken by the WiFi (WoWLAN's PCIe PME or WAKE#) alone, apart from what
+    comes with any resume?"""
+    r = [x for x in _telling(reasons) if not x.startswith("modem glink")]
+    return bool(r) and all(x.startswith("WiFi") for x in r)
+
+
+def _readline(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def wlan_up():
+    """wlan0 associated with a default route over it (WiFi is the phone's
+    network): only then is WoWLAN or a sync wake of any use."""
+    if _readline(os.path.join(NET, WLAN, "operstate")) != "up":
+        return False
+    return bool(run(["ip", "-4", "route", "show", "default", "dev", WLAN]).strip()) or bool(
+        run(["ip", "-6", "route", "show", "default", "dev", WLAN]).strip()
+    )
+
+
+def wlan_phy():
+    return _readline(os.path.join(NET, WLAN, "phy80211", "name"))
+
+
+class WifiSleep:
+    """Sets WoWLAN up (or makes sure it is off) right before a suspend."""
+
+    def __init__(self, conf, dry_run=False):
+        self.conf = conf
+        self.dry_run = dry_run
+        self.failures = 0  # WoWLAN sleeps in a row WiFi did not survive
+        self.off = False  # switched off after too many of them
+        self.armed = False  # the last suspend had WoWLAN set up
+        self.set_by_us = False  # we enabled it at least once (a test undoes it)
+        self.pending = False  # a verdict on the last WoWLAN sleep is due
+
+    def mode(self):
+        m = self.conf["wifi_sleep"]
+        if m not in ("off", "wowlan"):
+            return "off"
+        return "off" if self.off else m
+
+    def _root_port(self, on):
+        if os.path.exists(ROOT_PORT_WAKEUP) and not self.dry_run:
+            try:
+                with open(ROOT_PORT_WAKEUP, "w") as f:
+                    f.write("enabled" if on else "disabled")
+            except OSError as e:
+                log("WiFi in sleep: root port wakeup: %s" % e)
+
+    def _disable(self, phy):
+        if phy and wowlan_shown(run(["iw", "phy", phy, "wowlan", "show"])):
+            if self.dry_run:
+                log("DRY RUN: would switch WoWLAN off")
+            else:
+                run(["iw", "phy", phy, "wowlan", "disable"])
+        self._root_port(False)
+
+    def prepare(self):
+        """Right before a suspend: returns 'wowlan' (set up), 'off' (on WiFi,
+        the chip goes off in the sleep) or None (not on WiFi)."""
+        self.armed = False
+        self.pending = False
+        phy = wlan_phy()
+        on_wifi = bool(phy) and wlan_up()
+        if not on_wifi or self.mode() != "wowlan":
+            self._disable(phy)
+            return "off" if on_wifi else None
+        v4, v6 = parse_addrs(run(["ip", "-j", "addr", "show", "dev", WLAN]))
+        mac = _readline(os.path.join(NET, WLAN, "address"))
+        argv, what = wowlan_args(phy, self.conf["wowlan_wake"], mac, v4, v6)
+        if argv is None:
+            log("WiFi in sleep: no WoWLAN, %s" % what)
+            self._disable(phy)
+            return "off"
+        if self.dry_run:
+            log("DRY RUN: would set WoWLAN up: %s" % what)
+            return "wowlan"
+        p = None
+        try:
+            p = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError) as e:
+            log("WiFi in sleep: iw: %s" % e)
+        if p is None or p.returncode != 0:
+            log(
+                "WiFi in sleep: WoWLAN not set up (%s): the chip goes off"
+                % (p.stderr.strip() if p is not None else "iw failed")
+            )
+            self._disable(phy)
+            return "off"
+        self._root_port(True)
+        self.armed = self.pending = self.set_by_us = True
+        log("WiFi in sleep: WoWLAN, waking for %s" % what)
+        return "wowlan"
+
+    def judge(self, resume_t, wifi_back, now):
+        """Once after a WoWLAN sleep: count it if WiFi did not survive, and
+        switch WoWLAN off after too many in a row."""
+        if not self.pending:
+            return
+        v = wowlan_verdict(resume_t, wifi_back, now, self.conf["wifi_wait"])
+        if v is None:
+            return
+        self.pending = False
+        if v == "ok":
+            self.failures = 0
+            return
+        self.failures += 1
+        log(
+            "WiFi in sleep: WiFi did not answer %d s after a WoWLAN sleep (%d in a row)"
+            % (self.conf["wifi_wait"], self.failures)
+        )
+        if self.failures >= max(1, self.conf["wowlan_max_failures"]):
+            self.off = True
+            log("WiFi in sleep: WoWLAN switched OFF until duo2-autosleep restarts")
+            self._disable(wlan_phy())
+
+    def undo(self):
+        """After a test run: WoWLAN off again (the service sets it up itself
+        before its own suspends, if configured)."""
+        if self.set_by_us:
+            self._disable(wlan_phy())
+            log("WiFi in sleep: the test's WoWLAN switched off again")
+
+
+def run_hook(cmd, timeout=30):
+    """SYNC_HOOK, through the shell, bounded; logs how it went."""
+    t0 = time.monotonic()
+    try:
+        p = subprocess.run(["/bin/sh", "-c", cmd], capture_output=True, text=True, timeout=timeout)
+        log(
+            "sync hook: exit %d after %.1f s%s"
+            % (
+                p.returncode,
+                time.monotonic() - t0,
+                (": " + p.stderr.strip().splitlines()[-1])
+                if p.returncode and p.stderr.strip()
+                else "",
+            )
+        )
+    except subprocess.TimeoutExpired:
+        log("sync hook: still running after %d s, left behind" % timeout)
+    except OSError as e:
+        log("sync hook: %s" % e)
+
+
+class Sleeper:
+    def __init__(self, a, conf):
+        self.a = a
+        self.conf = conf
+        self.alarm = WakeAlarm()
+        self.users = set(conf["ssh_users"].split(","))
+        self.resume_t = None  # monotonic time of the last resume
+        self.wifi_back = None  # monotonic time WiFi answered after it
+        self.modem_wake = False  # the last resume was the modem's alone
+        self.request_wake = False  # ... and only a request of its (rmtfs)
+        self.check_wake = False  # the last resume was a battery check alone
+        self.lit_logged = True
+        self.try_boot = try_boot()
+        self.battery = read_battery()
+        self.drain_ma = None  # mA drawn in the last long sleep (measured)
+        self.poweroff_at = None  # monotonic: the announced power-off
+        self.poweroff_note = None  # its notification's id
+        self.call_logged = False
+        self.powering_off = False
+        self.wifi = WifiSleep(conf, a.dry_run)
+        self.wifi_wake = False  # the last resume was the WiFi's alone (WoWLAN)
+        self.sync_wake = False  # ... a WiFi sync wake (WIFI_SYNC_EVERY)
+        self.stamp = conf_stamp()  # the settings files as last read (LIVE_KEYS)
+
+    def gui_user(self):
+        """The GUI user: the setting, else duo-wc's (looked up once)."""
+        if self.conf["user"]:
+            return self.conf["user"]
+        if getattr(self, "_gui_user", None) is None:
+            self._gui_user = run(["systemctl", "show", "-P", "User", "duo-wc.service"]).strip()
+        return self._gui_user
+
+    def reload_live(self):
+        """The LIVE_KEYS again when a settings file changed (the switch's
+        `charging on|off`, Duo Settings), with this run's options over them."""
+        st = conf_stamp()
+        if st == self.stamp:
+            return
+        self.stamp = st
+        new, _on_try = load_conf(self.a)
+        for k in LIVE_KEYS:
+            if new[k] != self.conf[k]:
+                log("settings changed: %s = %s (was %s)" % (k, new[k], self.conf[k]))
+                self.conf[k] = new[k]
+
+    def holds(self, now_epoch):
+        """The switches that hold the phone awake by themselves, after the
+        hold file: a timed hold, external power (empty: neither)."""
+        r = []
+        until = read_hold_until()
+        if hold_left(until, now_epoch):
+            # no "N min more" here: the log says the reasons when they change
+            r.append(
+                "timed hold until %s" % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(until))
+            )
+        # read now: the charger may have come or gone since the minute's look
+        held, why = charging_hold(self.conf, read_battery())
+        if held:
+            r.append(why)
+        return r
+
+    def real_poweroff(self):
+        """Power off for real? Not in a --dry-run, and a --test-max run (one
+        suspend beside the service) leaves it to the service."""
+        return not self.a.dry_run and (self.a.poweroff_test or not self.a.test_max)
+
+    def check_battery(self, lit, now):
+        """An empty battery: power off (at once with the panels dark, after
+        a notification and the notice with a panel lit). True while a
+        power-off is announced or under way: no suspend then."""
+        if self.powering_off:
+            return True
+        thr = self.conf["poweroff_level"]
+        b = self.battery = read_battery()
+        if not battery_low(b, thr):
+            if self.poweroff_at is not None:
+                log(
+                    "battery %s %%%s: the power-off is called off"
+                    % (b["level"], ", charging" if b["external"] else "")
+                )
+                close_notification(self.gui_user(), self.poweroff_note)
+                self.poweroff_at = self.poweroff_note = None
+            self.call_logged = False
+            return False
+        if b["level"] > 1:
+            c = calls_active()
+            if c:
+                if not self.call_logged:
+                    log(
+                        "battery %d %%: powering off after the call (%s)"
+                        % (b["level"], ", ".join(c))
+                    )
+                    self.call_logged = True
+                return True
+        if self.poweroff_at is None:
+            notice = self.conf["poweroff_notice"] if lit else 0
+            self.poweroff_at = now + notice
+            log(
+                "battery %d %% (%s), at or below %d %%: powering off%s"
+                % (b["level"], b["status"], thr, " in %d s" % notice if notice else "")
+            )
+            if notice and self.real_poweroff():
+                self.poweroff_note = notify(
+                    self.gui_user(),
+                    "Battery empty",
+                    "The phone switches off in %d seconds. Connect the charger to keep it on."
+                    % notice,
+                    (notice + 30) * 1000,
+                )
+        if now >= self.poweroff_at:
+            self.power_off(b)
+        return True
+
+    def power_off(self, b):
+        if not self.real_poweroff():
+            log(
+                "%s: would power off now (battery %d %%)"
+                % ("DRY RUN" if self.a.dry_run else "test run", b["level"])
+            )
+            self.poweroff_at = None
+            return
+        self.powering_off = True
+        log("battery %d %%: powering off" % b["level"])
+        off = torch_off()
+        if off:
+            log("torch switched off: %s" % ", ".join(off))
+        for argv in (
+            ["systemctl", "poweroff", "--check-inhibitors=no"],
+            ["systemctl", "poweroff", "--force"],
+        ):
+            try:
+                p = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+            except (OSError, subprocess.SubprocessError) as e:
+                log("%s: %s" % (" ".join(argv), e))
+                continue
+            if p.returncode == 0:
+                return
+            log("%s failed: %s" % (" ".join(argv), p.stderr.strip()))
+        self.powering_off = False
+
+    def reasons(self, now_epoch):
+        """Everything that holds the phone awake now (empty: it may sleep)."""
+        r = []
+        if os.path.exists(HOLD) and not self.a.ignore_hold:
+            r.append("hold file %s" % HOLD)
+            return r
+        if self.try_boot and not self.a.test_max and not self.a.dry_run:
+            # a try kernel must stay reachable (duo2-try-netwatch watches it)
+            r.append("a duo2-try boot: no automatic sleep")
+            return r
+        self.reload_live()
+        held = self.holds(now_epoch)
+        if held:
+            # like the hold file: nothing else needs a look while they hold
+            self.wifi.judge(self.resume_t, self.wifi_back, time.monotonic())
+            return held
+        if self.modem_wake or self.check_wake:
+            # an indication: let ModemManager and Calls take it (a ringing
+            # call holds the phone awake by itself), no wait for WiFi; a
+            # battery check: the level was read at the resume
+            w = None
+            if self.resume_t is not None and time.monotonic() - self.resume_t < self.wake_grace():
+                w = "battery check grace" if self.check_wake else "modem wake grace"
+        else:
+            w = after_resume(
+                time.monotonic(),
+                self.resume_t,
+                self.wifi_back,
+                self.resume_grace(),
+                self.conf["wifi_wait"],
+            )
+        self.wifi.judge(self.resume_t, self.wifi_back, time.monotonic())
+        if w:
+            r.append(w)
+        c = calls_active()
+        if c:
+            r.append("call " + ", ".join(c))
+        pcm = pcm_running()
+        if pcm:
+            r.append("audio " + ", ".join(pcm))
+        mp = mpris_playing(self.gui_user())
+        if mp:
+            r.append("playing " + ", ".join(mp))
+        lb = logind_blockers()
+        if lb:
+            r.append("inhibitor " + ", ".join(lb))
+        u = usb_host()
+        if u:
+            r.append("USB host " + ", ".join(u))
+        if not self.a.no_ssh_inhibit:
+            s = ssh_sessions(self.users)
+            if s:
+                r.append("ssh " + ", ".join(s))
+        nxt = next_clocks_alarm(self.gui_user(), now_epoch)
+        if nxt is not None and nxt - now_epoch < self.conf["delay"] + self.conf["alarm_lead"]:
+            r.append("Clocks alarm at %s" % time.strftime("%H:%M:%S", time.localtime(nxt)))
+        t = torch_lit()
+        if t:
+            r.append("torch " + ", ".join(t))
+        return r
+
+    def suspend(self):
+        """One suspend; returns (slept seconds, hold the phone awake until
+        this monotonic time or None)."""
+        now = time.time()
+        nxt = next_clocks_alarm(self.gui_user(), now)
+        wake_at = None
+        why = None
+        if nxt is not None:
+            wake_at, why = (
+                nxt - self.conf["alarm_lead"],
+                "Clocks alarm %s" % time.strftime("%H:%M", time.localtime(nxt)),
+            )
+        if self.conf["wake_every"] > 0 and (
+            wake_at is None or now + self.conf["wake_every"] < wake_at
+        ):
+            wake_at, why = now + self.conf["wake_every"], "periodic wake"
+        wifi_mode = self.wifi.prepare()
+        sync = self.conf["wifi_sync_every"]
+        if wifi_mode == "off" and sync > 0 and (wake_at is None or now + sync < wake_at):
+            wake_at, why = now + sync, "WiFi sync"
+        b0 = self.battery  # read right before (check_battery)
+        drain = max(self.conf["sleep_drain_ma"], self.drain_ma or 0)
+        bound = battery_bound(b0, self.conf["poweroff_level"], drain)
+        if bound is not None and (wake_at is None or now + bound < wake_at):
+            wake_at, why = now + bound, "battery check, %d %%" % b0["level"]
+        if wake_at is not None:
+            self.alarm.arm(wake_at)
+        if self.a.test_max:
+            subprocess.run(
+                ["rtcwake", "-m", "no", "-d", "rtc1", "-s", str(self.a.test_max)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        if self.a.dry_run:
+            log(
+                "DRY RUN: would suspend now%s"
+                % (
+                    ", wake at %s (%s)" % (time.strftime("%H:%M:%S", time.localtime(wake_at)), why)
+                    if wake_at
+                    else ""
+                )
+            )
+            self.alarm.disarm()
+            return 0.0, None
+        log(
+            "suspending%s%s"
+            % (
+                ", wake at %s (%s)" % (time.strftime("%H:%M:%S", time.localtime(wake_at)), why)
+                if wake_at
+                else "",
+                ", test bound %d s" % self.a.test_max if self.a.test_max else "",
+            )
+        )
+        st0 = stats()
+        sl0 = slept_s()
+        irq0 = irq_counts()
+        ws0 = wakeup_counts()
+        try:
+            p = subprocess.run(
+                [
+                    "busctl",
+                    "call",
+                    "org.freedesktop.login1",
+                    "/org/freedesktop/login1",
+                    "org.freedesktop.login1.Manager",
+                    "Suspend",
+                    "b",
+                    "false",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if p.returncode != 0:
+                log("logind refused the suspend: %s" % p.stderr.strip())
+                return 0.0, None
+        except (OSError, subprocess.SubprocessError) as e:
+            log("logind: %s" % e)
+            return 0.0, None
+        _st1, outcome = wait_suspend(st0)
+        t_back = time.monotonic()
+        self.alarm.disarm()
+        slept = slept_s() - sl0
+        if outcome == "nothing":
+            log("suspend: nothing happened within %d s (logind refused?)" % SUSPEND_WAIT_S)
+            return 0.0, None
+        if outcome == "retried":
+            log(
+                "suspend: the first state failed (last failed device: %s), the retry went through"
+                % (last_failed() or "none")
+            )
+        elif outcome == "failed":
+            log("suspend failed (last failed device: %s)" % (last_failed() or "none"))
+        reasons = wake_reasons(irq0, irq_counts()) + source_reasons(ws0, wakeup_counts())
+        b1 = self.battery = read_battery()
+        ma = sleep_drain(b0, b1, slept)
+        if ma is not None:
+            self.drain_ma = ma
+        log(
+            "resume: slept %.1f s; fired: %s; battery %s%s"
+            % (
+                slept,
+                ", ".join(reasons) or "nothing known",
+                "%s %% -> %s %%" % (b0["level"], b1["level"])
+                if b1["level"] is not None
+                else "unknown",
+                ", %.0f mA asleep" % ma if ma is not None else "",
+            )
+        )
+        self.resume_t = t_back
+        self.wifi_back = None
+        self.modem_wake = modem_only(reasons)
+        self.request_wake = request_only(reasons)
+        self.check_wake = (
+            why is not None
+            and why.startswith("battery check")
+            and time.time() >= wake_at - 5
+            and check_wake_only(reasons)
+        )
+        self.wifi_wake = self.wifi.armed and wifi_only(reasons)
+        self.sync_wake = (
+            why == "WiFi sync" and time.time() >= wake_at - 5 and check_wake_only(reasons)
+        )
+        if self.wifi_wake:
+            log("resume: woken by the WiFi (WoWLAN)")
+        elif self.sync_wake:
+            log("resume: WiFi sync wake")
+        time_wifi(t_back, self)
+        self.lit_logged = False
+        hold = None
+        if (
+            nxt is not None
+            and wake_at is not None
+            and time.time() >= wake_at - 5
+            and why.startswith("Clocks")
+        ):
+            # woke for the alarm: stay up until it has rung
+            hold = t_back + (nxt - time.time()) + 90
+        return slept, hold
+
+    def resume_grace(self):
+        """The grace from WiFi's answer: after a WoWLAN wake (a push came:
+        let the app fetch it), after a sync wake, after anything else."""
+        if self.wifi_wake:
+            return self.conf["wifi_grace"]
+        if self.sync_wake:
+            return self.conf["sync_grace"]
+        return self.conf["resume_grace"]
+
+    def wifi_answered(self):
+        """WiFi answers after a resume (time_wifi's thread): a sync wake runs
+        its hook now."""
+        if self.sync_wake and self.conf["sync_hook"].strip() and not self.a.dry_run:
+            run_hook(self.conf["sync_hook"])
+
+    def wake_grace(self):
+        """The short grace after a modem wake: a request only (rmtfs) needs
+        less than an indication (ModemManager, Chatty) or a packet; a battery
+        check as little as a request."""
+        return (
+            self.conf["request_grace"]
+            if (self.request_wake or self.check_wake)
+            else self.conf["modem_grace"]
+        )
+
+    def short_wake(self):
+        """A resume that needs no WiFi wait: the modem's alone, a battery check."""
+        return self.modem_wake or self.check_wake
+
+    def note_lit(self, state):
+        if not self.lit_logged and self.resume_t is not None and state.get("lit"):
+            log(
+                "resume: a panel lit %.1f s after the resume (%s)"
+                % (time.monotonic() - self.resume_t, ",".join(state["lit"]))
+            )
+            self.lit_logged = True
+
+
+def main(argv):
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--test-max", type=int, default=0)
+    ap.add_argument("--once", action="store_true")
+    ap.add_argument("--no-ssh-inhibit", action="store_true")
+    ap.add_argument("--ignore-hold", action="store_true")
+    ap.add_argument("--delay", type=int)
+    ap.add_argument("--resume-grace", type=int)
+    ap.add_argument("--poweroff-test", type=int, default=0, metavar="LEVEL")
+    ap.add_argument("--wifi-sleep", choices=("off", "wowlan"))
+    ap.add_argument("--wowlan-wake", metavar="LIST")
+    ap.add_argument("--charging-hold", choices=("on", "off"))
+    a = ap.parse_args(argv)
+    if a.poweroff_test and not 1 <= a.poweroff_test <= 100:
+        ap.error("--poweroff-test must be 1 to 100 %")
+    if a.test_max and not 1 <= a.test_max <= 120:
+        ap.error("--test-max must be 1 to 120 s")
+    if a.ignore_hold and not (a.test_max or a.dry_run):
+        ap.error("--ignore-hold only with --test-max or --dry-run (a test must come back)")
+    if a.test_max:
+        # a test is ONE suspend, and the whole run is bounded by the wall
+        # clock (CLOCK_MONOTONIC, and so a unit's RuntimeMaxSec, stands
+        # still in suspend)
+        a.once = True
+    wall_end = time.time() + TEST_WALL if (a.test_max or a.dry_run or a.poweroff_test) else None
+    # autosleep.conf, the run-time file, the kernel command line's
+    # duo2.autosleep.KEY=VALUE (this boot only), this run's options
+    conf, on_try = load_conf(a, say=log)
+    plan = Plan(conf["delay"], conf["resume_grace"])
+    sl = Sleeper(a, conf)
+    if on_try and sl.try_boot:
+        log("kernel command line: duo2.autosleep.on_try=1: this try boot sleeps like any other")
+        sl.try_boot = False
+    wc = DuoWc()
+    sel = selectors.DefaultSelector()
+    b = sl.battery
+    until = read_hold_until()
+    log(
+        "duo2-autosleep: delay %d s, resume grace %d s, power off at %d %% (battery %s), WiFi in sleep: %s, "
+        "stay awake while charging: %s%s%s%s%s%s"
+        % (
+            conf["delay"],
+            conf["resume_grace"],
+            conf["poweroff_level"],
+            "%d %%%s" % (b["level"], ", charging" if b["external"] else "")
+            if b["level"] is not None
+            else "unknown",
+            "WoWLAN (%s)" % conf["wowlan_wake"]
+            if sl.wifi.mode() == "wowlan"
+            else "off%s"
+            % (
+                ", sync every %d s" % conf["wifi_sync_every"] if conf["wifi_sync_every"] > 0 else ""
+            ),
+            "on" if is_on(conf["stay_awake_charging"]) else "off",
+            "; timed hold %s" % hold_text(until, time.time())
+            if hold_left(until, time.time())
+            else "",
+            " (DRY RUN)" if a.dry_run else "",
+            ", test bound %d s" % a.test_max if a.test_max else "",
+            "; POWER-OFF TEST: never suspending" if a.poweroff_test else "",
+            "; HOLD: %s exists, never suspending" % HOLD
+            if os.path.exists(HOLD) and not a.ignore_hold
+            else "",
+        )
+    )
+    last_reasons = None
+    retry_at = 0.0
+    bat_next = 0.0
+    while True:
+        if wall_end is not None and time.time() > wall_end:
+            log("test run over (%d s, wall clock)" % TEST_WALL)
+            if a.test_max:
+                sl.wifi.undo()
+            return 0
+        now = time.monotonic()
+        if now >= bat_next:
+            # with no word from duo-wc the panels may be lit: the notice
+            lit = wc.state is None or not is_dark(wc.state)
+            pending = sl.check_battery(lit, now)
+            bat_next = now + (BATTERY_PENDING_S if pending else BATTERY_CHECK_S)
+        if wc.sock is None:
+            try:
+                wc.connect()
+                sel.register(wc.sock, selectors.EVENT_READ)
+            except OSError as e:
+                log("duo-wc: %s (retry in 5 s)" % e)
+                wc.close()
+                plan.set_dark(False, now)
+                time.sleep(5)
+                continue
+        due = None if a.poweroff_test else plan.due()
+        if due is not None:
+            due = max(due, retry_at)
+        timeout = None if due is None else max(0.0, due - now)
+        events = sel.select(
+            min(
+                timeout if timeout is not None else 60,
+                60 if wall_end is None else 5,
+                max(0.0, bat_next - now),
+            )
+        )
+        now = time.monotonic()
+        if events:
+            if not wc.read():
+                log("duo-wc: event stream ended")
+                sel.unregister(wc.sock)
+                wc.close()
+                plan.set_dark(False, now)
+                continue
+            if wc.state is not None:
+                dark = is_dark(wc.state)
+                if dark != (plan.dark_since is not None):
+                    log("panels %s" % ("dark" if dark else "lit"))
+                    retry_at = 0.0
+                    last_reasons = None
+                plan.set_dark(dark, now)
+                sl.note_lit(wc.state)
+            continue
+        due = None if a.poweroff_test else plan.due()
+        if due is None or now < max(due, retry_at):
+            continue
+        reasons = sl.reasons(time.time())
+        if reasons:
+            if reasons != last_reasons:
+                log("awake: " + "; ".join(reasons))
+                last_reasons = reasons
+            retry_at = now + conf["check_interval"]
+            continue
+        last_reasons = None
+        # the level right before every suspend (and the sleep's bound)
+        if sl.check_battery(False, now):
+            bat_next = now + BATTERY_PENDING_S
+            continue
+        bat_next = now + BATTERY_CHECK_S
+        _slept, hold = sl.suspend()
+        # anything that changed while asleep (a power key) arrives now
+        wc_events = sel.select(0.5)
+        if wc_events and wc.read() and wc.state is not None:
+            plan.set_dark(is_dark(wc.state), time.monotonic())
+            sl.note_lit(wc.state)
+        # the first check comes early: Sleeper.reasons() waits for WiFi and
+        # the grace (or only the modem's or a battery check's short grace)
+        plan.resumed(time.monotonic(), hold, sl.wake_grace() if sl.short_wake() else 5)
+        retry_at = 0.0
+        bat_next = 0.0  # the level right after every resume
+        if a.dry_run:
+            retry_at = time.monotonic() + max(conf["check_interval"], 30)
+        if a.once and not a.dry_run:
+            # wait for the post-resume timings, then stop
+            time.sleep(20)
+            if a.test_max:
+                sl.wifi.undo()
+            return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

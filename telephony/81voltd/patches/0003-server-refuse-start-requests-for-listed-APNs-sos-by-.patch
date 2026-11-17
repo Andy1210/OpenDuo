@@ -1,0 +1,88 @@
+From f93d35afbc3b750bfad2a72ae00848748277eaf9 Mon Sep 17 00:00:00 2001
+From: duo2-os <duo2-os@localhost>
+Date: Thu, 12 Nov 2026 16:19:25 +0100
+Subject: [PATCH 3/5] server: refuse start requests for listed APNs (sos by
+ default)
+
+QVD_REFUSE_APNS names APNs (comma-separated, case ignored) whose start
+requests get the error answer at once, with no bearer created: "sos"
+when the variable is unset, none when it is empty.
+
+The reason is the emergency PDN. With IMS registered the modem may try
+an emergency call over IMS first and ask for the sos PDN. If that bearer
+cannot come up, this server does not tell the modem, which then waits
+for its own timer before it redials the emergency call over CS. Refusing
+the request makes the modem fall back at once while a CS network
+(2G) is there.
+---
+ qvd-server.c | 43 +++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 43 insertions(+)
+
+diff --git a/qvd-server.c b/qvd-server.c
+index 15c063c..5e22a75 100644
+--- a/qvd-server.c
++++ b/qvd-server.c
+@@ -21,6 +21,17 @@
+ 
+ #define IMSD_CONNECTION_CHANGED 0x20
+ 
++/*
++ * Start requests for these APNs are answered at once with an error, without a
++ * bearer: QVD_REFUSE_APNS, a comma-separated list (case is ignored), "sos" when
++ * the variable is not set, none when it is empty. The emergency PDN ("sos") is
++ * the reason: when its bearer cannot come up, the modem would otherwise wait
++ * for its own timer before it redials the emergency call over CS. The error is
++ * the one this server gives when it cannot create a bearer.
++ */
++#define IMSD_REFUSED_APNS_DEFAULT "sos"
++#define IMSD_ERR_START_FAILED 1
++
+ enum imsd_address_family {
+ 	IMSD_AF_IPV4 = 0,
+ 	IMSD_AF_IPV6 = 1,
+@@ -280,6 +291,30 @@ err:
+ 	g_free(connect_data);
+ }
+ 
++static gboolean apn_refused(const gchar *apn)
++{
++	const gchar *list = g_getenv("QVD_REFUSE_APNS");
++	gboolean refused = FALSE;
++	gchar **apns;
++	guint i;
++
++	if (list == NULL)
++		list = IMSD_REFUSED_APNS_DEFAULT;
++
++	apns = g_strsplit(list, ",", -1);
++	for (i = 0; apns[i] != NULL; i++) {
++		const gchar *one = g_strstrip(apns[i]);
++
++		if (*one != '\0' && g_ascii_strcasecmp(one, apn) == 0) {
++			refused = TRUE;
++			break;
++		}
++	}
++	g_strfreev(apns);
++
++	return refused;
++}
++
+ static void process_start_connection(QVDServer *server, QVDMessage *msg)
+ {
+ 	MMBearerIpFamily ip_family;
+@@ -301,6 +336,14 @@ static void process_start_connection(QVDServer *server, QVDMessage *msg)
+ 		return;
+ 	}
+ 
++	if (apn_refused(req.conn_params.apn)) {
++		g_message("Req: Start connection, conn %d, sub %d, apn: %s: refused (QVD_REFUSE_APNS)\n",
++			  req.connection, req.subscription, req.conn_params.apn);
++		encode_error(msg, IMSD_ERR_START_FAILED);
++		g_object_unref(msg);
++		return;
++	}
++
+ 	if (req.conn_params.ip_family == IMSD_AF_IPV4) {
+ 		g_info("Req: Start connection, conn %d, sub %d, type: IPv4, apn: %s\n",
+ 			req.connection, req.subscription, req.conn_params.apn);

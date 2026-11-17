@@ -1,0 +1,37 @@
+From 151dc979647ad0811579fd712a5d83589b4abe20 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Thu, 5 Nov 2026 22:12:50 +0100
+Subject: [PATCH 002/137] BRING-UP: arm64: dts: qcom:
+ sm8350-microsoft-surface-duo2: Put the USB controller in peripheral mode
+
+Keep the USB console and network gadget independent of the ADSP's UCSI
+until pmic_glink is proven on this phone: run the primary controller as a
+fixed peripheral instead of taking its role from UCSI.
+
+Not for upstream.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../boot/dts/qcom/sm8350-microsoft-surface-duo2.dts      | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+index 36373bcaea4e..f462e514c430 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+@@ -666,9 +666,12 @@ &usb_1 {
+ };
+ 
+ &usb_1_dwc3 {
+-	/* Role from the ADSP's UCSI (pmic_glink) instead of fixed peripheral. */
+-	dr_mode = "otg";
+-	usb-role-switch;
++	/*
++	 * Bring-up: fixed peripheral, so the USB console/network gadget does not
++	 * wait for the ADSP's UCSI to hand out a role. Once pmic_glink is proven,
++	 * this becomes dr_mode = "otg" + usb-role-switch.
++	 */
++	dr_mode = "peripheral";
+ };
+ 
+ &usb_1_dwc3_hs {

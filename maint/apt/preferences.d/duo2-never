@@ -1,0 +1,19 @@
+# duo2-os: packages that never get installed on the phone (docs/UPDATES.md).
+# The kernel, its modules, the DTBs and the initrds are ours (scripts/duo2-try,
+# duo2-promote, the ESP read-only): a Debian kernel package would run its
+# hooks and fill /boot; a boot loader installer would write the ESP. No
+# package owns the firmware in /usr/lib/firmware (it is the phone's own,
+# firmware/linux in the repo): a Debian firmware package would overwrite it
+# without a word. To allow one on purpose, add a later file with a higher
+# priority for that package name only.
+Package: linux-image-* linux-headers-* linux-kbuild-* flash-kernel grub* shim* u-boot* raspi-firmware
+Pin: release *
+Pin-Priority: -1
+
+Package: systemd-boot systemd-boot-signed*
+Pin: release *
+Pin-Priority: -1
+
+Package: firmware-*
+Pin: release *
+Pin-Priority: -1

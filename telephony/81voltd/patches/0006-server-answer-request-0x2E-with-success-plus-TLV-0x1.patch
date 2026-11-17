@@ -1,0 +1,154 @@
+From d13bad54e835b8dbc45a5bbdb0065821607fdcaf Mon Sep 17 00:00:00 2001
+From: duo2-os <duo2-os@localhost>
+Date: Thu, 12 Nov 2026 17:32:44 +0100
+Subject: [PATCH] server: answer request 0x2E with success plus TLV 0x10 = 0x5F
+
+The modem's IMS client sends 0x23, 0x2E and 0x34 right after it connects
+and then waits; the plain success of the fallback handler for 0x2E did
+not make it send the start request. Android's imsdatadaemon answers
+0x2E with success and TLV 0x10 = u32 0x5F (public trace in
+codeberg.org/DylanVanAssche/imsd, IMS-QUALCOMM.md); do the same. Every
+other id stays on the fallback path. Defined in imsd.qmi; qmic is not in
+the build image, so the checked-in generated qmi_imsd.[ch] get the
+matching hand-written entries.
+---
+ imsd.qmi     | 12 ++++++++++++
+ qmi_imsd.c   | 19 +++++++++++++++++++
+ qmi_imsd.h   |  6 ++++++
+ qvd-server.c | 29 +++++++++++++++++++++++++++++
+ 4 files changed, 66 insertions(+)
+
+diff --git a/imsd.qmi b/imsd.qmi
+index 889e722..2a79026 100644
+--- a/imsd.qmi
++++ b/imsd.qmi
+@@ -56,6 +56,18 @@ response stop_connection_resp {
+ 	required u32 unkecho_01 = 0x11;
+ } = 0x21;
+ 
++# Request 0x2E (TLV 0x10 u8, TLV 0x11 u32; seen as 1 and 0): Android's
++# imsdatadaemon answers it with success plus TLV 0x10 = 0x5F (u32, length 4).
++request unk2e_req {
++	optional u8 unkfield_10 = 0x10;
++	optional u32 unkfield_11 = 0x11;
++} = 0x2E;
++
++response unk2e_resp {
++	required op_res res = 0x2;
++	required u32 unkfield_5F = 0x10;
++} = 0x2E;
++
+ request no_op_req {
+ 	optional u8 data[255] = 0x1;
+ };
+diff --git a/qmi_imsd.c b/qmi_imsd.c
+index 7fb0ac0..858ff05 100644
+--- a/qmi_imsd.c
++++ b/qmi_imsd.c
+@@ -225,6 +225,25 @@ struct qmi_elem_info imsd_stop_connection_resp_ei[] = {
+ 	{}
+ };
+ 
++struct qmi_elem_info imsd_unk2e_resp_ei[] = {
++	{
++		.data_type = QMI_STRUCT,
++		.elem_len = 1,
++		.elem_size = sizeof(struct imsd_op_res),
++		.tlv_type = 2,
++		.offset = offsetof(struct imsd_unk2e_resp, res),
++		.ei_array = imsd_op_res_ei,
++	},
++	{
++		.data_type = QMI_UNSIGNED_4_BYTE,
++		.elem_len = 1,
++		.elem_size = sizeof(uint32_t),
++		.tlv_type = 16,
++		.offset = offsetof(struct imsd_unk2e_resp, unkfield_5F),
++	},
++	{}
++};
++
+ struct qmi_elem_info imsd_no_op_req_ei[] = {
+ 	{
+ 		.data_type = QMI_OPT_FLAG,
+diff --git a/qmi_imsd.h b/qmi_imsd.h
+index d059c09..19f3227 100644
+--- a/qmi_imsd.h
++++ b/qmi_imsd.h
+@@ -60,6 +60,11 @@ struct imsd_stop_connection_resp {
+ 	uint32_t unkecho_01;
+ };
+ 
++struct imsd_unk2e_resp {
++	struct imsd_op_res res;
++	uint32_t unkfield_5F;
++};
++
+ struct imsd_no_op_req {
+ 	bool data_valid;
+ 	uint32_t data_len;
+@@ -75,6 +80,7 @@ extern struct qmi_elem_info imsd_start_connection_resp_ei[];
+ extern struct qmi_elem_info imsd_connection_changed_ind_ei[];
+ extern struct qmi_elem_info imsd_stop_connection_req_ei[];
+ extern struct qmi_elem_info imsd_stop_connection_resp_ei[];
++extern struct qmi_elem_info imsd_unk2e_resp_ei[];
+ extern struct qmi_elem_info imsd_no_op_req_ei[];
+ extern struct qmi_elem_info imsd_no_op_resp_ei[];
+ 
+diff --git a/qvd-server.c b/qvd-server.c
+index b58355b..d901cef 100644
+--- a/qvd-server.c
++++ b/qvd-server.c
+@@ -197,6 +197,8 @@ QVDServer *qvd_server_new(QVDModem *modem, GError **out_err)
+ 	return server;
+ }
+ 
++#define IMSD_UNK2E 0x2E
++
+ static void encode_error(QVDMessage *msg, guint16 code)
+ {
+ 	struct imsd_no_op_resp resp;
+@@ -237,6 +239,31 @@ static void process_no_op(unsigned int msg_id, QVDMessage *msg)
+ 	g_object_unref(msg);
+ }
+ 
++/*
++ * Request 0x2E, sent by the modem's IMS client right after it connects (TLV
++ * 0x10 u8 and TLV 0x11 u32, ignored). Android's imsdatadaemon answers it with
++ * success and TLV 0x10 = 0x5F (u32); the plain success of the fallback
++ * handler left the modem waiting (no start request followed). Hypothesis,
++ * from the public trace in codeberg.org/DylanVanAssche/imsd IMS-QUALCOMM.md.
++ */
++static void process_unk2e(QVDMessage *msg)
++{
++	struct imsd_unk2e_resp resp = {
++		.res = { .err_status = 0, .err_code = 0, },
++		.unkfield_5F = 0x5F,
++	};
++	GError *err = NULL;
++
++	g_info("Req: 0x2E, answering success with 0x5F\n");
++
++	qvd_message_respond(msg, &resp, imsd_unk2e_resp_ei, &err);
++	if (err != NULL)
++		g_printerr("IMSD 0x2E: failed to send response: %s\n",
++			   err->message);
++
++	g_object_unref(msg);
++}
++
+ static void register_connection(QVDServer *server, QVDConnection *conn,
+ 				guint32 connection, guint32 subscription)
+ {
+@@ -458,6 +485,8 @@ static void process_message(QVDServer *server, QVDMessage *msg)
+ 		process_start_connection(server, msg);
+ 	else if (msg_id == IMSD_STOP_CONNECTION)
+ 		process_stop_connection(server, msg);
++	else if (msg_id == IMSD_UNK2E)
++		process_unk2e(msg);
+ 	else
+ 		process_no_op(msg_id, msg);
+ }
+-- 
+2.43.0
+

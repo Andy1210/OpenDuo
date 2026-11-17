@@ -1,0 +1,38 @@
+#!/bin/sh
+# duo2-os: run by duo-apps-session.service (a user unit) whenever duo-wc's
+# session starts. Three things the GNOME apps expect from a GNOME session,
+# which duo-wc's session does not do by itself:
+#
+# 1. The portals see the display. xdg-desktop-portal asks its GTK backend for
+#    the Settings interface once, when it starts; a backend started while
+#    duo-wc was down (a restart of duo-wc) fails, and the portal then serves
+#    no Settings for the rest of its life: every libadwaita app comes up LIGHT
+#    (dark comes from Settings' color-scheme). Restarted here, they read it
+#    again with the display up.
+# 2. The XDG user directories (Documents, Music, Pictures, Videos...), which
+#    xdg-user-dirs' autostart entry makes in a GNOME session.
+# 3. The calendar reminders: evolution-alarm-notify (an autostart entry in
+#    GNOME, which this session does not run). Clocks' alarms are started by
+#    the session hook clocks-alarms (it closes a window, which only the
+#    session may: docs/hardware/security.md).
+set -u
+env_file=/run/duo-wc/session.env
+[ -r "$env_file" ] || exit 0
+# The session announces the display to the user manager and D-Bus right after
+# writing session.env; wait for that (at most 10 s).
+i=0
+while [ "$i" -lt 40 ]; do
+    systemctl --user show-environment 2>/dev/null | grep -q '^WAYLAND_DISPLAY=' && break
+    sleep 0.25
+    i=$((i + 1))
+done
+sleep 1
+
+systemctl --user try-restart xdg-desktop-portal-gtk.service xdg-desktop-portal.service
+
+command -v xdg-user-dirs-update >/dev/null && xdg-user-dirs-update
+
+if [ -x /usr/libexec/evolution-data-server/evolution-alarm-notify ]; then
+    systemctl --user start duo-calendar-alarms.service
+fi
+exit 0

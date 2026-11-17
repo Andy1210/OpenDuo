@@ -1,0 +1,17 @@
+# A Debian trixie arm64 root for the package tests (packaging/tests/container-test.sh):
+# what the packages depend on (packaging/pkgtool depends), the GUI user as an
+# image has it, and a stand-in ESP with the hand-managed entries (duo2.conf,
+# rescue.conf) the kernel package must leave alone. Built under qemu.
+FROM --platform=linux/arm64 debian:trixie
+ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 LC_ALL=C.UTF-8
+ARG DEPENDS
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        systemd systemd-sysv sudo kmod ca-certificates gnupg $DEPENDS \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+RUN for g in video input render plugdev netdev feedbackd; do getent group $g >/dev/null || groupadd -r $g; done \
+    && useradd -m -s /bin/bash -G video,render,plugdev,netdev,audio,feedbackd duo \
+    && install -d -m 0755 /etc/duo2 && echo duo > /etc/duo2/gui-user \
+    && install -d -m 0700 /boot/efi/loader/entries /boot/efi/duo2 \
+    && printf 'title   duo2-os (known-good)\nsort-key duo2\nversion 1\nlinux   /duo2/Image\ninitrd  /duo2/initrd-boot.img\ndevicetree /duo2/sm8350-microsoft-surface-duo2-bringup-j.dtb\noptions duo2.boot=root rw quiet panic=30\n' > /boot/efi/loader/entries/duo2.conf \
+    && printf 'title   duo2-os rescue shell (USB)\nsort-key rescue\nversion 1\nlinux   /duo2/Image\ninitrd  /duo2/initrd.img\ndevicetree /duo2/sm8350-microsoft-surface-duo2-bringup.dtb\noptions rw\n' > /boot/efi/loader/entries/rescue.conf \
+    && echo image > /boot/efi/duo2/Image && echo rescue > /boot/efi/duo2/initrd.img

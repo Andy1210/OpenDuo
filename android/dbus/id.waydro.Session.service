@@ -1,0 +1,6 @@
+# duo2-os: `waydroid app launch` (every Android icon) starts the Waydroid
+# session through this, as a user unit (android/ in duo2-os).
+[D-BUS Service]
+Name=id.waydro.Session
+Exec=/bin/false
+SystemdService=duo2-waydroid-session.service

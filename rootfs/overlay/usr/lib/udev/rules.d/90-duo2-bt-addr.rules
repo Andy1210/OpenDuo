@@ -1,0 +1,5 @@
+# The WCN6855 on the UART (hci_uart_qca) stays unconfigured without a public
+# address: duo2-bt-addr@hciN.service gives it the factory one. Only the
+# phone's own controller, never a plugged-in USB adapter.
+ACTION=="add", SUBSYSTEM=="bluetooth", ENV{DEVTYPE}=="host", DRIVERS=="hci_uart_qca", \
+    TAG+="systemd", ENV{SYSTEMD_WANTS}+="duo2-bt-addr@%k.service"

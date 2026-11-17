@@ -1,0 +1,24 @@
+[Unit]
+Description=Surface Duo 2 touch (Microsoft heat processor via duo2-touchd)
+# /opt/duo2-touch is built from the phone's own stock images by
+# scripts/build-touch-runtime.sh (not redistributable, not in the image).
+ConditionPathExists=/opt/duo2-touch/duo2-touchd
+After=systemd-udevd.service systemd-modules-load.service
+
+[Service]
+ExecStartPre=/usr/local/sbin/duo2-touch-calibration
+ExecStartPre=/usr/sbin/modprobe uinput
+# The digitizer is powered off when duo2-touchd closes it, and on again when
+# the next instance opens it. Back on within ~160 ms (a plain restart) it comes
+# up half reset: no heat frames, only the single-point fallback report, until
+# a reboot (docs/hardware/touch.md). Keep it off for a second.
+ExecStartPre=/bin/sleep 1
+Environment=LD_LIBRARY_PATH=/opt/duo2-touch/lib64
+# The hidraw node is found by its HID id (045E:0C1D): spi-hid may re-create
+# the HID device, which then gets the next hidraw number.
+ExecStart=/opt/duo2-touch/linker64 /opt/duo2-touch/duo2-touchd --lib /opt/duo2-touch/lib64/libsurfacetouch_c1.so --state /var/lib/duo2-touchd
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,26 @@
+From 6ca0f7595cc84c7e3fc6338b2a4e2695714342fd Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 23:30:59 +0100
+Subject: [PATCH 063/137] arm64: defconfig: Enable the SM8350 camera clock
+ controller
+
+Build the SM8350 camera clock controller as a module: the Surface Duo 2's
+camera control interfaces, sensor clocks and camera subsystem need it.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ arch/arm64/configs/defconfig | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/arch/arm64/configs/defconfig b/arch/arm64/configs/defconfig
+index 6ec8d3a69c98..60b0da61b795 100644
+--- a/arch/arm64/configs/defconfig
++++ b/arch/arm64/configs/defconfig
+@@ -1549,6 +1549,7 @@ CONFIG_SDX_GCC_75=y
+ CONFIG_SM_CAMCC_6350=m
+ CONFIG_SM_CAMCC_MILOS=m
+ CONFIG_SM_CAMCC_8250=m
++CONFIG_SM_CAMCC_8350=m
+ CONFIG_SM_CAMCC_8550=m
+ CONFIG_SM_CAMCC_8650=m
+ CONFIG_SM_CAMCC_8750=m

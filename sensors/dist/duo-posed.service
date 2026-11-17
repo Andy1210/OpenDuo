@@ -1,0 +1,37 @@
+# duo-posed: the Surface Duo 2's sensors (SLPI / SSC) drive duo-wc's pose and
+# rotation over its admin socket (/run/duo-wc/admin.sock). Runs as its own
+# system user duo-posed, NOT as the GUI user: duo-wc answers that user (its
+# sensor_users) with the posture, pose, rotation and power requests, which no
+# app of the GUI user may make (docs/hardware/security.md). The user is
+# made by scripts/install-sensors.sh / sensors/install-posed.sh and the
+# image. Whether it ACTS or only logs what it would do is `enabled` in
+# /etc/duo-posed.conf.
+[Unit]
+Description=duo-posed: sensors drive duo-wc (pose, rotation)
+ConditionPathExists=/usr/share/qcom/sm8350/Microsoft/surfaceduo2/sensors/registry
+After=hexagonrpcd.service duo-wc.service
+Wants=hexagonrpcd.service
+
+[Service]
+Type=simple
+User=duo-posed
+Group=duo-posed
+ExecStartPre=-/usr/local/bin/duo2-ssc wait -t 120 accel hall
+ExecStart=/usr/local/bin/duo-posed
+# /run/duo-posed/touch: the pose for duo2-touchd (touch_pose in the config).
+RuntimeDirectory=duo-posed
+RuntimeDirectoryMode=0755
+# Reads /etc/duo-posed.conf again (the quick menu's auto-rotate tile).
+ExecReload=/bin/kill -HUP $MAINPID
+TimeoutStartSec=150
+Restart=on-failure
+RestartSec=10
+# Nothing but QRTR (the SSC) and the duo-wc socket.
+RestrictAddressFamilies=AF_UNIX AF_QIPCRTR
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=graphical.target

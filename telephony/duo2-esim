@@ -1,0 +1,313 @@
+#!/usr/bin/python3 -I
+"""duo2-esim: the built-in eUICC (the eSIM, physical slot 2) through lpac,
+for Duo Settings' eSIM page. Run as root (sudo; Duo Settings' sudoers rule).
+
+    duo2-esim info                      the chip: EID, free memory, versions (JSON)
+    duo2-esim list                      the profiles (JSON; no icons)
+    duo2-esim add CODE [CONFIRMATION]   download a profile by its activation code
+                                        (LPA:1$<SM-DP+>$<matching id>)
+    duo2-esim enable ICCID              switch to a profile
+    duo2-esim disable ICCID
+    duo2-esim rename ICCID NAME         its nickname (NAME empty: none)
+    duo2-esim delete ICCID              deletes it from the chip: it is gone
+
+Every change (add, enable, disable, rename, delete) is asked of the user in
+the shell first (duo-wc's `confirm`, action `esim`, 45 s): any app of the
+user can run this helper, so the question is what makes it the user's
+decision; no answer is no. A change prints JSON {"ok": true} or {"ok":
+false, "error": "..."}; the pending notifications for the operator
+(install / enable / disable / delete) are then sent by lpac
+(`notification process -a -r`), as a phone's LPA does.
+
+lpac (telephony/lpac/, built from source: Debian does not package it) talks
+QMI over QRTR to the modem's UIM service: LPAC_APDU=qmi_qrtr,
+LPAC_APDU_QMI_UIM_SLOT=2. The GUI's programs may not open QRTR sockets (a
+seccomp filter on duo-wc.service and the user manager, inherited across
+sudo: docs/hardware/security.md), so lpac does not run as this helper's child
+but as a transient system service that systemd (PID 1) starts, without the
+filter (systemd-run --pipe --wait: its output is ours, it ends with
+RuntimeMaxSec at the latest). Only this helper decides what it runs: the
+arguments are checked here first, as before. Testing without the chip: while root's
+/etc/duo2/esim-fake exists, a fake lpac plays a chip with two profiles
+(telephony/tests/fake_lpac.py, its state in /run/duo2-esim-fake.json).
+Nothing here logs an EID or an ICCID.
+"""
+
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+
+LPAC = "/usr/local/bin/lpac"
+FAKE_SWITCH = "/etc/duo2/esim-fake"
+FAKE_LPAC = "/usr/local/lib/duo2-telephony/fake_lpac.py"
+WC_ADMIN = "/run/duo-wc/admin.sock"
+CONFIRM_TIMEOUT_S = 50
+LPAC_ENV = {"LPAC_APDU": "qmi_qrtr", "LPAC_APDU_QMI_UIM_SLOT": "2", "LPAC_HTTP": "curl"}
+SYSTEMD_RUN = "/usr/bin/systemd-run"
+# lpac's service: QRTR (the modem), the network (curl to the SM-DP+, DNS),
+# nothing it could write outside /run and /var.
+UNIT_PROPERTIES = (
+    "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_QIPCRTR",
+    "NoNewPrivileges=yes",
+    "ProtectSystem=full",
+    "ProtectHome=yes",
+    "PrivateTmp=yes",
+)
+
+ICCID = re.compile(r"^[0-9]{18,20}F?$")
+# LPA:1$<SM-DP+ address>$<matching id>[$<OID>[$<1: confirmation code required>]]
+ACTIVATION = re.compile(
+    r"^(?:LPA:)?1\$([A-Za-z0-9.-]{1,253}(?::[0-9]{1,5})?)\$([A-Za-z0-9._-]{0,255})(?:\$[0-9.]*)?(?:\$1)?$"
+)
+CONFIRMATION = re.compile(r"^[A-Za-z0-9-]{1,64}$")
+
+
+# -- pure ------------------------------------------------------------------------------
+
+
+def valid_iccid(value):
+    return bool(ICCID.match(value or ""))
+
+
+def parse_activation(code):
+    """(SM-DP+ address, matching id) of an activation code, or None."""
+    m = ACTIVATION.match((code or "").strip())
+    return (m.group(1), m.group(2)) if m else None
+
+
+def valid_nickname(name):
+    return (
+        name is not None
+        and len(name) <= 64
+        and all(c.isprintable() for c in name)
+        and "\n" not in name
+    )
+
+
+def mask(value, keep=4):
+    """An identifier as it may be shown or logged: its last digits only."""
+    value = value or ""
+    return ("•" * 4 + " " + value[-keep:]) if len(value) > keep else value
+
+
+def lpac_result(output):
+    """The last {"type": "lpa"} line of lpac's output: (code, message, data)."""
+    result = None
+    for line in (output or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if obj.get("type") == "lpa":
+            p = obj.get("payload") or {}
+            result = (p.get("code", -1), p.get("message", ""), p.get("data"))
+    return result or (-1, "no answer from lpac", None)
+
+
+def profiles(data):
+    """lpac's profile list, without the icons, in a stable order."""
+    out = []
+    for p in data or []:
+        out.append(
+            {
+                "iccid": p.get("iccid") or "",
+                "name": p.get("profileName") or "",
+                "nickname": p.get("profileNickname") or "",
+                "provider": p.get("serviceProviderName") or "",
+                "state": p.get("profileState") or "",
+                "class": p.get("profileClass") or "",
+            }
+        )
+    return out
+
+
+def chip(data):
+    data = data or {}
+    info2 = data.get("EUICCInfo2") or {}
+    addrs = data.get("EuiccConfiguredAddresses") or {}
+    return {
+        "eid": data.get("eidValue") or "",
+        "default_smdp": addrs.get("defaultDpAddress") or "",
+        "free_bytes": (info2.get("extCardResource") or {}).get("freeNonVolatileMemory"),
+        "sgp22": info2.get("svn") or "",
+        "firmware": info2.get("euiccFirmwareVer") or "",
+    }
+
+
+def describe(action, args, names):
+    """The question's text: what will happen (names: ICCID -> profile name)."""
+
+    def name(iccid):
+        return names.get(iccid) or ("the profile ending in %s" % iccid[-4:])
+
+    if action == "add":
+        smdp = (parse_activation(args[0]) or (args[0], ""))[0]
+        return "Download an eSIM profile from %s and install it." % smdp
+    if action == "enable":
+        return "Switch to the eSIM profile “%s”. The SIM in use now is switched off." % name(
+            args[0]
+        )
+    if action == "disable":
+        return (
+            "Switch off the eSIM profile “%s”. Its number stops working until it is switched on."
+            % name(args[0])
+        )
+    if action == "rename":
+        return "Rename the eSIM profile “%s” to “%s”." % (name(args[0]), args[1])
+    if action == "delete":
+        return (
+            "Delete the eSIM profile “%s”. It is removed from the phone for good: to use "
+            "it again you need a new code from the operator." % name(args[0])
+        )
+    return action
+
+
+# -- doing -------------------------------------------------------------------------------
+
+_units = [0]
+
+
+def unit_argv(argv, env, timeout, name):
+    """argv as a transient system service `name` that systemd starts (not a
+    child of ours: that one would inherit the GUI's QRTR filter), with env
+    set in it, our stdin / stdout / stderr, and at most `timeout` seconds.
+    Pure."""
+    cmd = [
+        SYSTEMD_RUN,
+        "--quiet",
+        "--pipe",
+        "--wait",
+        "--collect",
+        "--service-type=exec",
+        "--unit=" + name,
+        "--description=duo2-esim: lpac",
+        "--property=RuntimeMaxSec=%d" % timeout,
+    ]
+    cmd += ["--property=" + p for p in UNIT_PROPERTIES]
+    cmd += ["--setenv=%s=%s" % kv for kv in sorted(env.items())]
+    return cmd + ["--"] + list(argv)
+
+
+def lpac_argv(env, timeout):
+    """The command line that runs lpac (or, while FAKE_SWITCH exists, the
+    fake) in its own service. The tests replace this with the bare fake."""
+    _units[0] += 1
+    real = [sys.executable, "-I", FAKE_LPAC] if os.path.exists(FAKE_SWITCH) else [LPAC]
+    return unit_argv(real, env, timeout, "duo2-esim-lpac-%d-%d" % (os.getpid(), _units[0]))
+
+
+def lpac(*args, timeout=180):
+    env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", **LPAC_ENV}
+    if "FAKE_LPAC_STATE" in os.environ:  # the tests' fake (sudo drops it)
+        env["FAKE_LPAC_STATE"] = os.environ["FAKE_LPAC_STATE"]
+    try:
+        r = subprocess.run(
+            lpac_argv(env, timeout) + list(args),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=timeout + 15,
+            env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return (-1, str(e), None)
+    return lpac_result(r.stdout)
+
+
+def confirm(detail):
+    """Ask the user in the shell (duo-wc's confirm): True only on a yes."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(CONFIRM_TIMEOUT_S)
+            s.connect(WC_ADMIN)
+            s.sendall(
+                (
+                    json.dumps(
+                        {
+                            "id": 1,
+                            "request": "confirm",
+                            "action": "esim",
+                            "detail": detail,
+                            "wait": True,
+                        }
+                    )
+                    + "\n"
+                ).encode()
+            )
+            buf = b""
+            while b"\n" not in buf:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+        reply = json.loads(buf.split(b"\n")[0] or b"{}")
+    except (OSError, ValueError):
+        return False
+    return (reply.get("ok") or {}).get("yes") is True
+
+
+def names_now():
+    code, _msg, data = lpac("profile", "list")
+    if code != 0:
+        return {}
+    return {p["iccid"]: (p["nickname"] or p["name"] or p["provider"]) for p in profiles(data)}
+
+
+def out(obj):
+    print(json.dumps(obj))
+    return 0 if obj.get("ok", True) else 1
+
+
+def change(action, args):
+    detail = describe(action, args, names_now() if action != "add" else {})
+    if not confirm(detail):
+        return out({"ok": False, "error": "not confirmed"})
+    if action == "add":
+        argv = ["profile", "download", "-a", args[0]]
+        if len(args) > 1 and args[1]:
+            argv += ["-c", args[1]]
+        code, msg, _ = lpac(*argv, timeout=300)
+    elif action == "rename":
+        code, msg, _ = lpac("profile", "nickname", args[0], args[1])
+    else:
+        code, msg, _ = lpac("profile", action, args[0])
+    if code != 0:
+        return out({"ok": False, "error": msg or "failed"})
+    if action in ("add", "enable", "disable", "delete"):
+        # The operator is told (as a phone's LPA does); a failure here is
+        # not the user's: the chip keeps the notification for later.
+        lpac("notification", "process", "-a", "-r", timeout=120)
+    return out({"ok": True})
+
+
+def main(argv):
+    n = len(argv)
+    if argv == ["info"]:
+        code, msg, data = lpac("chip", "info")
+        return out({"ok": code == 0, "error": msg, **(chip(data) if code == 0 else {})})
+    if argv == ["list"]:
+        code, msg, data = lpac("profile", "list")
+        return out({"ok": code == 0, "error": msg, "profiles": profiles(data) if code == 0 else []})
+    if (
+        n in (2, 3)
+        and argv[0] == "add"
+        and parse_activation(argv[1])
+        and (n == 2 or not argv[2] or CONFIRMATION.match(argv[2]))
+    ):
+        return change("add", [argv[1].strip()] + argv[2:])
+    if n == 2 and argv[0] in ("enable", "disable", "delete") and valid_iccid(argv[1]):
+        return change(argv[0], [argv[1]])
+    if n == 3 and argv[0] == "rename" and valid_iccid(argv[1]) and valid_nickname(argv[2]):
+        return change("rename", argv[1:])
+    print(__doc__.strip(), file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

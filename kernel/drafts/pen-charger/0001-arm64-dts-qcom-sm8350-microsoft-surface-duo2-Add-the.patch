@@ -1,0 +1,76 @@
+From 1d657fda0d64aa62a9691f4a5305eb05f6db6622 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Mon, 16 Nov 2026 10:09:20 +0100
+Subject: [PATCH] arm64: dts: qcom: sm8350-microsoft-surface-duo2: Add the pen
+ charger
+
+The Surface Duo 2 has a wireless power transmitter that charges a Surface
+Slim Pen held in the Surface Duo 2 Pen Cover. TLMM GPIO 39 enables it,
+active low: the vendor kernel exposes the line as "ms_pen_charging_gpio"
+of its surface_util device, and its vendor daemon writes 0 to charge the
+pen and 1 to stop. The transmitter has no other control and sits on no
+bus.
+
+Describe it as a fixed regulator on that GPIO, off at boot (as the boot
+loader leaves the line: an output, high), with a regulator-output
+connector as its consumer, so that userspace can switch it through the
+connector's "state" attribute. The policy (when the pen may be charged)
+stays in userspace, as in the vendor software.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../qcom/sm8350-microsoft-surface-duo2.dts    | 34 +++++++++++++++++++
+ 1 file changed, 34 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+index f1901e126217..59d656b81467 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+@@ -372,6 +372,29 @@ vph_pwr: vph-pwr-regulator {
+ 		regulator-always-on;
+ 		regulator-boot-on;
+ 	};
++
++	/*
++	 * The pen charger: the phone's wireless power transmitter for the
++	 * Surface Slim Pen, used with the Surface Duo 2 Pen Cover. TLMM GPIO 39
++	 * enables it, low = on (the vendor kernel's "ms_pen_charging_gpio";
++	 * its vendor daemon writes 0 to charge, 1 to stop). No other
++	 * controls: the transmitter is not on any bus.
++	 */
++	vreg_pen_charger: regulator-pen-charger {
++		compatible = "regulator-fixed";
++		regulator-name = "pen_charger";
++		gpio = <&tlmm 39 GPIO_ACTIVE_LOW>;
++		vin-supply = <&vph_pwr>;
++
++		pinctrl-0 = <&pen_charger_en_n>;
++		pinctrl-names = "default";
++	};
++
++	/* Off at boot; userspace switches it through this output's "state". */
++	pen-charger {
++		compatible = "regulator-output";
++		vout-supply = <&vreg_pen_charger>;
++	};
+ };
+ 
+ &adsp {
+@@ -1609,6 +1632,17 @@ wake-pins {
+ 		};
+ 	};
+ 
++	/*
++	 * As the boot loader leaves it (an output, high: the transmitter
++	 * off); the regulator drives the level.
++	 */
++	pen_charger_en_n: pen-charger-en-n-state {
++		pins = "gpio39";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
+ 	wlan_en: wlan-en-state {
+ 		pins = "gpio64";
+ 		function = "gpio";

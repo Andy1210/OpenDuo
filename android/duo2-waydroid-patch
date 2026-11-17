@@ -1,0 +1,254 @@
+#!/usr/bin/python3 -sE
+"""Local changes to the installed Waydroid (repo.waydro.id's waydroid 1.6),
+re-applied after every dpkg run (/etc/apt/apt.conf.d/80duo2-waydroid) and
+checked before the container manager starts (duo2-waydroid-prestart: an
+unpatched Waydroid does not start).
+
+  duo2-waydroid-patch          apply what is missing (idempotent)
+  duo2-waydroid-patch --check  exit 1 if anything is missing
+
+What and why (docs/hardware/android.md):
+- lxc.py: the container gets no framebuffer, no V4L2 node (the iris encoder,
+  /dev/video1, froze the phone), no /dev/uhid (it creates host input devices:
+  keystrokes into duo-wc), no host debugfs (remoteproc crash knobs, ...),
+  no /dev/char; and the LXC config always ends with the duo2 hardening include.
+- container_manager.py: no chmod 777 of /dev/fb* and /dev/video* on the host
+  at every container start (that would open the encoder to every app).
+- app_manager.py: `waydroid app launch` waits until Android has booted when
+  the session was just started on demand (otherwise the app is lost behind
+  the launcher that comes up at the end of the boot).
+- IHardware.py: the "upgrade" binder call is refused. Any Android process can
+  reach it, and it makes the root container manager open and then delete
+  whatever host path the caller names. Images are updated from the host
+  (sudo waydroid upgrade).
+- hardware_manager.py: Android's "suspend" request (a few minutes without a
+  shown Android window) does not freeze the container while KEEP_RUNNING is
+  on (Duo Settings > Android apps, "Keep Android apps running in the
+  background": ~/.config/duo2/waydroid.conf of the session's user, over
+  /etc/duo2/waydroid.conf): a frozen Android gets no messenger notifications.
+
+A change that no longer applies (new upstream code) is an error: the patch
+is not applied, --check fails, and the container stays off until this file
+is updated.
+
+A replacement that is reworded keeps its earlier wordings as a fourth item
+(tests/test_waydroid_patch.py insists): a file patched by an earlier version
+of this script counts as patched (its upstream code is gone, so it could not
+be patched again) and gets the current wording.
+"""
+
+import os
+import sys
+
+BASE = "/usr/lib/waydroid/tools/"
+MARK = "# duo2: "
+
+PATCHES = [
+    (
+        "helpers/lxc.py",
+        [
+            (
+                '    for n in glob.glob("/dev/fb*"):\n'
+                "        make_entry(n)\n"
+                '    for n in glob.glob("/dev/graphics/fb*"):\n'
+                "        make_entry(n)\n"
+                '    for n in glob.glob("/dev/video*"):\n'
+                "        make_entry(n)\n",
+                "    " + MARK + "no framebuffers, no V4L2 nodes (see docs/hardware/android.md)\n",
+                1,
+            ),
+            (
+                '    make_entry("/dev/uhid")\n',
+                "    " + MARK + "no /dev/uhid: it would create host input devices\n",
+                1,
+            ),
+            (
+                '    make_entry("/sys/kernel/debug", options="rbind,create=dir,optional 0 0")\n',
+                "    " + MARK + "no host debugfs\n",
+                1,
+            ),
+            (
+                '    make_entry("/dev/char", options="bind,create=dir,optional 0 0")\n',
+                "    " + MARK + "no /dev/char\n",
+                1,
+            ),
+            (
+                "    nodes = generate_nodes_lxc_config(args)\n",
+                "    "
+                + MARK
+                + "the host's hardening, last (device allowlist, capabilities, AppArmor, seccomp)\n"
+                '    with open(lxc_path + "/config", "a") as f:\n'
+                '        f.write("lxc.include = /etc/duo2/waydroid/lxc.conf\\n")\n'
+                "\n"
+                "    nodes = generate_nodes_lxc_config(args)\n",
+                1,
+            ),
+        ],
+    ),
+    (
+        "actions/container_manager.py",
+        [
+            (
+                "        # Framebuffers\n"
+                '        perm_list.extend(glob.glob("/dev/fb*"))\n'
+                "        # Videos\n"
+                '        perm_list.extend(glob.glob("/dev/video*"))\n',
+                "        " + MARK + "framebuffers and V4L2 nodes keep their host permissions\n",
+                1,
+            ),
+        ],
+    ),
+    (
+        "actions/app_manager.py",
+        [
+            (
+                "def maybeLaunchLater(args, launchNow):\n",
+                MARK
+                + "a session that was just started on demand (D-Bus activation, duo2-waydroid-session)\n"
+                "# is still booting Android: an app launched before the boot completes is lost\n"
+                "# behind the launcher. Wait for sys.boot_completed (at most 2 minutes).\n"
+                "def _duo2_wait_boot(args):\n"
+                "    platformService = IPlatform.get_service(args)\n"
+                "    for _ in range(240):\n"
+                '        if not platformService or platformService.getprop("sys.boot_completed", "") == "1":\n'
+                "            return\n"
+                "        time.sleep(0.5)\n"
+                "\n"
+                "def maybeLaunchLater(args, launchNow):\n",
+                1,
+            ),
+            (
+                '            logging.error("Failed to unfreeze container. Trying to launch anyways...")\n'
+                "        launchNow()\n",
+                '            logging.error("Failed to unfreeze container. Trying to launch anyways...")\n'
+                "        _duo2_wait_boot(args)  " + MARK.strip() + " see _duo2_wait_boot\n"
+                "        launchNow()\n",
+                1,
+            ),
+        ],
+    ),
+    (
+        "interfaces/IHardware.py",
+        [
+            (
+                "            upgrade(arg1, arg2, arg3, arg4)\n",
+                "            "
+                + MARK
+                + "refused: the caller would name host paths for root to open and delete\n"
+                '            logging.warning("duo2: image upgrade from inside Android refused (sudo waydroid upgrade)")\n',
+                2,
+            ),
+        ],
+    ),
+    (
+        "services/hardware_manager.py",
+        [
+            (
+                "def start(args):\n    def enableNFC(enable):\n",
+                MARK + 'Settings > Android apps, "Keep Android apps running in the background":\n'
+                "# KEEP_RUNNING in /etc/duo2/waydroid.conf, then the session user's\n"
+                "# ~/.config/duo2/waydroid.conf (the user's wins), read at every request. On:\n"
+                "# Android's suspend request does not freeze the container (messengers stay\n"
+                "# connected). The user's file is only read (no symlink), for this one key.\n"
+                "def _duo2_keep_running(args):\n"
+                "    import pwd\n"
+                '    paths = ["/etc/duo2/waydroid.conf"]\n'
+                "    try:\n"
+                '        home = pwd.getpwuid(int(args.session["user_id"])).pw_dir\n'
+                '        paths.append(os.path.join(home, ".config/duo2/waydroid.conf"))\n'
+                "    except (AttributeError, KeyError, TypeError, ValueError):\n"
+                "        pass\n"
+                '    value = "no"\n'
+                "    for path in paths:\n"
+                "        try:\n"
+                "            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)\n"
+                '            with os.fdopen(fd, errors="replace") as f:\n'
+                "                text = f.read(65536)\n"
+                "        except OSError:\n"
+                "            continue\n"
+                "        for line in text.splitlines():\n"
+                '            key, sep, val = line.split("#", 1)[0].strip().partition("=")\n'
+                '            if sep and key.strip() == "KEEP_RUNNING":\n'
+                '                value = val.strip().strip("\\"\'").lower()\n'
+                '    return value in ("yes", "on", "true", "1")\n'
+                "\n"
+                "def start(args):\n"
+                "    def enableNFC(enable):\n",
+                1,
+            ),
+            (
+                "    def suspend():\n        cfg = tools.config.load(args)\n",
+                "    def suspend():\n"
+                "        if _duo2_keep_running(args):  "
+                + MARK.strip()
+                + " see _duo2_keep_running\n"
+                '            logging.info("duo2: keep running in the background (Settings > Android apps): not suspending")\n'
+                "            return\n"
+                "        cfg = tools.config.load(args)\n",
+                1,
+            ),
+        ],
+    ),
+]
+
+
+def apply(text, edits):
+    """(the patched text, the edits it needed), or (None, the first edit
+    whose code was not found). An earlier wording of a replacement is
+    renewed without counting as needed."""
+    new = text
+    todo = []
+    for old, repl, count, *rest in edits:
+        earlier = rest[0] if rest else ()
+        for e in earlier:
+            if new.count(e) >= count and (old not in new or old in e):
+                new = new.replace(e, repl)
+        if new.count(repl) >= count and (old not in new or old in repl):
+            continue
+        if new.count(old) != count:
+            return None, old
+        todo.append(old)
+        new = new.replace(old, repl)
+    return new, todo
+
+
+def main():
+    check = "--check" in sys.argv[1:]
+    bad = 0
+    for rel, edits in PATCHES:
+        path = BASE + rel
+        try:
+            with open(path) as f:
+                text = f.read()
+        except OSError as e:
+            print("duo2-waydroid-patch: %s: %s" % (path, e), file=sys.stderr)
+            bad += 1
+            continue
+        new, todo = apply(text, edits)
+        if new is None:
+            print(
+                "duo2-waydroid-patch: %s: expected code not found (%r...)" % (path, todo[:50]),
+                file=sys.stderr,
+            )
+            bad += 1
+            continue
+        if check:
+            if todo:
+                print("duo2-waydroid-patch: %s: not patched" % path, file=sys.stderr)
+                bad += 1
+            continue
+        if new == text:
+            continue
+        with open(path + ".duo2-tmp", "w") as f:
+            f.write(new)
+        os.chmod(path + ".duo2-tmp", 0o644)
+        os.replace(path + ".duo2-tmp", path)
+        if todo:
+            print("duo2-waydroid-patch: patched %s (%d change(s))" % (path, len(todo)))
+        else:
+            print("duo2-waydroid-patch: %s: comments renewed" % path)
+    sys.exit(1 if bad else 0)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,396 @@
+#!/usr/bin/python3 -I
+"""duo2-home-crypt: the home's encryption at start and at the first unlock
+(homecrypt/README.md). Run by systemd as root, never by the user:
+
+    duo2-home-crypt boot      duo2-home-boot.service, before the user's services:
+                              an encryption or decryption the user asked for
+                              (Settings > Lock screen) is made now, with its
+                              progress on the boot splash; then, if the home is
+                              encrypted and its key is not in the kernel, an
+                              empty tmpfs is put over it (the user's services
+                              start on that: calls, alarms, the lock screen) and
+                              /run/duo2-home/locked says so
+    duo2-home-crypt settle    duo2-home-settle.service, started by the lock's
+                              PIN check (duo-lock-helper verify) with the key in
+                              /run/duo2-home/unlock.key: once no call is up, the
+                              session and the user's services stop, the tmpfs
+                              goes, the key goes to the kernel, and they start
+                              again on the real home (a few seconds of black)
+    duo2-home-crypt status    the state, as JSON
+    duo2-home-crypt features [DIR]
+                              the ext4 `encrypt` and `stable_inodes` features of
+                              DIR's filesystem (default /home), set through the
+                              kernel when missing (the switch-on does this too;
+                              by hand for a measurement before it). Cannot be
+                              undone: the filesystem can then never shrink
+"""
+
+import json
+import os
+import pwd
+import subprocess
+import sys
+import time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+for _p in ("/usr/local/lib/duo2-homecrypt", HERE):
+    if os.path.isdir(os.path.join(_p, "duohomecrypt")):
+        sys.path.insert(0, _p)
+        break
+
+from duohomecrypt import fscrypt, keys, migrate  # noqa: E402
+from duohomecrypt import store as st  # noqa: E402
+
+PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
+TMPFS_SIZE = "256m"
+TMPFS_SOURCE = "duo2-home-locked"
+CALL_POLL_S = 2
+DCONF_PROFILE = "/etc/dconf/profile/user"
+DCONF_MARK = "# duo2-home-crypt"
+ACTIVE_CALL_STATES = ("dialing", "ringing-out", "ringing-in", "active", "held", "waiting")
+
+
+def log(*args):
+    print("duo2-home-crypt:", *args, file=sys.stderr, flush=True)
+
+
+def run(argv, timeout=120):
+    try:
+        p = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env={"PATH": PATH, "LANG": "C.UTF-8"},
+            stdin=subprocess.DEVNULL,
+        )
+        return p.returncode, p.stdout + p.stderr
+    except (OSError, subprocess.SubprocessError) as e:
+        return -1, str(e)
+
+
+def calls_up(mmcli_out):
+    """mmcli --voice-list-calls's lines -> whether a call is up (dialing,
+    ringing either way, active, held or waiting)."""
+    for line in (mmcli_out or "").splitlines():
+        line = line.strip()
+        if "/Call/" in line and line.endswith(")"):
+            state = line.rsplit("(", 1)[-1].rstrip(")").strip()
+            if state in ACTIVE_CALL_STATES:
+                return True
+    return False
+
+
+def call_up():
+    rc, out = run(["mmcli", "-m", "any", "--voice-list-calls"], timeout=15)
+    return rc == 0 and calls_up(out)
+
+
+def tmpfs_at(path, mountinfo="/proc/self/mountinfo"):
+    """Our tmpfs is mounted at `path` (the top mount there)."""
+    found = False
+    try:
+        with open(mountinfo) as f:
+            for line in f:
+                pre, _sep, post = line.partition(" - ")
+                fields = pre.split()
+                if len(fields) > 4 and fields[4] == path:
+                    parts = post.split()
+                    found = len(parts) > 1 and parts[0] == "tmpfs" and parts[1] == TMPFS_SOURCE
+    except OSError:
+        return False
+    return found
+
+
+def lock_home(home, uid, gid, paths):
+    """An empty tmpfs over the encrypted home, the user's: their services
+    see a fresh home until the first unlock."""
+    if not tmpfs_at(home):
+        opts = "mode=0700,uid=%d,gid=%d,size=%s,nosuid,nodev" % (uid, gid, TMPFS_SIZE)
+        rc, out = run(["mount", "-t", "tmpfs", "-o", opts, TMPFS_SOURCE, home])
+        if rc != 0:
+            log("the locked home could not be covered: %s" % out.strip())
+            return False
+    st.touch(paths.locked)
+    return True
+
+
+def user_of(kf):
+    pw = pwd.getpwnam(kf["user"])
+    if os.path.normpath(pw.pw_dir) != os.path.normpath(kf["home"]):
+        raise migrate.Failed("the key file's home is not %s's" % kf["user"])
+    return pw
+
+
+# -- boot --------------------------------------------------------------------------------
+
+
+def boot(paths=None, system=None):
+    paths = paths or st.PATHS
+    os.makedirs(paths.run, mode=0o755, exist_ok=True)
+    s = st.state(paths)
+    way = st.MIGRATING.get(s["state"])
+    if way:
+        migrate_now(way, s, paths, system)
+        s = st.state(paths)
+    kf = migrate.key_file(paths)
+    leftovers(kf["home"] if kf else s.get("home"), s["state"])
+    if s["state"] != "encrypted" or kf is None:
+        st.untouch(paths.encrypted)
+        st.untouch(paths.locked)
+        de_profile(None, paths)
+        return 0
+    st.touch(paths.encrypted)
+    pw = user_of(kf)
+    de_profile(pw, paths)
+    if migrate.key_present(kf["home"], bytes.fromhex(kf["identifier"])):
+        st.untouch(paths.locked)
+        return 0
+    if not fscrypt.fs_supports_encryption():
+        log("this kernel cannot decrypt the home (no CONFIG_FS_ENCRYPTION): it stays locked")
+    lock_home(kf["home"], pw.pw_uid, pw.pw_gid, paths)
+    log("the home is encrypted: locked until the first unlock")
+    return 0
+
+
+def leftovers(home, state):
+    """A copy a finished change could not remove (its state is encrypted or
+    plain again): removed now (they have our names only)."""
+    if not home or state not in ("encrypted", "plain") or not home.startswith("/"):
+        return
+    for p in migrate.side_paths(home):
+        if os.path.lexists(p) and not os.path.islink(p):
+            log("removing %s, left by an earlier change" % p)
+            try:
+                migrate.rmtree(p)
+            except OSError as e:
+                log("not removed: %s" % e)
+
+
+def migrate_now(way, s, paths, system):
+    kf = migrate.key_file(paths)
+    master = keys.parse_pending_key(st.read(paths.pending))
+    if kf is None or master is None:
+        log("a %s waits, but its key is missing: dropped" % way)
+        s.update(
+            state="encrypted" if way == "decrypt" and kf else "plain",
+            detail="The change could not be made: its key was missing.",
+        )
+        st.save_state(s, paths)
+        st.remove(paths.pending)
+        return
+    m = migrate.Migration(system, paths)
+    try:
+        pw = user_of(kf)
+        if way == "encrypt":
+            kf = m.encrypt(kf, master, pw.pw_uid, pw.pw_gid)
+            st.write(paths.key_file, keys.format_key_file(kf), 0o600)
+            s.update(state="encrypted", progress=100, detail="", policy=policy_text(kf))
+        else:
+            m.decrypt(kf, master, pw.pw_uid, pw.pw_gid)
+            st.remove(paths.key_file)
+            s.update(state="plain", progress=100, detail="", recovery="no", policy="")
+            clear_de(paths)
+        st.save_state(s, paths)
+        st.remove(paths.pending)
+        system_message(m, "")
+        log("%s: done" % way)
+    except migrate.Postponed as e:
+        s.update(state="%s-pending" % way, detail="Waiting: %s." % e)
+        st.save_state(s, paths)
+        log("%s postponed: %s" % (way, e))
+    except (migrate.Failed, OSError, KeyError) as e:
+        log("%s failed: %s" % (way, e))
+        home = kf["home"]
+        encrypted_now = migrate.is_ours(home, bytes.fromhex(kf["identifier"]))
+        if encrypted_now:
+            # The home is the encrypted copy already (what failed came after
+            # the exchange): encrypted it is, whichever way was asked for.
+            st.write(paths.key_file, keys.format_key_file(kf), 0o600)
+            s.update(state="encrypted", progress=100, policy=policy_text(kf))
+            s["detail"] = (
+                "Encrypted, but the unencrypted copy was not removed: %s" % e
+                if way == "encrypt"
+                else "Not decrypted: %s" % e
+            )
+            if way == "decrypt":
+                for p in migrate.side_paths(home):
+                    if os.path.lexists(p) and migrate.policy_of(p) is None:
+                        migrate.rmtree(p)  # the plain copy that did not take its place
+        elif way == "encrypt":
+            # The home in use was never touched: back to plain, the try's
+            # leftovers go. The key file stays: it is what checks the PIN
+            # now (the pin file says only "homekey"); a new try replaces it.
+            for p in migrate.side_paths(home):
+                migrate.rmtree(p)
+            s.update(state="plain", recovery="no", policy="", detail="Not encrypted: %s" % e)
+        else:
+            # Decrypted already (the home is plain): what failed was the
+            # clean-up of the encrypted copy.
+            st.remove(paths.key_file)
+            s.update(state="plain", recovery="no", policy="", detail="Decrypted; %s" % e)
+        st.remove(paths.pending)
+        st.save_state(s, paths)
+
+
+def system_message(m, text):
+    try:
+        m.sys.message(text)
+    except OSError:
+        pass
+
+
+def policy_text(kf):
+    p = kf.get("policy", {})
+    return "%s / %s %s" % (
+        p.get("contents", "?"),
+        p.get("filenames", "?"),
+        "+".join(p.get("flags", [])),
+    )
+
+
+def clear_de(paths):
+    """The alarms' copy for before the first unlock is not needed any more."""
+    st.remove(paths.alarms)
+
+
+def profile_text(alarms):
+    return (
+        "%s: the alarms for before the first unlock of the encrypted home\n"
+        "# (homecrypt/README.md); the user's own database first.\n"
+        "user-db:user\nfile-db:%s\n" % (DCONF_MARK, alarms)
+    )
+
+
+def de_profile(pw, paths):
+    """With the home encrypted: the DE directory (the user's), a compiled
+    database there (empty until duo2-alarms-de copies the alarms), and the
+    dconf profile that reads it after the user's own. Without: our profile
+    goes (a profile someone else wrote is never touched)."""
+    ours = (st.read(DCONF_PROFILE) or "").startswith(DCONF_MARK)
+    if pw is None:
+        if ours:
+            st.untouch(DCONF_PROFILE)
+        return
+    try:
+        os.makedirs(paths.de, mode=0o700, exist_ok=True)
+        if os.path.islink(paths.de):
+            raise OSError("%s is a link" % paths.de)
+        os.chown(paths.de, pw.pw_uid, pw.pw_gid)
+        os.chmod(paths.de, 0o700)
+        if not os.path.exists(paths.alarms):
+            empty = os.path.join(paths.de, ".empty.d")
+            os.makedirs(empty, exist_ok=True)
+            rc, out = run(["dconf", "compile", paths.alarms, empty])
+            os.rmdir(empty)
+            if rc != 0:
+                raise OSError("dconf compile: %s" % out.strip())
+            os.chown(paths.alarms, pw.pw_uid, pw.pw_gid)
+        if os.path.exists(DCONF_PROFILE) and not ours:
+            log(
+                "%s is not ours: alarms before the first unlock need its file-db line"
+                % DCONF_PROFILE
+            )
+            return
+        os.makedirs(os.path.dirname(DCONF_PROFILE), mode=0o755, exist_ok=True)
+        st.write(DCONF_PROFILE, profile_text(paths.alarms), 0o644)
+    except OSError as e:
+        log("no alarms before the first unlock: %s" % e)
+
+
+# -- settle (the first unlock) ------------------------------------------------------------
+
+
+def settle(paths=None):
+    paths = paths or st.PATHS
+    master = keys.parse_pending_key(st.read(paths.unlock_key))
+    if master is None:
+        return 0
+    kf = migrate.key_file(paths)
+    if kf is None:
+        st.remove(paths.unlock_key)
+        return 1
+    pw = user_of(kf)
+    home, ident = kf["home"], bytes.fromhex(kf["identifier"])
+    # duo-lock first takes the right PIN's answer and ends the lock.
+    time.sleep(1.5)
+    waited = False
+    while call_up():
+        if not waited:
+            log("a call is up: the home is unlocked when it ends")
+            waited = True
+        time.sleep(CALL_POLL_S)
+    units = ["duo-wc.service", "user@%d.service" % pw.pw_uid]
+    log("unlocking the home: the session restarts on it")
+    run(["systemctl", "stop"] + units, timeout=90)
+    ok = False
+    try:
+        if tmpfs_at(home):
+            rc, out = run(["umount", home])
+            if rc != 0:
+                log("the session's home is busy (%s): detached" % out.strip())
+                run(["umount", "-l", home])
+        migrate.add_key(home, master, ident)
+        st.untouch(paths.locked)
+        ok = True
+    except (OSError, migrate.Failed) as e:
+        log("the key was not taken: %s; the home stays locked" % e)
+        lock_home(home, pw.pw_uid, pw.pw_gid, paths)
+    finally:
+        st.remove(paths.unlock_key)
+        run(["systemctl", "start", "user@%d.service" % pw.pw_uid], timeout=90)
+        run(["systemctl", "start", "duo-wc.service"], timeout=90)
+    return 0 if ok else 1
+
+
+# -- status -------------------------------------------------------------------------------
+
+
+def status(paths=None):
+    paths = paths or st.PATHS
+    s = st.state(paths)
+    s.update(
+        supported=fscrypt.fs_supports_encryption(),
+        locked=os.path.exists(paths.locked),
+        inline=sorted(fscrypt.inline_crypto()),
+    )
+    print(json.dumps(s, sort_keys=True))
+    return 0
+
+
+def features(path):
+    path = os.path.realpath(path)
+    if not os.path.isdir(path):
+        log("no directory %s" % path)
+        return 2
+    system = migrate.System()
+    try:
+        migrate.ensure_features(system, path + "/x", {"flags": ["IV_INO_LBLK_64"]})
+    except migrate.Failed as e:
+        log(str(e))
+        return 1
+    have = system.features(path)
+    print("encrypt: %s, stable_inodes: %s" % ("encrypt" in have, "stable_inodes" in have))
+    return 0 if {"encrypt", "stable_inodes"} <= have else 1
+
+
+def main(argv):
+    if argv[:1] == ["features"] and len(argv) <= 2:
+        return features(argv[1] if len(argv) == 2 else "/home")
+    if argv == ["boot"]:
+        return boot()
+    if argv == ["settle"]:
+        return settle()
+    if argv == ["status"]:
+        return status()
+    sys.stderr.write(__doc__.strip() + "\n")
+    return 2
+
+
+if __name__ == "__main__":
+    if os.geteuid() != 0:
+        sys.stderr.write("duo2-home-crypt: run by systemd, as root\n")
+        sys.exit(2)
+    os.environ["PATH"] = PATH
+    os.umask(0o022)
+    sys.exit(main(sys.argv[1:]))

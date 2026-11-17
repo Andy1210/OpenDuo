@@ -1,0 +1,19 @@
+#!/usr/bin/python3 -sE
+"""duo-voicemail: call the mailbox (the app grid's Voicemail). The number is
+Duo Settings' (SIM card > Voicemail number); GNOME Calls dials it. Without
+a number, Duo Settings opens on that page (duosettings/voicemail.py)."""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+from duosettings import voicemail  # noqa: E402
+
+if __name__ == "__main__":
+    argv = voicemail.dial_argv(voicemail.load())
+    try:
+        os.execvp(argv[0], argv)
+    except OSError as e:
+        print("duo-voicemail: %s: %s" % (argv[0], e), file=sys.stderr)
+        sys.exit(1)

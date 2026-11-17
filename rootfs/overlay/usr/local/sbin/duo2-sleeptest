@@ -1,0 +1,113 @@
+#!/bin/sh
+# duo2-sleeptest SECONDS [slpi] [cdsp] [wifi]
+#
+# One timed s2idle suspend (woken by the PMIC RTC), with the Qualcomm sleep
+# counters before and after: did the SoC reach AOSS sleep (aosd), CX power
+# collapse (cxsd) and DDR self refresh (ddr)? Optionally stops suspects first
+# and restores them afterwards: the SLPI / CDSP remoteprocs, the WiFi (PCIe)
+# driver. (Releasing the WCN6855 power sequencer to take the PCIe link down
+# hard-hung the phone on 2026-11-06: not offered.) The USB gadget is always unbound for the suspend (an active gadget
+# link refuses to suspend) and bound again afterwards.
+# Output goes to stdout; run it detached when the network goes away:
+#   sudo nohup duo2-sleeptest 30 slpi > /var/tmp/sleeptest.log 2>&1 &
+set -u
+SECS=${1:-30}
+shift || true
+S=/sys/kernel/debug/qcom_stats
+G=/sys/kernel/config/usb_gadget/duo2/UDC
+
+irqs() { # "irq name total" for every line of /proc/interrupts
+	awk 'NR > 1 { s = 0; for (i = 2; i <= NF && $i ~ /^[0-9]+$/; i++) s += $i
+		n = ""; for (j = i; j <= NF; j++) n = n " " $j; print $1, s, n }' /proc/interrupts
+}
+
+wakeups() { # "source event_count" for every wakeup source
+	for w in /sys/class/wakeup/wakeup*; do
+		echo "$(cat "$w/name") $(cat "$w/event_count")"
+	done
+}
+
+counters() {
+	for f in aosd cxsd ddr adsp cdsp slpi modem; do
+		printf '%s=%s ' "$f" "$(sed -n 's/^Count: //p' $S/$f 2>/dev/null)"
+	done
+	echo
+}
+
+rproc() { # name -> sysfs dir
+	for r in /sys/class/remoteproc/remoteproc*; do
+		[ "$(cat "$r/name")" = "$1" ] && echo "$r"
+	done
+}
+
+stopped=""
+for s in "$@"; do
+	case $s in
+	slpi) r=$(rproc slpi) ;;
+	cdsp) r=$(rproc cdsp) ;;
+	wifi) r="" ;;
+	*) echo "unknown suspect $s" >&2; exit 2 ;;
+	esac
+	if [ "$s" = wifi ]; then
+		systemctl stop wpa_supplicant@wlan0
+		modprobe -r ath11k_pci && stopped="$stopped wifi"
+	elif [ -n "$r" ] && [ "$(cat "$r/state")" = running ]; then
+		echo stop > "$r/state" && stopped="$stopped $s"
+	fi
+done
+echo "stopped for the test:${stopped:- nothing}"
+
+echo "before: $(counters)"
+udc=$(cat $G 2>/dev/null)
+[ -n "$udc" ] && echo > $G
+sleep 1
+sync
+ok0=$(cat /sys/power/suspend_stats/success)
+irqs >/run/duo2-sleeptest.irq0
+wakeups >/run/duo2-sleeptest.wk0
+t0=$(date +%s.%N)
+rtcwake -d rtc1 -m mem -s "$SECS" >/dev/null 2>&1
+rc=$?
+t1=$(date +%s.%N)
+echo "suspend rc=$rc, back after $(awk -v a="$t0" -v b="$t1" "BEGIN { printf \"%.1f\", b - a }") s (of $SECS), success $(cat /sys/power/suspend_stats/success) (was $ok0), last failed: $(cat /sys/power/suspend_stats/last_failed_dev)"
+echo "after:  $(counters)"
+# the interrupt that ended the suspend (CONFIG_PM_SLEEP_DEBUG kernels)
+if [ -r /sys/power/pm_wakeup_irq ]; then
+	w=$(cat /sys/power/pm_wakeup_irq 2>/dev/null)
+	[ -n "$w" ] && echo "wakeup irq: $(grep -E "^ *$w:" /proc/interrupts | awk '{ for (i = 2; i <= NF && $i ~ /^[0-9]+$/; i++); n = ""; for (; i <= NF; i++) n = n " " $i; print $1 n }')"
+fi
+# what fired while asleep (and on the way): interrupts that moved, the
+# wakeup sources that counted a wakeup
+irqs | awk 'NR == FNR { a[$1] = $2; next } $2 != a[$1] { $2 = "+" ($2 - a[$1]); print "irq", $0 }' /run/duo2-sleeptest.irq0 - |
+	grep -v -E 'IPI|arch_timer' | sort -t+ -k2 -n -r | head -20
+wakeups | grep -v -E '^(\[|eventpoll)' | awk 'NR == FNR { a[$1] = $2; next } $2 != a[$1] { print "wakeup events:", $1, "+" ($2 - a[$1]) }' /run/duo2-sleeptest.wk0 -
+rm -f /run/duo2-sleeptest.irq0 /run/duo2-sleeptest.wk0
+[ -n "$udc" ] && echo "$udc" > $G
+
+for s in $stopped; do
+	case $s in
+	slpi) echo start > "$(rproc slpi)/state" ;;
+	cdsp) echo start > "$(rproc cdsp)/state" ;;
+	wifi) modprobe ath11k_pci; sleep 5; systemctl start wpa_supplicant@wlan0 ;;
+	esac
+done
+echo "restored:${stopped:- nothing}"
+
+# The phone is usually reached over WiFi only: if it does not come back
+# within 2 minutes of the test (a default route over wlan0 and its gateway
+# answering, not just an address: a link that died in suspend keeps its
+# address), reboot (a duo2-try kernel then falls back).
+wifi_ok() {
+	gw=$(ip -4 route show default dev wlan0 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "via") { print $(i + 1); exit } }')
+	[ -n "$gw" ] && ping -n -q -c 1 -W 2 -I wlan0 "$gw" >/dev/null 2>&1
+}
+i=0
+while [ $i -lt 120 ] && ! wifi_ok; do
+	sleep 1; i=$((i + 1))
+done
+if wifi_ok; then
+	echo "wifi back after ${i} s"
+else
+	echo "WiFi did not come back: rebooting"; sync; systemctl reboot
+	sleep 90; echo 1 > /proc/sys/kernel/sysrq; echo b > /proc/sysrq-trigger
+fi

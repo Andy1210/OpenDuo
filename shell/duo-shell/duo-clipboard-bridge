@@ -1,0 +1,298 @@
+#!/usr/bin/python3 -sE
+"""duo-clipboard-bridge: the clipboard between Android (Waydroid) and the
+host, the one client of duo-wc's guarded ext-data-control global.
+
+Started by duo-shell with a trusted Wayland connection of its own
+(WAYLAND_SOCKET, from the session's trust factory; an app cannot get one).
+It plays Waydroid's host side of lineageos.waydroid.IClipboard (Waydroid's
+own needs the pyclip module, which Debian does not have, and a data-control
+protocol through wl-clipboard): Android's sendClipboardData sets the host's
+selection, getClipboardData reads it. Only callers inside the Android
+container are answered (duoshell/clipmodel.py). It registers with Android's
+service manager whenever the container is up, and waits while it is not.
+Text only.
+"""
+
+import os
+import sys
+import threading
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+from gi.repository import GLib  # noqa: E402
+from protocols.ext_data_control_v1 import ExtDataControlManagerV1  # noqa: E402
+from protocols.wayland import WlSeat  # noqa: E402
+from pywayland.client import Display  # noqa: E402
+
+from duoshell import (
+    clipmodel,  # noqa: E402
+    trust,  # noqa: E402
+)
+
+SERVICE_NAME = "waydroidclipboard"
+INTERFACE = "lineageos.waydroid.IClipboard"
+TX_SEND, TX_GET = 1, 2
+WAYDROID_CFG = "/var/lib/waydroid/waydroid.cfg"
+
+
+def log(*args):
+    print("duo-clipboard-bridge:", *args, flush=True)
+
+
+class Clipboard:
+    """The host side, through ext-data-control."""
+
+    def __init__(self):
+        self.display = Display()
+        self.display.connect()
+        self.manager = None
+        self.seat = None
+        self.offer = None  # the current selection's offer
+        self.offers = {}  # offer -> [mime types]
+        self.own = None  # (source, text) while the selection is ours
+        registry = self.display.get_registry()
+        registry.dispatcher["global"] = self._global
+        self.display.roundtrip()
+        if self.manager is None or self.seat is None:
+            raise RuntimeError("no ext_data_control_manager_v1 (not a trusted connection?)")
+        self.device = self.manager.get_data_device(self.seat)
+        self.device.dispatcher["data_offer"] = self._data_offer
+        self.device.dispatcher["selection"] = self._selection
+        self.device.dispatcher["finished"] = lambda *_a: log("data device finished")
+        self.display.roundtrip()
+        self.lock = threading.Lock()
+
+    def _global(self, registry, name, interface, version):
+        if interface == "ext_data_control_manager_v1":
+            self.manager = registry.bind(name, ExtDataControlManagerV1, 1)
+        elif interface == "wl_seat" and self.seat is None:
+            self.seat = registry.bind(name, WlSeat, 1)
+
+    def _data_offer(self, _device, offer):
+        self.offers[offer] = []
+        offer.dispatcher["offer"] = lambda o, mime: self.offers.setdefault(o, []).append(mime)
+
+    def _selection(self, _device, offer):
+        old = self.offer
+        self.offer = offer
+        if old is not None and old is not offer:
+            self.offers.pop(old, None)
+            old.destroy()
+        if offer is not None and self.own is not None:
+            # Another client set the selection: ours is gone.
+            self.own = None
+
+    def fd(self):
+        return self.display.get_fd()
+
+    def get_text(self, timeout_s=2.0):
+        """The host's clipboard as text ('' when it holds none)."""
+        if self.own is not None:
+            return self.own[1]
+        offer = self.offer
+        if offer is None:
+            return ""
+        mime = clipmodel.pick_text_type(self.offers.get(offer))
+        if mime is None:
+            return ""
+        r, w = os.pipe()
+        try:
+            offer.receive(mime, w)
+            self.display.flush()
+        finally:
+            os.close(w)
+        data = b""
+        import select
+
+        end = GLib.get_monotonic_time() + int(timeout_s * 1e6)
+        try:
+            while len(data) <= clipmodel.MAX_BYTES:
+                left = (end - GLib.get_monotonic_time()) / 1e6
+                if left <= 0 or not select.select([r], [], [], left)[0]:
+                    break
+                chunk = os.read(r, 65536)
+                if not chunk:
+                    break
+                data += chunk
+        finally:
+            os.close(r)
+        return clipmodel.decode(data)
+
+    def set_text(self, text):
+        source = self.manager.create_data_source()
+        for mime in clipmodel.OFFER_TYPES:
+            source.offer(mime)
+        payload = text.encode("utf-8")[: clipmodel.MAX_BYTES]
+
+        def send(_src, _mime, fd):
+            try:
+                view = memoryview(payload)
+                while view:
+                    n = os.write(fd, view)
+                    view = view[n:]
+            except OSError:
+                pass
+            finally:
+                os.close(fd)
+
+        def cancelled(src):
+            if self.own is not None and self.own[0] is src:
+                self.own = None
+            src.destroy()
+
+        source.dispatcher["send"] = send
+        source.dispatcher["cancelled"] = cancelled
+        self.device.set_selection(source)
+        self.own = (source, text)
+        self.display.flush()
+
+
+def binder_device():
+    name = "anbox-binder"
+    try:
+        with open(WAYDROID_CFG) as f:
+            for line in f:
+                if line.split("=", 1)[0].strip() == "binder":
+                    name = line.split("=", 1)[1].strip() or name
+    except OSError:
+        pass
+    for path in ("/dev/" + name, "/dev/binderfs/" + name):
+        if os.path.exists(path):
+            return path
+    return "/dev/binderfs/" + name
+
+
+def sender_pid(req):
+    try:
+        pid = req.sender_pid
+        return int(pid() if callable(pid) else pid)
+    except (ValueError, TypeError, AttributeError):
+        return -1
+
+
+def caller_in_container(req):
+    try:
+        with open("/proc/%d/cgroup" % sender_pid(req)) as f:
+            return clipmodel.in_container(f.read())
+    except OSError:
+        return False
+
+
+def die_with_parent():
+    """The bridge lives as long as the shell that started it (a new shell
+    starts its own)."""
+    import ctypes
+    import signal
+
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl(1, signal.SIGTERM)  # PR_SET_PDEATHSIG
+    except (OSError, AttributeError):
+        pass
+    if os.getppid() == 1:
+        sys.exit(0)
+
+
+def main():
+    die_with_parent()
+    trust.make_undumpable()
+    try:
+        clip = Clipboard()
+    except Exception as e:
+        log("cannot start: %s" % e)
+        return 1
+    import gbinder
+
+    loop = GLib.MainLoop()
+
+    def wayland_ready(_fd, cond):
+        if cond & (GLib.IOCondition.HUP | GLib.IOCondition.ERR):
+            log("the compositor went away")
+            loop.quit()
+            return False
+        try:
+            clip.display.dispatch(block=True)
+        except Exception as e:
+            log("wayland: %s" % e)
+            loop.quit()
+            return False
+        return True
+
+    GLib.io_add_watch(
+        clip.fd(),
+        GLib.PRIORITY_DEFAULT,
+        GLib.IOCondition.IN | GLib.IOCondition.HUP | GLib.IOCondition.ERR,
+        wayland_ready,
+    )
+
+    state = {"sm": None, "obj": None, "dev": None, "registered": False}
+
+    def handler(req, code, _flags):
+        reply = state["obj"].new_reply()
+        if not caller_in_container(req):
+            log("refused a caller outside the Android container (pid %d)" % sender_pid(req))
+            return reply, -1
+        reader = req.init_reader()
+        if code == TX_SEND:
+            text = reader.read_string16() or ""
+            clip.set_text(text)
+            log("Android copied %d characters" % len(text))
+            reply.append_int32(0)
+        elif code == TX_GET:
+            text = clip.get_text()
+            log("Android pasted %d characters" % len(text))
+            reply.append_int32(0)
+            reply.append_string16(text)
+        else:
+            return reply, -99999
+        return reply, 0
+
+    def check():
+        """Every few seconds: the binder device appears when Waydroid's
+        container manager starts (binderfs, on demand) and is made anew
+        when it starts again; Android's service manager comes with the
+        container. Register whenever both are there and we are not."""
+        device = binder_device()
+        try:
+            rdev = os.stat(device).st_rdev
+        except OSError:
+            rdev = None
+        if rdev != state["dev"] or rdev is None:
+            if state["registered"]:
+                log("Android gone")
+            state.update(sm=None, obj=None, registered=False, dev=rdev)
+            if rdev is None:
+                return True
+        if state["sm"] is None:
+            try:
+                state["sm"] = gbinder.ServiceManager(device, "aidl3", "aidl3")
+            except TypeError:
+                state["sm"] = gbinder.ServiceManager(device)
+            except Exception as e:
+                log("binder: %s" % e)
+                state["dev"] = None
+                return True
+            state["obj"] = state["sm"].new_local_object(INTERFACE, handler)
+        present = state["sm"].is_present()
+        if present and not state["registered"]:
+            status = state["sm"].add_service_sync(SERVICE_NAME, state["obj"])
+            state["registered"] = not status
+            log(
+                "Android is up: %s"
+                % ("clipboard service added" if not status else "add_service failed (%s)" % status)
+            )
+        elif not present and state["registered"]:
+            log("Android gone")
+            state.update(sm=None, obj=None, registered=False)
+        return True
+
+    check()
+    GLib.timeout_add_seconds(3, check)
+    device = binder_device()
+    log("ready (%s)" % device)
+    loop.run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

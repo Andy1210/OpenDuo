@@ -1,0 +1,13 @@
+[Desktop Entry]
+# duo2-os: the Android apps' access to the phone's position (Waydroid,
+# duo2-android-location). Not an app to start: the name geoclue knows the
+# bridge by, so Settings > Privacy can list and refuse it.
+Type=Application
+Name=Android apps
+Name[hu]=Android-appok
+Comment=The phone's position for Android apps, while one asks
+Comment[hu]=A telefon helye az Android-appoknak, amíg egy kéri
+Icon=waydroid
+Exec=/bin/false
+NoDisplay=true
+X-Geoclue-Reason=Android apps that you allow in Android's own settings (Google Maps, OsmAnd) can learn where the phone is while they ask.

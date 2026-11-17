@@ -1,0 +1,532 @@
+#!/usr/bin/python3 -I
+"""duo2-update: Debian updates on the phone, with a look first and a way
+back (docs/UPDATES.md). Root (the administrator: sudo).
+
+  duo2-update check [--no-refresh] [--download] [--json]
+        what an upgrade would do (apt-get update first unless --no-refresh):
+        the packages (security ones marked), what it must not do, our rebuilt
+        packages Debian has a newer source for, local edits it replaces, what
+        to try out afterwards. --download also fetches the packages and looks
+        into them: files no package owns that they would overwrite.
+        Exit 0: nothing to do, 10: updates, 3: an update would be refused.
+        --json: the result as one JSON line at the end (duo2-updates).
+  duo2-update run [--yes] [--allow-removals] [--no-repack] [--force]
+        check + download + a snapshot (duo2-snapshot, with the packages about
+        to change repacked) + apt-get dist-upgrade (no recommends, our config
+        files kept), then the checks: the ESP, the firmware, the modules
+        untouched, dpkg clean, the Waydroid patch, failed units, what still
+        runs old code (reboot).
+  duo2-update rollback [SNAPSHOT] [--yes] [--remove-new]
+        the packages back to a snapshot's versions (the latest "pre-update"
+        one by default) from its repacked debs; --remove-new also removes the
+        packages the upgrade added. /etc etc.: duo2-snapshot restore.
+  duo2-update status
+        the last run and the snapshots.
+
+Never touches the ESP or the modem itself. A packaged kernel
+(openduo-kernel-surface-duo2-*) writes its own boot entry with boot counting
+(duo2-boot): its way back is systemd-boot's fallback to the previous entry; a
+hand-built one's is scripts/duo2-promote --rollback and the rescue entry.
+"""
+
+import glob
+import json
+import os
+import subprocess
+import sys
+import time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+for _p in (HERE, "/usr/local/lib/duo2-maint"):  # the repo's maint/, or installed
+    if os.path.isdir(os.path.join(_p, "duo2maint")):
+        sys.path.insert(0, _p)
+        break
+
+from duo2maint import aptplan, debver, system  # noqa: E402
+from duo2maint import snapshot as snap  # noqa: E402
+
+APT = [
+    "apt-get",
+    "-q",
+    "-o",
+    "APT::Install-Recommends=false",
+    "-o",
+    "APT::Install-Suggests=false",
+    "-o",
+    "Dpkg::Options::=--force-confdef",
+    "-o",
+    "Dpkg::Options::=--force-confold",
+]
+LOGDIR = "/var/log/duo2-update"
+STATE = "/var/lib/duo2-update/last.json"
+PIN = "/etc/apt/preferences.d/duo2-never"
+ARCHIVES = "/var/cache/apt/archives"
+MIN_FREE = 2 << 30
+MIN_BATTERY = 30
+
+
+def say(*args):
+    print(*args, flush=True)
+
+
+def snapshot_tool():
+    for p in (os.path.join(HERE, "duo2-snapshot"), "/usr/local/sbin/duo2-snapshot"):
+        if os.path.exists(p):
+            return p
+    raise SystemExit("duo2-update: duo2-snapshot is missing")
+
+
+def installed():
+    return {n: v for n, (_a, v) in snap.parse_packages(system.dpkg_packages_text()).items()}
+
+
+# -- the look ----------------------------------------------------------------------------------
+
+
+def simulate():
+    rc, out, err = system.run(APT + ["-s", "dist-upgrade"], timeout=300)
+    if rc != 0:
+        raise RuntimeError("apt-get -s dist-upgrade: %s" % (err.strip() or out.strip()))
+    return aptplan.parse_simulation(out)
+
+
+def local_rebuilds(now):
+    local = sorted(n for n, v in now.items() if debver.is_local(v))
+    if not local:
+        return []
+    rc, out, _err = system.run(["apt-cache", "policy"] + local, timeout=120)
+    return aptplan.rebuilds_needed(aptplan.parse_policy(out)) if rc == 0 else []
+
+
+def cached_deb(name, version):
+    v = version.split(":", 1)[1] if ":" in version else version
+    epoch = version.split(":", 1)[0] + "%3a" if ":" in version else ""
+    for pat in ("%s_%s%s_*.deb" % (name, epoch, v), "%s_%s_*.deb" % (name, v)):
+        hits = glob.glob(os.path.join(ARCHIVES, pat))
+        if hits:
+            return hits[0]
+    return None
+
+
+def look(refresh=True, download=False, allow_removals=False):
+    """Everything check and run need to know; prints the report."""
+    if refresh:
+        say("== apt-get update")
+        rc, out, err = system.run(APT + ["update"], timeout=900)
+        if rc != 0:
+            raise RuntimeError("apt-get update failed: %s" % (err.strip() or out.strip())[-400:])
+    now = installed()
+    plan = simulate()
+    refuse, note = aptplan.review(plan, now, allow_removals)
+    rc, audit, _ = system.run(["dpkg", "--audit"])
+    if audit.strip():
+        refuse.append("dpkg is not clean (dpkg --audit): finish or repair that first")
+    if not os.path.exists(PIN):
+        note.append(
+            "%s is missing: a kernel or firmware package is not pinned away (maint/install.sh)"
+            % PIN
+        )
+    names = [i[0] for i in plan["install"]] + [r[0] for r in plan["remove"]]
+    upgrades = [i for i in plan["install"] if i[1]]
+    security = [i for i in plan["install"] if aptplan.is_security(i[3])]
+    say(
+        "== the plan: %d to upgrade (%d security), %d new, %d to remove"
+        % (len(upgrades), len(security), len(plan["install"]) - len(upgrades), len(plan["remove"]))
+    )
+    for name, old, new, origin in plan["install"]:
+        say(
+            "  %s%-34s %s -> %s"
+            % ("S " if aptplan.is_security(origin) else "  ", name, old or "(new)", new)
+        )
+    for name, old in plan["remove"]:
+        say("  - %-34s %s" % (name, old))
+    rebuilds = local_rebuilds(now)
+    if rebuilds:
+        say(
+            "== our rebuilt packages: Debian has a newer source (apt keeps ours; rebuild: camera/build-debs.sh)"
+        )
+        for pkg, inst, base, best in rebuilds:
+            say("  %-30s ours %s (from %s), Debian %s" % (pkg, inst, base, best))
+    changed = []
+    upgraded = sorted(i[0] for i in upgrades)
+    if upgraded:
+        rc, out, _ = system.run(["dpkg", "--verify"] + upgraded, timeout=600)
+        changed = aptplan.edits_replaced(aptplan.parse_verify(out))
+        if changed:
+            say("== local changes to files of these packages")
+            for path, what in changed:
+                say("  %s: %s" % (path, what))
+    over = []
+    if download and plan["install"]:
+        say("== downloading")
+        rc, out, err = system.run(APT + ["-y", "--download-only", "dist-upgrade"], timeout=3600)
+        if rc != 0:
+            raise RuntimeError("download failed: %s" % (err.strip() or out.strip())[-400:])
+        files = {}
+        for name, _old, new, _origin in plan["install"]:
+            deb = cached_deb(name, new)
+            if deb is None:
+                note.append("%s %s: downloaded file not found, not looked into" % (name, new))
+                continue
+            files[name] = system.deb_paths(deb)
+        over = aptplan.overwrites(
+            files, system.owned_paths(), os.path.lexists, aptplan.usr_aliases(system.usr_links())
+        )
+        for pkg, path, protected in over:
+            if aptplan.adopts(pkg, path):
+                note.append(
+                    "%s takes over %s (the same kernel build, installed by hand)" % (pkg, path)
+                )
+            elif protected:
+                refuse.append("%s would overwrite %s (ours, no package owns it)" % (pkg, path))
+            else:
+                note.append("%s overwrites %s, which no package owned" % (pkg, path))
+    hints = aptplan.hints(names)
+    if note:
+        say("== to know")
+        for n in note:
+            say("  " + n)
+    if hints:
+        say("== try out afterwards")
+        for h in hints:
+            say("  " + h)
+    if refuse:
+        say("== REFUSED")
+        for r in refuse:
+            say("  " + r)
+    return {
+        "plan": plan,
+        "refuse": refuse,
+        "note": note,
+        "hints": hints,
+        "rebuilds": rebuilds,
+        "upgraded": upgraded,
+        "removed": [r[0] for r in plan["remove"]],
+        "names": names,
+    }
+
+
+def cmd_check(args):
+    r = look(
+        refresh="--no-refresh" not in args,
+        download="--download" in args,
+        allow_removals="--allow-removals" in args,
+    )
+    if "--json" in args:  # the last line, for duo2-updates (Settings > Updates)
+        print(json.dumps(r, sort_keys=True), flush=True)
+    if r["refuse"]:
+        return 3
+    return 10 if r["names"] else 0
+
+
+# -- the upgrade --------------------------------------------------------------------------------
+
+
+def preflight(force):
+    problems = []
+    if "duo2.try" in (open("/proc/cmdline").read() if os.path.exists("/proc/cmdline") else ""):
+        problems.append("this is a duo2-try boot: update on the known-good kernel")
+    # the FAT itself (an idle automount shows only its autofs entry, which says rw)
+    rc, out, _ = system.run(["findmnt", "-no", "OPTIONS", "-t", "vfat", "/boot/efi"])
+    if rc == 0 and out.split(",")[0].strip() == "rw":
+        problems.append("the ESP is mounted read-write (a duo2-try / duo2-promote is writing it?)")
+    if system.free_bytes("/") < MIN_FREE:
+        problems.append("less than 2 GiB free on /")
+    supplies = system.power_supplies()
+    level = system.battery_percent(supplies)
+    charging = any(
+        s.get("type") in ("Mains", "USB", "USB_PD", "USB_C") and s.get("online") == "1"
+        for s in supplies
+    ) or any(s.get("status") in ("Charging", "Full") for s in supplies)
+    if level is not None and level < MIN_BATTERY and not charging:
+        problems.append("the battery is at %d %% and not charging" % level)
+    rc, out, _ = system.run(["fuser", "/var/lib/dpkg/lock-frontend", "/var/lib/dpkg/lock"])
+    if rc == 0 and out.strip():
+        problems.append("another apt / dpkg is running")
+    if problems and not force:
+        for p in problems:
+            say("duo2-update: " + p)
+        raise SystemExit(3)
+    for p in problems:
+        say("duo2-update: (forced) " + p)
+
+
+def ask(question):
+    if not sys.stdin.isatty():
+        raise SystemExit("duo2-update: no terminal to ask; add --yes")
+    return input(question + " [y/N] ").strip().lower() in ("y", "yes", "i", "igen")
+
+
+def boot_files():
+    return (
+        {
+            f
+            for f in os.listdir("/boot")
+            if f.startswith(("vmlinuz", "initrd.img", "System.map", "config-"))
+        }
+        if os.path.isdir("/boot")
+        else set()
+    )
+
+
+def after(snapshot_name, failed_before, boot_before=frozenset()):
+    """The checks after an upgrade: [(ok, text)]."""
+    out = []
+    path = os.path.join(snap.ROOT, snapshot_name) if snapshot_name else None
+    if path and os.path.exists(os.path.join(path, "protected.sha256")):
+        with open(os.path.join(path, "protected.sha256")) as f:
+            before = snap.parse_sums(f.read())
+        cmp = snap.compare_sums(before, system.protected_sums())
+        bad = [
+            p for p in cmp["changed"] + cmp["gone"] + cmp["new"] if not aptplan.kernel_esp_file(p)
+        ]
+        out.append(
+            (
+                not bad,
+                "ESP, firmware, modules: %s"
+                % (
+                    "unchanged"
+                    if not bad
+                    else "CHANGED: %s" % ", ".join(bad[:10]) + (" ..." if len(bad) > 10 else "")
+                ),
+            )
+        )
+    rc, audit, _ = system.run(["dpkg", "--audit"])
+    out.append(
+        (not audit.strip(), "dpkg --audit: %s" % ("clean" if not audit.strip() else audit.strip()))
+    )
+    if os.path.exists("/usr/local/sbin/duo2-waydroid-patch"):
+        rc, o, e = system.run(["/usr/local/sbin/duo2-waydroid-patch", "--check"])
+        out.append(
+            (rc == 0, "Waydroid patch: %s" % ("in place" if rc == 0 else (o + e).strip()[-300:]))
+        )
+    try:
+        with open("/etc/initramfs-tools/update-initramfs.conf") as f:
+            no_initramfs = any(line.strip() == "update_initramfs=no" for line in f)
+    except OSError:
+        no_initramfs = True
+    out.append(
+        (
+            no_initramfs,
+            "update_initramfs=no: %s" % ("kept" if no_initramfs else "GONE (put it back)"),
+        )
+    )
+    boot = sorted(boot_files() - set(boot_before))
+    out.append(
+        (not boot, "/boot: %s" % ("no new kernel files" if not boot else "NEW: " + ", ".join(boot)))
+    )
+    if path and os.path.exists(os.path.join(path, "packages.tsv")):
+        with open(os.path.join(path, "packages.tsv")) as f:
+            before = snap.parse_packages(f.read())
+        now = installed()
+        lost = sorted(
+            n
+            for n, (_a, v) in before.items()
+            if debver.is_local(v) and not debver.is_local(now.get(n, ""))
+        )
+        out.append(
+            (
+                not lost,
+                "our rebuilt packages: %s"
+                % ("still ours" if not lost else "REPLACED: " + ", ".join(lost)),
+            )
+        )
+    failed = [u for u in system.failed_units() if u not in failed_before]
+    out.append((not failed, "failed units: %s" % ("none new" if not failed else ", ".join(failed))))
+    stale = system.deleted_maps()
+    if stale:
+        units = sorted({c for _p, _c, c in stale})
+        out.append(
+            (
+                True,
+                "still running old code (a reboot updates them): %s" % ", ".join(units[:15])
+                + (" ..." if len(units) > 15 else ""),
+            )
+        )
+    return out
+
+
+def write_state(data):
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+    with open(STATE + ".tmp", "w") as f:
+        json.dump(data, f, indent=1)
+    os.replace(STATE + ".tmp", STATE)
+
+
+def cmd_run(args):
+    force = "--force" in args
+    preflight(force)
+    r = look(refresh=True, download=True, allow_removals="--allow-removals" in args)
+    if r["refuse"]:
+        say("duo2-update: not upgrading (see REFUSED)")
+        return 3
+    if not r["names"]:
+        say("duo2-update: nothing to upgrade")
+        return 0
+    if "--yes" not in args and not ask("Upgrade these packages?"):
+        return 1
+    failed_before = system.failed_units()
+    boot_before = boot_files()
+    snapshot_name = None
+    repack = [] if "--no-repack" in args else r["upgraded"] + r["removed"]
+    say("== snapshot (%d packages repacked: the way back)" % len(repack))
+    p = subprocess.run(
+        [snapshot_tool(), "create", "--label", "pre-update"]
+        + (["--repack"] + repack if repack else []),
+        capture_output=True,
+        text=True,
+    )
+    if p.returncode != 0:
+        say(p.stdout + p.stderr)
+        say("duo2-update: no snapshot, no upgrade")
+        return 1
+    lines = p.stdout.strip().splitlines()
+    snapshot_name = lines[-1]
+    for line in lines[:-1] + p.stderr.strip().splitlines():
+        say("  " + line)
+    os.makedirs(LOGDIR, mode=0o750, exist_ok=True)
+    log = os.path.join(LOGDIR, time.strftime("%Y%m%d-%H%M%S") + ".log")
+    say("== apt-get dist-upgrade (log: %s)" % log)
+    rc = system.stream(APT + ["-y", "dist-upgrade"], log)
+    checks = after(snapshot_name, failed_before, boot_before)
+    say("== after the upgrade")
+    for ok, text in checks:
+        say("  %s %s" % ("ok  " if ok else "BAD ", text))
+    if r["hints"]:
+        say("== try out now")
+        for h in r["hints"]:
+            say("  " + h)
+    say("way back: sudo duo2-update rollback %s" % snapshot_name)
+    write_state(
+        {
+            "time": time.time(),
+            "snapshot": snapshot_name,
+            "apt_rc": rc,
+            "log": log,
+            "packages": r["names"],
+            "checks": [[ok, t] for ok, t in checks],
+        }
+    )
+    return 0 if rc == 0 and all(ok for ok, _t in checks) else 1
+
+
+# -- the way back -------------------------------------------------------------------------------
+
+
+def find_repacked(path, pkg, version, arch):
+    """The deb dpkg-repack made of pkg at version (its own name first, else
+    any file of the package whose control fields say so)."""
+    exact = os.path.join(path, "debs", snap.deb_name(pkg, version, arch))
+    for deb in [exact] + sorted(glob.glob(os.path.join(path, "debs", glob.escape(pkg) + "_*.deb"))):
+        if not os.path.exists(deb):
+            continue
+        rc, out, _ = system.run(["dpkg-deb", "-f", deb, "Package", "Version"])
+        fields = dict(line.split(": ", 1) for line in out.splitlines() if ": " in line)
+        if rc == 0 and fields.get("Package") == pkg and fields.get("Version") == version:
+            return deb
+    return None
+
+
+def latest_pre_update():
+    names = (
+        [n for n in sorted(os.listdir(snap.ROOT)) if snap.is_name(n) and n.endswith("-pre-update")]
+        if os.path.isdir(snap.ROOT)
+        else []
+    )
+    return names[-1] if names else None
+
+
+def cmd_rollback(args):
+    opts = [a for a in args if a.startswith("--")]
+    rest = [a for a in args if not a.startswith("--")]
+    name = rest[0] if rest else latest_pre_update()
+    if not name or not snap.is_name(name) or not os.path.isdir(os.path.join(snap.ROOT, name)):
+        raise SystemExit("duo2-update: no such snapshot (duo2-snapshot list)")
+    path = os.path.join(snap.ROOT, name)
+    with open(os.path.join(path, "packages.tsv")) as f:
+        before = snap.parse_packages(f.read())
+    now = snap.parse_packages(system.dpkg_packages_text())
+    ch = snap.changes(before, now)
+    debs, missing = [], []
+    for pkg, old in [(c[0], c[1]) for c in ch["changed"]] + ch["removed"]:
+        deb = find_repacked(path, pkg, old, before[pkg][0])
+        if deb:
+            debs.append(deb)
+        else:
+            missing.append("%s %s" % (pkg, old))
+    added = [n for n, _v in ch["added"]]
+    say(
+        "back to %s: %d packages to put back, %d added since%s"
+        % (
+            name,
+            len(debs),
+            len(added),
+            ", %d without a repacked deb" % len(missing) if missing else "",
+        )
+    )
+    for m in missing:
+        say("  no deb for %s (snapshot.debian.org has every Debian version)" % m)
+    if not debs and not ("--remove-new" in opts and added):
+        say("nothing to do")
+        return 0 if not missing else 1
+    if "--yes" not in opts and not ask("Go back?"):
+        return 1
+    os.makedirs(LOGDIR, mode=0o750, exist_ok=True)
+    log = os.path.join(LOGDIR, time.strftime("%Y%m%d-%H%M%S") + "-rollback.log")
+    rc = 0
+    if debs:
+        rc = system.stream(APT + ["-y", "--allow-downgrades", "install"] + debs, log)
+    if rc == 0 and "--remove-new" in opts and added:
+        keep = [n for n in added if aptplan.matches(n, aptplan.PROTECTED)]
+        gone = [n for n in added if n not in keep]
+        if gone:
+            rc = system.stream(APT + ["-y", "remove"] + gone, log)
+    rc2, audit, _ = system.run(["dpkg", "--audit"])
+    say("dpkg --audit: %s" % ("clean" if not audit.strip() else audit.strip()))
+    say("config files: duo2-snapshot diff %s / restore %s etc" % (name, name))
+    return 0 if rc == 0 and not audit.strip() else 1
+
+
+def cmd_status():
+    try:
+        with open(STATE) as f:
+            st = json.load(f)
+        say(
+            "last run %s: apt %s, snapshot %s, %d packages"
+            % (
+                time.strftime("%F %T", time.localtime(st["time"])),
+                "ok" if st["apt_rc"] == 0 else "FAILED",
+                st["snapshot"],
+                len(st["packages"]),
+            )
+        )
+        for ok, text in st.get("checks", []):
+            say("  %s %s" % ("ok  " if ok else "BAD ", text))
+    except (OSError, ValueError, KeyError):
+        say("no run yet")
+    subprocess.run([snapshot_tool(), "list"])
+    return 0
+
+
+def main(argv):
+    if os.geteuid() != 0:
+        print("duo2-update: run as root (sudo)", file=sys.stderr)
+        return 2
+    if not argv or argv[0] not in ("check", "run", "rollback", "status"):
+        print(__doc__.strip().split("\n\n")[1], file=sys.stderr)
+        return 2
+    try:
+        if argv[0] == "check":
+            return cmd_check(argv[1:])
+        if argv[0] == "run":
+            return cmd_run(argv[1:])
+        if argv[0] == "rollback":
+            return cmd_rollback(argv[1:])
+        return cmd_status()
+    except RuntimeError as e:
+        print("duo2-update: %s" % e, file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

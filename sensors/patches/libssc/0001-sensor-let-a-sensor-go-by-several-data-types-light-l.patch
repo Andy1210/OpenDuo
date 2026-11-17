@@ -1,0 +1,92 @@
+From 8b78edc3686ec230b30fbbd8f62dfeeb6b55106d Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 00:05:16 +0100
+Subject: [PATCH] sensor: let a sensor go by several data types; light:
+ lightfusion, ambient_light_oc
+
+A light sensor is not always "ambient_light": the Surface Duo 2 (SM8350)
+has none of that type, but two on-change TXC PA22A sensors
+("ambient_light_oc") and Microsoft's "lightfusion", which fuses the two
+panels' light with the hinge and posture and is what the phone's own
+adaptive brightness listens to. Both report the standard sensor event
+with the light in lux first.
+
+The data-type property may now list alternatives, comma-separated: when
+the SUID lookup finds no sensor of one, the next is looked up. The light
+sensor asks for "ambient_light,lightfusion,ambient_light_oc".
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/libssc-sensor-light.c |  5 ++++-
+ src/libssc-sensor.c       | 21 ++++++++++++++++++++-
+ 2 files changed, 24 insertions(+), 2 deletions(-)
+
+diff --git a/src/libssc-sensor-light.c b/src/libssc-sensor-light.c
+index e0bd99a..64f8e2d 100644
+--- a/src/libssc-sensor-light.c
++++ b/src/libssc-sensor-light.c
+@@ -274,7 +274,10 @@ ssc_sensor_light_new (GCancellable *cancellable, GAsyncReadyCallback callback, g
+ 			cancellable,
+ 			callback,
+ 			user_data,
+-			SSC_SENSOR_DATA_TYPE, "ambient_light",
++			/* The plain light sensor, else Microsoft's fused light of the
++			 * Surface Duo 2's two panels (what its own adaptive brightness
++			 * uses), else an on-change light sensor (the Duo 2's PA22A) */
++			SSC_SENSOR_DATA_TYPE, "ambient_light,lightfusion,ambient_light_oc",
+ 			NULL);
+ }
+ 
+diff --git a/src/libssc-sensor.c b/src/libssc-sensor.c
+index 2cf686f..3bc81e5 100644
+--- a/src/libssc-sensor.c
++++ b/src/libssc-sensor.c
+@@ -51,6 +51,10 @@ typedef struct _SSCSensorPrivate {
+ 	gchar *name;
+ 	gchar *vendor;
+ 	gchar *data_type;
++	/* The data types the sensor may go by, in order ("a,b,c"): the next one
++	 * is discovered when there is no sensor of the current one. */
++	gchar **data_types;
++	guint data_type_index;
+ 	guint stream_type;
+ 	gboolean available;
+ 	gfloat sample_rate;
+@@ -345,6 +349,16 @@ report_received (SSCClient *self, guint32 msg_id, guint64 uid_high, guint64 uid_
+ 			/* Sensor discovered, populate attributes */
+ 			attribute (ctx->sensor, ctx->task);
+ 
++			return;
++		/* None of this data type, but the sensor may go by another one */
++		} else if (priv->data_types && priv->data_types[priv->data_type_index + 1]) {
++			g_debug ("No '%s' sensor available, trying '%s'", priv->data_type,
++				 priv->data_types[priv->data_type_index + 1]);
++			ssc_suid_response__free_unpacked (suid_msg, NULL);
++			priv->data_type_index++;
++			g_free (priv->data_type);
++			priv->data_type = g_strdup (priv->data_types[priv->data_type_index]);
++			discover (ctx->sensor, ctx->task);
+ 			return;
+ 		/* No sensor available for specified data type, complete task */
+ 		} else {
+@@ -726,7 +740,10 @@ sensor_set_property (GObject *object, guint prop_id, const GValue *value, GParam
+ 			break;
+ 		case PROP_DATA_TYPE:
+ 			g_free (priv->data_type);
+-			priv->data_type = g_value_dup_string (value);
++			g_strfreev (priv->data_types);
++			priv->data_types = g_strsplit (g_value_get_string (value), ",", -1);
++			priv->data_type_index = 0;
++			priv->data_type = g_strdup (priv->data_types[0]);
+ 			break;
+ 		case PROP_CLIENT:
+ 			priv->client = g_value_dup_object (value);
+@@ -795,6 +812,8 @@ sensor_dispose (GObject *object)
+ 	if (priv->data_type)
+ 		g_free (priv->data_type);
+ 
++	g_strfreev (priv->data_types);
++
+ 	g_clear_object (&priv->client);
+ }
+ 

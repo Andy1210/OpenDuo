@@ -1,0 +1,11 @@
+[Unit]
+Description=Android apps (Waydroid session, started on demand)
+# D-Bus activated (id.waydro.Session): /usr/share/dbus-1/services/id.waydro.Session.service
+Wants=duo2-waydroid-idle.service duo2-android-location.service
+ConditionPathExists=/run/duo-wc/session.env
+
+[Service]
+Type=dbus
+BusName=id.waydro.Session
+ExecStart=/usr/local/lib/duo2-waydroid/duo2-waydroid-session
+TimeoutStopSec=30

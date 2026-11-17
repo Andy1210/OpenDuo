@@ -1,0 +1,92 @@
+From c5d317d8f9952b852ab5c0fd4475b90cd3606508 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 08:46:31 +0100
+Subject: [PATCH 5/8] drm/msm: Add a stall_on_fault module parameter
+
+Stall-on-fault keeps a faulting GPU transaction stalled in the SMMU
+until the fault handler has taken a devcoredump, which needs
+gpu->lock. Everything else behind that SMMU, the GMU's own memory
+traffic included, waits meanwhile; on a 7.3 kernel this is the
+recovery deadlock fixed in the previous patches, and on a board under
+bring-up a hang is far more expensive than a lost fault dump.
+
+msm.stall_on_fault=0 never enables stall-on-fault: a fault is
+reported and the access terminated (HUPCF), the GPU goes on, and a
+hang still gets its devcoredump from the hangcheck recovery. The
+default (1) keeps today's behaviour.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/msm/adreno/adreno_gpu.c | 3 +++
+ drivers/gpu/drm/msm/msm_drv.c           | 6 +++++-
+ drivers/gpu/drm/msm/msm_drv.h           | 2 ++
+ drivers/gpu/drm/msm/msm_iommu.c         | 2 +-
+ 4 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/msm/adreno/adreno_gpu.c b/drivers/gpu/drm/msm/adreno/adreno_gpu.c
+index 8f04295fc..5413abd68 100644
+--- a/drivers/gpu/drm/msm/adreno/adreno_gpu.c
++++ b/drivers/gpu/drm/msm/adreno/adreno_gpu.c
+@@ -258,6 +258,9 @@ void adreno_check_and_reenable_stall(struct adreno_gpu *adreno_gpu)
+ 	struct msm_drm_private *priv = gpu->dev->dev_private;
+ 	unsigned long flags;
+ 
++	if (!msm_stall_on_fault)
++		return;
++
+ 	/*
+ 	 * Wait until the cooldown period has passed and we would actually
+ 	 * collect a crashdump to re-enable stall-on-fault.
+diff --git a/drivers/gpu/drm/msm/msm_drv.c b/drivers/gpu/drm/msm/msm_drv.c
+index f3d2eaa04..4685111d8 100644
+--- a/drivers/gpu/drm/msm/msm_drv.c
++++ b/drivers/gpu/drm/msm/msm_drv.c
+@@ -54,6 +54,10 @@ static bool modeset = true;
+ MODULE_PARM_DESC(modeset, "Use kernel modesetting [KMS] (1=on (default), 0=disable)");
+ module_param(modeset, bool, 0600);
+ 
++bool msm_stall_on_fault = true;
++MODULE_PARM_DESC(stall_on_fault, "Stall the GPU SMMU on a page fault to take a devcoredump (1=on (default), 0=terminate the faulting access and go on)");
++module_param_named(stall_on_fault, msm_stall_on_fault, bool, 0400);
++
+ static bool separate_gpu_kms;
+ MODULE_PARM_DESC(separate_gpu_kms, "Use separate DRM device for the GPU (0=single DRM device for both GPU and display (default), 1=two DRM devices)");
+ module_param(separate_gpu_kms, bool, 0400);
+@@ -134,7 +138,7 @@ static int msm_drm_init(struct device *dev, const struct drm_driver *drv,
+ 
+ 	/* Initialize stall-on-fault */
+ 	spin_lock_init(&priv->fault_stall_lock);
+-	priv->stall_enabled = true;
++	priv->stall_enabled = msm_stall_on_fault;
+ 
+ 	/* Teach lockdep about lock ordering wrt. shrinker: */
+ 	fs_reclaim_acquire(GFP_KERNEL);
+diff --git a/drivers/gpu/drm/msm/msm_drv.h b/drivers/gpu/drm/msm/msm_drv.h
+index eb4bbae85..c9a19be38 100644
+--- a/drivers/gpu/drm/msm/msm_drv.h
++++ b/drivers/gpu/drm/msm/msm_drv.h
+@@ -37,6 +37,8 @@
+ extern struct fault_attr fail_gem_alloc;
+ extern struct fault_attr fail_gem_iova;
+ 
++extern bool msm_stall_on_fault;
++
+ struct drm_fb_helper;
+ struct drm_fb_helper_surface_size;
+ 
+diff --git a/drivers/gpu/drm/msm/msm_iommu.c b/drivers/gpu/drm/msm/msm_iommu.c
+index da6782fca..e674244fc 100644
+--- a/drivers/gpu/drm/msm/msm_iommu.c
++++ b/drivers/gpu/drm/msm/msm_iommu.c
+@@ -818,7 +818,7 @@ struct msm_mmu *msm_iommu_gpu_new(struct device *dev, struct msm_gpu *gpu, unsig
+ 	iommu_set_fault_handler(iommu->domain, msm_gpu_fault_handler, iommu);
+ 
+ 	/* Enable stall on iommu fault: */
+-	if (adreno_smmu->set_stall)
++	if (adreno_smmu->set_stall && msm_stall_on_fault)
+ 		adreno_smmu->set_stall(adreno_smmu->cookie, true);
+ 
+ 	return mmu;
+-- 
+2.43.0
+

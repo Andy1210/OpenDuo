@@ -1,0 +1,58 @@
+# Apps that work well on the Surface Duo 2 (duo2-os): GNOME Software shows
+# them as "Works well on the Duo" on its Explore page (gen-featured.py ->
+# works-on-duo.xml, deployment-featured.ini).
+#
+# id <TAB> status <TAB> note
+#   status: tried     = tried on the phone (duo-wc, scale 2.5, one panel)
+#           declared  = its AppStream data declares touch input and a small
+#                       screen (touch-apps.py on Debian trixie's DEP-11 and on
+#                       Flathub's aarch64 catalogue), not tried here yet
+#   note:   "one panel" fits a 538 x 757 panel; "span" wants both panels.
+# Keep it short: an app goes in when it is good on a phone, not just usable.
+
+# Preinstalled (shell/duo-apps)
+org.gnome.clocks	tried	one panel; alarms ring while Clocks runs (session-start)
+org.gnome.Calculator	tried	one panel; no on-screen keyboard over its keypad
+org.gnome.Calendar	tried	one panel
+org.gnome.Weather	tried	one panel
+org.gnome.Nautilus	tried	one panel (Files)
+org.gnome.Loupe	tried	one panel (Image Viewer)
+org.gnome.Papers	tried	one panel (Document Viewer)
+io.bassi.Amberol	tried	one panel (music)
+io.github.celluloid_player.Celluloid	tried	one panel (video; mpv plays 1080p smoothly here)
+org.gnome.TextEditor	tried	one panel
+firefox-esr.desktop	tried	one panel, native Wayland, touch (Debian's Firefox ESR)
+org.mozilla.firefox	tried	one panel (Flathub's Firefox)
+chromium.desktop	tried	one panel, native Wayland, touch (Debian's Chromium)
+org.chromium.Chromium	tried	one panel (Flathub's Chromium)
+dev.tchx84.Portfolio	tried	one panel (a phone-first file manager)
+
+# Declared touch + small screen, good candidates
+org.gnome.Maps	declared	one panel
+org.gnome.Contacts	declared	one panel
+org.gnome.Podcasts	declared	one panel
+org.gnome.Characters	declared	one panel
+org.gnome.Console	declared	one panel
+org.gnome.Epiphany	declared	one panel (GNOME Web)
+org.gnome.Music	declared	one panel
+org.gnome.Sudoku	declared	one panel
+org.gnome.Chess	declared	span is roomier
+org.gnome.Mahjongg	declared	span is roomier
+org.gnome.World.Secrets	declared	one panel (passwords)
+org.gnome.World.Iotas	declared	one panel (notes)
+com.belmoussaoui.Authenticator	declared	one panel (2FA codes)
+de.haeckerfelix.Shortwave	declared	one panel (internet radio)
+de.haeckerfelix.Fragments	declared	one panel (BitTorrent)
+app.drey.Dialect	declared	one panel (translator)
+app.drey.Warp	declared	one panel (file transfer)
+io.github.mrvladus.List	declared	one panel (Errands, to-do)
+dev.geopjr.Tuba	declared	one panel (Mastodon)
+im.dino.Dino	declared	one panel (XMPP chat)
+info.febvre.Komikku	declared	one panel (comics)
+com.adrienplazas.Metronome	declared	one panel
+com.github.hugolabe.Wike	declared	one panel (Wikipedia)
+com.rafaelmardojai.Blanket	declared	one panel (ambient sounds)
+com.github.neithern.g4music	declared	one panel (Gapless, music)
+de.schmidhuberj.DieBahn	declared	one panel (train journeys)
+org.kde.kasts	declared	one panel (podcasts)
+org.kde.angelfish	declared	one panel (KDE's mobile browser)

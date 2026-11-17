@@ -1,0 +1,617 @@
+#!/usr/bin/python3 -I
+"""duo-devmode: Developer mode (Settings > Developer, devmode/README.md), as root.
+
+    duo-devmode status               one JSON line: the switches, the keys,
+                                     the addresses to connect to
+    duo-devmode mode on|off          the main switch; off turns ssh and USB
+                                     networking off too
+    duo-devmode ssh on|off           sshd (key login only; the firewall lets
+                                     it in on the WiFi and USB networks only)
+    duo-devmode usb on|off           USB networking (usb0, 10.15.19.1/24)
+    duo-devmode key add              the public key(s) on stdin may log in as
+                                     the administrator (ADMIN)
+    duo-devmode key remove SHA256:.. that key may not any more
+    duo-devmode touchlog on|off      duo2-touchd's contact log (every touch's
+                                     position in the journal): Developer mode
+                                     only, off again with it and after a reboot
+    duo-devmode devtools sync        install the developer tools (devtools.list)
+                                     while Developer mode is on, remove them
+                                     while it is off (also at every boot)
+    duo-devmode bugreport [--out DIR]
+                                     the logs and state, identifiers masked,
+                                     as openduo-bugreport-*.tar.gz in DIR (the
+                                     caller's ~/Downloads), written as the caller
+
+Duo Settings runs it as `sudo -n duo-devmode ...` (install-files.sh puts a
+sudoers rule for exactly this file in /etc/sudoers.d/duo-devmode): any app of
+the GUI user can run it too. So what opens the phone (ssh on, a key added)
+and what reads the system's logs (a bug report) or writes the touches'
+positions into them (the touch log) happens only on the user's
+yes to the shell's question (duo-wc's `confirm`, which no app can answer);
+switching off and removing a key need no question. Run by root itself or by
+the administrator (sudo over ssh), it asks nothing.
+
+Every argument is checked against a fixed list or pattern; a key comes on
+stdin, never as a path for root to open. The answer is one JSON line
+({"ok": true, ...} or {"ok": false, "error": ...}); exit 0 on success, 1 on
+a failure, 2 on a usage error, 4 when the user said no.
+"""
+
+import json
+import os
+import pwd
+import socket
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+for _p in ("/usr/local/lib/duo-devmode", HERE):
+    if os.path.isdir(os.path.join(_p, "duodevmode")):
+        sys.path.insert(0, _p)
+        break
+
+from duodevmode import bugreport, conf, devtools, keys, redact  # noqa: E402
+
+CONF = "/etc/duo-devmode.conf"
+ADMIN = "duo2admin"  # the image's administrator: ssh key login, sudo, no GUI session
+SSH_UNITS = ("ssh.service",)
+SSH_SOCKET = "ssh.socket"
+USB_GADGET = "/usr/local/sbin/duo2-usb-gadget"  # the device's USB gadget (rootfs/overlay)
+NET_IFACES = ("wlan0", "usb0")
+WC_ADMIN = "/run/duo-wc/admin.sock"
+CONFIRM_TIMEOUT = 30.0  # s: duo-wc keeps a helper question open for 20 s
+# duo2-touchd's contact log (touch/devgate.h): its switch, on a tmpfs (off
+# after a reboot), and the daemon's control FIFO.
+RUN_DIR = "/run/duo-devmode"
+TOUCH_LOG = RUN_DIR + "/touch-log"
+TOUCHD_CTL = "/run/duo2-touchd.ctl"
+PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
+
+EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_NO = 0, 1, 2, 4
+
+
+class System:
+    """What the commands do to the phone (tests stand in for it)."""
+
+    conf_path = CONF
+
+    def run(self, argv, input=None, timeout=60):
+        try:
+            p = subprocess.run(
+                argv,
+                input=input,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env={"PATH": PATH, "LANG": "C.UTF-8"},
+            )
+            return p.returncode, p.stdout, p.stderr
+        except (OSError, subprocess.SubprocessError) as e:
+            return -1, "", str(e)
+
+    def read(self, path):
+        try:
+            with open(path) as f:
+                return f.read()
+        except OSError:
+            return None
+
+    def write_root_file(self, path, text, mode=0o644):
+        """Atomically, root's, never through a link."""
+        d, base = os.path.split(path)
+        tmp = os.path.join(d, ".%s.%d.tmp" % (base, os.getpid()))
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode)
+        try:
+            os.write(fd, text.encode())
+            os.fchmod(fd, mode)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+
+    def admin(self):
+        return pwd.getpwnam(ADMIN)
+
+    def read_keys(self):
+        """The administrator's authorized_keys ('' when there is none)."""
+        try:
+            pw = self.admin()
+        except KeyError:
+            return ""
+        try:
+            dfd = os.open(
+                os.path.join(pw.pw_dir, ".ssh"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            )
+        except OSError:
+            return ""
+        try:
+            fd = os.open("authorized_keys", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dfd)
+            with os.fdopen(fd) as f:
+                return f.read(1 << 20)
+        except OSError:
+            return ""
+        finally:
+            os.close(dfd)
+
+    def write_keys(self, text):
+        """The administrator's ~/.ssh/authorized_keys, theirs, 0600; ~/.ssh
+        made (0700) if missing; nothing followed through a link."""
+        pw = self.admin()
+        home = os.open(pw.pw_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            try:
+                os.mkdir(".ssh", 0o700, dir_fd=home)
+                os.chown(".ssh", pw.pw_uid, pw.pw_gid, dir_fd=home, follow_symlinks=False)
+            except FileExistsError:
+                pass
+            dfd = os.open(".ssh", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=home)
+        finally:
+            os.close(home)
+        tmp = ".authorized_keys.%d.tmp" % os.getpid()
+        try:
+            fd = os.open(
+                tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dfd
+            )
+            try:
+                os.write(fd, text.encode())
+                os.fchown(fd, pw.pw_uid, pw.pw_gid)
+                os.fchmod(fd, 0o600)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(tmp, "authorized_keys", src_dir_fd=dfd, dst_dir_fd=dfd)
+        finally:
+            os.close(dfd)
+
+    def confirm(self, detail):
+        """The user's yes in the shell (duo-wc's confirm); False otherwise."""
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.settimeout(CONFIRM_TIMEOUT)
+                s.connect(WC_ADMIN)
+                req = {
+                    "id": 1,
+                    "request": "confirm",
+                    "action": "helper",
+                    "detail": detail,
+                    "wait": True,
+                }
+                s.sendall((json.dumps(req) + "\n").encode())
+                buf = b""
+                while b"\n" not in buf and len(buf) < 65536:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    buf += chunk
+            reply = json.loads(buf.split(b"\n")[0] or b"{}")
+        except (OSError, ValueError):
+            return False
+        return isinstance(reply, dict) and (reply.get("ok") or {}).get("yes") is True
+
+    def touch_log(self):
+        """The contact log's switch is on (root's regular file, not a link)."""
+        try:
+            st = os.lstat(TOUCH_LOG)
+        except OSError:
+            return False
+        return st.st_uid == 0 and (st.st_mode & 0o170000) == 0o100000
+
+    def set_touch_log(self, on):
+        """Make or remove the switch, then tell duo2-touchd (it checks the
+        switch itself too: a line here only spares it the wait)."""
+        if on:
+            os.makedirs(RUN_DIR, mode=0o755, exist_ok=True)
+            fd = os.open(TOUCH_LOG, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
+            os.close(fd)
+        else:
+            try:
+                os.unlink(TOUCH_LOG)
+            except FileNotFoundError:
+                pass
+        try:
+            fd = os.open(TOUCHD_CTL, os.O_WRONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError:
+            return  # duo2-touchd does not run: it reads the switch when it starts
+        try:
+            st = os.fstat(fd)
+            if (st.st_mode & 0o170000) == 0o010000 and st.st_uid == 0:  # root's FIFO
+                os.write(fd, b"log on\n" if on else b"log off\n")
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+
+    def devtools_sync(self, on):
+        return devtools.sync(on)
+
+    def devtools_state(self):
+        return devtools.state()
+
+    def caller(self):
+        """(uid, gid) of who ran this (sudo's SUDO_UID / SUDO_GID, else root)."""
+        uid, gid = os.environ.get("SUDO_UID", ""), os.environ.get("SUDO_GID", "")
+        if uid.isascii() and uid.isdigit() and gid.isascii() and gid.isdigit():
+            return int(uid), int(gid)
+        return os.getuid(), os.getgid()
+
+
+class DevMode:
+    def __init__(self, system):
+        self.sys = system
+
+    # --- state ------------------------------------------------------------
+
+    def settings(self):
+        return conf.parse(self.sys.read(self.sys.conf_path))
+
+    def save(self, settings):
+        self.sys.write_root_file(self.sys.conf_path, conf.render(settings))
+
+    def ssh_enabled(self):
+        """sshd starts at boot (its service, or its socket when that is used)."""
+        for unit in SSH_UNITS + (SSH_SOCKET,):
+            _rc, out, _e = self.sys.run(["systemctl", "is-enabled", unit])
+            if out.strip() in ("enabled", "enabled-runtime"):
+                return True
+        return False
+
+    def ssh_active(self):
+        rc, _o, _e = self.sys.run(["systemctl", "is-active", "--quiet", SSH_UNITS[0]])
+        return rc == 0
+
+    def addresses(self):
+        rc, out, _e = self.sys.run(["ip", "-j", "addr", "show"])
+        try:
+            links = json.loads(out) if rc == 0 else []
+        except ValueError:
+            links = []
+        return addresses_of(links)
+
+    def needs_confirm(self):
+        uid, _gid = self.sys.caller()
+        if uid == 0:
+            return False
+        try:
+            return uid != self.sys.admin().pw_uid
+        except KeyError:
+            return True
+
+    def ask(self, detail):
+        return not self.needs_confirm() or self.sys.confirm(detail)
+
+    def status(self):
+        s = conf.effective(self.settings())
+        listed = keys.listed(self.sys.read_keys())
+        return {
+            "ok": True,
+            "developer_mode": s["developer_mode"],
+            "ssh": self.ssh_enabled(),
+            "ssh_active": self.ssh_active(),
+            "usb_network": s["usb_network"],
+            "account": ADMIN,
+            "keys": [k.as_dict() for k in listed],
+            "addresses": self.addresses(),
+            "touch_log": bool(s["developer_mode"] and self.sys.touch_log()),
+            "devtools": self.sys.devtools_state(),
+            "asks": self.needs_confirm(),
+        }
+
+    # --- switches ---------------------------------------------------------
+
+    def ssh_off(self):
+        rc = 0
+        for unit in SSH_UNITS + (SSH_SOCKET,):
+            r, _o, _e = self.sys.run(["systemctl", "disable", "--now", unit])
+            if unit in SSH_UNITS:
+                rc = rc or r
+        return rc == 0
+
+    def usb_apply(self):
+        rc, _o, err = self.sys.run([USB_GADGET, "apply"])
+        if rc == 3:
+            return "USB tethering is on: USB networking changes when it is off"
+        if rc != 0:
+            return "the USB gadget did not change: %s" % (err.strip()[:200] or "exit %d" % rc)
+        return None
+
+    def mode(self, on):
+        s = self.settings()
+        if on:
+            s["developer_mode"] = True
+            self.save(s)
+            err = self.sync_devtools(True)
+            return {"ok": False, "error": err} if err else {"ok": True}
+        s["developer_mode"] = False
+        s["usb_network"] = False
+        self.save(s)
+        problems = []
+        if not self.ssh_off():
+            problems.append("ssh did not stop")
+        err = self.usb_apply()
+        if err:
+            problems.append(err)
+        try:
+            self.sys.set_touch_log(False)
+        except OSError as e:
+            problems.append("the touch log's switch stayed: %s" % e)
+        err = self.sync_devtools(False)
+        if err:
+            problems.append(err)
+        return {"ok": not problems, "error": "; ".join(problems)} if problems else {"ok": True}
+
+    def sync_devtools(self, on):
+        """The developer tools follow the switch; an error text or None."""
+        try:
+            self.sys.devtools_sync(on)
+        except OSError as e:
+            return "the developer tools did not %s: %s" % ("install" if on else "go", e)
+        return None
+
+    def devtools(self):
+        on = conf.effective(self.settings())["developer_mode"]
+        try:
+            done = self.sys.devtools_sync(on)
+        except OSError as e:
+            return {"ok": False, "error": "the developer tools did not change: %s" % e}
+        return {"ok": True, "developer_mode": on, **done}
+
+    def touchlog(self, on):
+        if not on:
+            try:
+                self.sys.set_touch_log(False)
+            except OSError as e:
+                return {"ok": False, "error": "not switched off: %s" % e}
+            return {"ok": True}
+        if not conf.effective(self.settings())["developer_mode"]:
+            return {"ok": False, "error": "developer mode is off"}
+        if not self.ask(
+            "Log every touch position? The system log then shows where the screens were "
+            "touched, which can reveal what you type, the lock screen's PIN too. It goes off "
+            "again with Developer mode and when the phone restarts."
+        ):
+            return {"ok": False, "error": "not confirmed", "exit": EXIT_NO}
+        try:
+            self.sys.set_touch_log(True)
+        except OSError as e:
+            return {"ok": False, "error": "not switched on: %s" % e}
+        return {"ok": True}
+
+    def ssh(self, on):
+        if not on:
+            return {"ok": True} if self.ssh_off() else {"ok": False, "error": "ssh did not stop"}
+        if not conf.effective(self.settings())["developer_mode"]:
+            return {"ok": False, "error": "developer mode is off"}
+        if not self.ask(
+            "Turn on SSH? Anyone with one of the authorized keys can then log in to this "
+            "phone as %s (the administrator, with sudo) over WiFi or USB." % ADMIN
+        ):
+            return {"ok": False, "error": "not confirmed", "exit": EXIT_NO}
+        rc, _o, err = self.sys.run(["systemctl", "enable", "--now", SSH_UNITS[0]])
+        if rc != 0:
+            return {"ok": False, "error": "ssh did not start: %s" % err.strip()[:200]}
+        return {"ok": True}
+
+    def usb(self, on):
+        s = self.settings()
+        if on and not s["developer_mode"]:
+            return {"ok": False, "error": "developer mode is off"}
+        before = dict(s)
+        s["usb_network"] = on
+        self.save(s)
+        err = self.usb_apply()
+        if err:
+            self.save(before)
+            return {"ok": False, "error": err}
+        return {"ok": True}
+
+    # --- keys -------------------------------------------------------------
+
+    def key_add(self, text):
+        new, problems = keys.parse_input(text)
+        if problems:
+            return {"ok": False, "error": "; ".join(problems)}
+        current = self.sys.read_keys()
+        try:
+            _text, added = keys.with_added(current, new)
+        except keys.BadKey as e:
+            return {"ok": False, "error": str(e)}
+        if not added:
+            return {"ok": True, "added": []}
+        names = "; ".join(
+            "%s %s%s" % (k.kind, k.fingerprint, (" (%s)" % k.comment) if k.comment else "")
+            for k in added
+        )
+        if not self.ask(
+            "Let this SSH key log in to this phone as %s (the administrator, with sudo)? %s"
+            % (ADMIN, names)
+        ):
+            return {"ok": False, "error": "not confirmed", "exit": EXIT_NO}
+        # read again: the file may have changed while the question was open
+        try:
+            text2, added = keys.with_added(self.sys.read_keys(), new)
+            self.sys.write_keys(text2)
+        except keys.BadKey as e:
+            return {"ok": False, "error": str(e)}
+        except (OSError, KeyError) as e:
+            return {"ok": False, "error": "the key was not saved: %s" % e}
+        return {"ok": True, "added": [k.as_dict() for k in added]}
+
+    def key_remove(self, fp):
+        text, gone = keys.without(self.sys.read_keys(), fp)
+        if not gone:
+            return {"ok": False, "error": "no such key"}
+        try:
+            self.sys.write_keys(text)
+        except (OSError, KeyError) as e:
+            return {"ok": False, "error": "not saved: %s" % e}
+        return {"ok": True, "removed": gone}
+
+    # --- bug report -------------------------------------------------------
+
+    def bugreport(self, out_dir=None):
+        if not self.ask(
+            "Collect a bug report? The system's logs of this and the last start, with "
+            "identifiers masked, are saved in Downloads, where apps can read them."
+        ):
+            return {"ok": False, "error": "not confirmed", "exit": EXIT_NO}
+        r = redact.Redactor(literals=phone_literals())
+        texts = bugreport.collect(r)
+        name = bugreport.archive_name()
+        data = bugreport.pack(texts, name[: -len(".tar.gz")])
+        uid, gid = self.sys.caller()
+        try:
+            path = write_as(uid, gid, out_dir, name, data)
+        except OSError as e:
+            return {"ok": False, "error": "not written: %s" % e}
+        return {"ok": True, "path": path, "masked": r.counts}
+
+
+# --- pure helpers -------------------------------------------------------------
+
+
+def addresses_of(links, ifaces=NET_IFACES):
+    """`ip -j addr` -> [{"iface", "address"}] to connect to: IPv4 and global
+    IPv6 first, then link-local IPv6 (with %iface)."""
+    first, last = [], []
+    for link in links or []:
+        name = link.get("ifname")
+        if name not in ifaces:
+            continue
+        for a in link.get("addr_info", []):
+            addr, fam, scope = a.get("local"), a.get("family"), a.get("scope")
+            if not addr or a.get("tentative") or a.get("deprecated"):
+                continue
+            if fam == "inet":
+                first.append({"iface": name, "address": addr})
+            elif fam == "inet6" and scope == "global" and not a.get("temporary"):
+                first.append({"iface": name, "address": addr})
+            elif fam == "inet6" and scope == "link":
+                last.append({"iface": name, "address": "%s%%%s" % (addr, name)})
+    return first + last
+
+
+def phone_literals():
+    """Names on this phone that a log may carry: users and their real names,
+    the host name, known WiFi networks, Bluetooth devices, serial numbers."""
+    out = set()
+    for pw in pwd.getpwall():
+        if pw.pw_uid >= 1000 and pw.pw_uid < 60000:
+            out.add(pw.pw_name)
+            out.update(x.strip() for x in pw.pw_gecos.split(",")[:1])
+    out.add(socket.gethostname())
+    out.update(ssids_in_files(["/etc/wpa_supplicant"], "ssid"))
+    out.update(ssids_in_files(["/var/lib/duo2/hotspot"], "SSID"))
+    for root, _dirs, files in os.walk("/var/lib/bluetooth"):
+        for f in files:
+            if f in ("info", "settings"):
+                out.update(values_in(os.path.join(root, f), ("Name", "Alias")))
+    for path in (
+        "/sys/class/dmi/id/product_serial",
+        "/sys/class/dmi/id/board_serial",
+        "/sys/devices/soc0/serial_number",
+        "/etc/machine-id",
+    ):
+        try:
+            with open(path) as f:
+                out.add(f.read(200).strip())
+        except OSError:
+            pass
+    return sorted(x for x in out if x)
+
+
+def values_in(path, names):
+    out = []
+    try:
+        with open(path, errors="replace") as f:
+            for line in f:
+                key, sep, value = line.partition("=")
+                if sep and key.strip() in names:
+                    out.append(value.strip())
+    except OSError:
+        pass
+    return out
+
+
+def ssids_in_files(dirs, key):
+    out = []
+    for d in dirs:
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for n in names:
+            for v in values_in(os.path.join(d, n), (key,)):
+                out.append(v.strip('"'))
+    return out
+
+
+def write_as(uid, gid, out_dir, name, data):
+    """Write data as the user uid (a child process that has dropped root):
+    out_dir, or that user's ~/Downloads (made if missing). -> the path."""
+    if uid == 0 and not out_dir:
+        out_dir = "/root"
+    r, w = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(r)
+        try:
+            home = pwd.getpwuid(uid).pw_dir
+            if uid != os.getuid():
+                os.setgroups([])
+                os.setresgid(gid, gid, gid)
+                os.setresuid(uid, uid, uid)
+            d = out_dir or os.path.join(home, "Downloads")
+            os.makedirs(d, mode=0o755, exist_ok=True)
+            path = os.path.join(d, name)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            os.write(w, path.encode())
+            os._exit(0)
+        except BaseException as e:  # noqa: BLE001 - the child's one answer
+            os.write(w, ("!" + str(e)).encode())
+            os._exit(1)
+    os.close(w)
+    with os.fdopen(r, "rb") as f:
+        answer = f.read().decode("utf-8", "replace")
+    _pid, status = os.waitpid(pid, 0)
+    if status != 0 or answer.startswith("!"):
+        raise OSError(answer[1:] or "the writer failed")
+    return answer
+
+
+def usage():
+    sys.stderr.write(__doc__.strip() + "\n")
+    return EXIT_USAGE
+
+
+def main(argv, system=None, stdin=None):
+    dm = DevMode(system or System())
+    n = len(argv)
+    if n == 1 and argv[0] == "status":
+        result = dm.status()
+    elif n == 2 and argv[0] in ("mode", "ssh", "usb", "touchlog") and argv[1] in ("on", "off"):
+        result = getattr(dm, argv[0])(argv[1] == "on")
+    elif argv == ["devtools", "sync"]:
+        result = dm.devtools()
+    elif n == 2 and argv == ["key", "add"]:
+        stdin = stdin if stdin is not None else sys.stdin
+        result = dm.key_add(stdin.read(keys.MAX_INPUT + 1))
+    elif n == 3 and argv[:2] == ["key", "remove"] and keys.is_fingerprint(argv[2]):
+        result = dm.key_remove(argv[2])
+    elif argv[:1] == ["bugreport"] and n in (1, 3) and (n == 1 or argv[1] == "--out"):
+        out_dir = os.path.abspath(argv[2]) if n == 3 else None
+        result = dm.bugreport(out_dir)
+    else:
+        return usage()
+    code = result.pop("exit", EXIT_OK if result.get("ok") else EXIT_FAIL)
+    print(json.dumps(result))
+    return code
+
+
+if __name__ == "__main__":
+    if os.geteuid() != 0:
+        sys.stderr.write("duo-devmode: run as root (sudo)\n")
+        sys.exit(EXIT_USAGE)
+    os.environ["PATH"] = PATH
+    sys.exit(main(sys.argv[1:]))

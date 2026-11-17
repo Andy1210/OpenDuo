@@ -1,0 +1,16 @@
+# The USB development network over the USB-C cable (CDC-NCM gadget, while
+# Settings > Developer has USB networking on): the phone is 10.15.19.1 and
+# hands the computer an address, so `ssh duo2admin@10.15.19.1` works.
+[Match]
+Name=usb0
+
+[Network]
+Address=10.15.19.1/24
+DHCPServer=yes
+ConfigureWithoutCarrier=yes
+
+[DHCPServer]
+PoolOffset=10
+PoolSize=10
+EmitDNS=no
+EmitRouter=no

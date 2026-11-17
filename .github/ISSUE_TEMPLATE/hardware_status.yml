@@ -1,0 +1,77 @@
+name: Hardware status report
+description: You tested a part of the phone; tell us what works on yours.
+labels: ["hardware-status"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The hardware table in the README says only what was tested on a real
+        phone. Your report helps it say more. Please do not post identifiers,
+        phone numbers, network or operator names, or your location.
+  - type: dropdown
+    id: part
+    attributes:
+      label: Part
+      options:
+        - Displays
+        - Touch
+        - Pen
+        - Hinge and postures
+        - Rotation
+        - Other sensors (light, proximity, magnetometers...)
+        - GPU
+        - Hardware video decoding
+        - WiFi
+        - Bluetooth
+        - Mobile data
+        - Calls
+        - VoLTE
+        - SMS / MMS
+        - eSIM
+        - GNSS (GPS)
+        - Speakers, earpiece, microphones
+        - Cameras
+        - Flashlight
+        - Vibration
+        - Charging, battery, charge limit
+        - Sleep and standby
+        - USB (device mode, host mode)
+        - External display
+        - Hotspot / USB tethering
+        - Fingerprint
+        - NFC
+        - Something else
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options:
+        - Works
+        - Partly works (describe below)
+        - Does not work
+    validations:
+      required: true
+  - type: input
+    id: build
+    attributes:
+      label: OpenDuo version and build, kernel release
+      description: Settings > About, or `cat /etc/duo2-release` and `uname -r`.
+    validations:
+      required: true
+  - type: textarea
+    id: how
+    attributes:
+      label: What you tested, and how
+      description: |
+        The exact steps and what you saw. Name the accessory if one was involved
+        (pen model, headset, monitor, adapter). For calls and data: the network
+        type (2G, LTE, 5G), not the operator.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or bug report
+      description: Settings > Developer > Collect a bug report (identifiers masked; look through it first), or relevant log lines.

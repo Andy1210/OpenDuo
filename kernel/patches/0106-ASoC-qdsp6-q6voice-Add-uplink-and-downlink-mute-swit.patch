@@ -1,0 +1,241 @@
+From e9f11c36bcde538fd1dbf86637511fb0729a6323 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 19:31:56 +0100
+Subject: [PATCH 106/137] ASoC: qdsp6: q6voice: Add uplink and downlink mute
+ switches
+
+Muting a call has to happen in the DSP: the uplink goes from the AFE
+port straight into the vocproc, so muting the PCM capture stream a sound
+server opens does nothing to what the other party hears. Send
+VSS_IVOLUME_CMD_MUTE_V2 (a device mute, 20 ms ramp) to the CVP session
+and expose it per front end as "<FE> Capture Switch" (uplink) and
+"<FE> Playback Switch" (downlink), so that a UCM CaptureMixerElem can
+point a sound server's source mute at it. The state is kept while the
+path is down and applied when it starts.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ sound/soc/qcom/qdsp6/q6cvp.c       | 34 +++++++++++++++++++
+ sound/soc/qcom/qdsp6/q6cvp.h       |  1 +
+ sound/soc/qcom/qdsp6/q6voice-dai.c | 48 +++++++++++++++++++++++++++
+ sound/soc/qcom/qdsp6/q6voice.c     | 52 ++++++++++++++++++++++++++++++
+ sound/soc/qcom/qdsp6/q6voice.h     |  5 +++
+ 5 files changed, 140 insertions(+)
+
+diff --git a/sound/soc/qcom/qdsp6/q6cvp.c b/sound/soc/qcom/qdsp6/q6cvp.c
+index 3a3a81ea7222..ccc6f6aad367 100644
+--- a/sound/soc/qcom/qdsp6/q6cvp.c
++++ b/sound/soc/qcom/qdsp6/q6cvp.c
+@@ -48,6 +48,17 @@
+ 
+ #define VSS_NUM_CHANNELS_MAX 8
+ 
++#define VSS_IVOLUME_CMD_MUTE_V2				0x0001138B
++#define VSS_IVOLUME_DIRECTION_TX			0
++#define VSS_IVOLUME_DIRECTION_RX			1
++
++struct vss_ivolume_cmd_mute_v2_cmd {
++	struct apr_hdr hdr;
++	u16 direction;
++	u16 mute_flag;
++	u16 ramp_duration_ms;
++} __packed;
++
+ struct vss_ivocproc_cmd_create_full_control_session_v2_cmd {
+ 	struct apr_hdr hdr;
+ 
+@@ -313,6 +324,29 @@ int q6cvp_topology_commit(struct q6voice_session *cvp)
+ }
+ EXPORT_SYMBOL_GPL(q6cvp_topology_commit);
+ 
++/**
++ * q6cvp_set_mute() - mute or unmute one side of a vocproc
++ * @cvp: CVP session
++ * @is_tx: the TX (microphone) side, else the RX side
++ * @mute: mute it
++ *
++ * A device mute: the uplink sent to the network (TX) or the downlink played
++ * to the device (RX) is silenced in the vocproc, with a short ramp.
++ */
++int q6cvp_set_mute(struct q6voice_session *cvp, bool is_tx, bool mute)
++{
++	struct vss_ivolume_cmd_mute_v2_cmd cmd = {};
++
++	cmd.hdr.pkt_size = sizeof(cmd);
++	cmd.hdr.opcode = VSS_IVOLUME_CMD_MUTE_V2;
++	cmd.direction = is_tx ? VSS_IVOLUME_DIRECTION_TX : VSS_IVOLUME_DIRECTION_RX;
++	cmd.mute_flag = mute;
++	cmd.ramp_duration_ms = 20;
++
++	return q6voice_common_send(cvp, &cmd.hdr);
++}
++EXPORT_SYMBOL_GPL(q6cvp_set_mute);
++
+ int q6cvp_enable(struct q6voice_session *cvp, bool state)
+ {
+ 	struct apr_pkt cmd;
+diff --git a/sound/soc/qcom/qdsp6/q6cvp.h b/sound/soc/qcom/qdsp6/q6cvp.h
+index 4bba58c2964c..1aad4251ab8d 100644
+--- a/sound/soc/qcom/qdsp6/q6cvp.h
++++ b/sound/soc/qcom/qdsp6/q6cvp.h
+@@ -18,6 +18,7 @@ int q6cvp_set_endpoint_format(struct q6voice_session *cvp, bool is_tx,
+ 			      u16 port_id, unsigned int rate,
+ 			      unsigned int channels, unsigned int bits);
+ int q6cvp_topology_commit(struct q6voice_session *cvp);
++int q6cvp_set_mute(struct q6voice_session *cvp, bool is_tx, bool mute);
+ int q6cvp_enable(struct q6voice_session *cvp, bool enable);
+ u32 q6cvp_get_api_version(void);
+ 
+diff --git a/sound/soc/qcom/qdsp6/q6voice-dai.c b/sound/soc/qcom/qdsp6/q6voice-dai.c
+index 740f7ff0cb2a..f90be0a4e1fb 100644
+--- a/sound/soc/qcom/qdsp6/q6voice-dai.c
++++ b/sound/soc/qcom/qdsp6/q6voice-dai.c
+@@ -297,7 +297,55 @@ static int q6voice_put_topology_kctrl(struct snd_kcontrol *kcontrol, struct snd_
+ 	return 1;
+ }
+ 
++/* "Switch" semantics: on = audible, off = muted */
++static int q6voice_get_switch_kctrl(struct snd_kcontrol *kcontrol,
++				    struct snd_ctl_elem_value *ucontrol)
++{
++	struct snd_soc_component *c = snd_kcontrol_chip(kcontrol);
++	struct soc_mixer_control *mc =
++		(struct soc_mixer_control *)kcontrol->private_value;
++	struct q6voice *v = snd_soc_component_get_drvdata(c);
++	enum q6voice_path_type path = q6voice_get_path(mc->reg);
++
++	if (path >= Q6VOICE_PATH_COUNT)
++		return -EINVAL;
++
++	ucontrol->value.integer.value[0] = !q6voice_get_mute(v, path, !!mc->shift);
++	return 0;
++}
++
++static int q6voice_put_switch_kctrl(struct snd_kcontrol *kcontrol,
++				    struct snd_ctl_elem_value *ucontrol)
++{
++	struct snd_soc_component *c = snd_kcontrol_chip(kcontrol);
++	struct soc_mixer_control *mc =
++		(struct soc_mixer_control *)kcontrol->private_value;
++	struct q6voice *v = snd_soc_component_get_drvdata(c);
++	enum q6voice_path_type path = q6voice_get_path(mc->reg);
++	bool capture = !!mc->shift;
++	bool mute = !ucontrol->value.integer.value[0];
++	int ret;
++
++	if (path >= Q6VOICE_PATH_COUNT)
++		return -EINVAL;
++
++	if (q6voice_get_mute(v, path, capture) == mute)
++		return 0;
++
++	ret = q6voice_set_mute(v, path, capture, mute);
++	return ret ? ret : 1;
++}
++
++#define Q6VOICE_SWITCHES(name, fe)					\
++	SOC_SINGLE_EXT(name " Capture Switch", fe, 1, 1, 0,		\
++		       q6voice_get_switch_kctrl, q6voice_put_switch_kctrl), \
++	SOC_SINGLE_EXT(name " Playback Switch", fe, 0, 1, 0,		\
++		       q6voice_get_switch_kctrl, q6voice_put_switch_kctrl)
++
+ static const struct snd_kcontrol_new q6voice_kcontrols[] = {
++	Q6VOICE_SWITCHES("CS-Voice", CS_VOICE),
++	Q6VOICE_SWITCHES("VoiceMMode1", VOICEMMODE1),
++	Q6VOICE_SWITCHES("VoiceMMode2", VOICEMMODE2),
+ 	SOC_SINGLE_EXT("VoiceMMode1 TX Topology", VOICEMMODE1, 1, S32_MAX, 0,
+ 		       q6voice_get_topology_kctrl, q6voice_put_topology_kctrl),
+ 	SOC_SINGLE_EXT("VoiceMMode1 RX Topology", VOICEMMODE1, 0, S32_MAX, 0,
+diff --git a/sound/soc/qcom/qdsp6/q6voice.c b/sound/soc/qcom/qdsp6/q6voice.c
+index 2c1cfa106d41..4e66e0bea20d 100644
+--- a/sound/soc/qcom/qdsp6/q6voice.c
++++ b/sound/soc/qcom/qdsp6/q6voice.c
+@@ -29,6 +29,7 @@ struct q6voice_path {
+ 	int tx_port, rx_port;
+ 	u32 tx_topo, rx_topo;
+ 	struct q6voice_port_format tx_fmt, rx_fmt;
++	bool tx_mute, rx_mute;
+ 	/* Serialize access to voice path session */
+ 	struct mutex lock;
+ 	struct q6voice_path_runtime *runtime;
+@@ -135,6 +136,16 @@ static int q6voice_path_start(struct q6voice_path *p)
+ 		goto cvp_err;
+ 	}
+ 
++	if (p->tx_mute || p->rx_mute) {
++		ret = q6cvp_set_mute(cvp, true, p->tx_mute);
++		if (!ret)
++			ret = q6cvp_set_mute(cvp, false, p->rx_mute);
++		if (ret) {
++			dev_err(dev, "failed to mute cvp: %d\n", ret);
++			goto attach_err;
++		}
++	}
++
+ 	ret = q6mvm_attach(mvm, cvp, true);
+ 	if (ret) {
+ 		dev_err(dev, "failed to attach cvp to mvm: %d\n", ret);
+@@ -362,6 +373,47 @@ void q6voice_set_format(struct q6voice *v, enum q6voice_path_type path,
+ }
+ EXPORT_SYMBOL_GPL(q6voice_set_format);
+ 
++/**
++ * q6voice_set_mute() - mute or unmute the uplink or the downlink of a path
++ * @v: q6voice instance
++ * @path: voice path
++ * @capture: the uplink (microphone) side, else the downlink
++ * @mute: mute it
++ *
++ * Applied at once to a running path and kept for its next start.
++ */
++int q6voice_set_mute(struct q6voice *v, enum q6voice_path_type path,
++		     bool capture, bool mute)
++{
++	struct q6voice_path *p = &v->paths[path];
++	struct q6voice_session *cvp = NULL;
++	int ret = 0;
++
++	mutex_lock(&p->lock);
++	if (capture)
++		p->tx_mute = mute;
++	else
++		p->rx_mute = mute;
++
++	if (p->runtime && p->runtime->started == 3)
++		cvp = p->runtime->sessions[Q6VOICE_SERVICE_CVP];
++	if (cvp)
++		ret = q6cvp_set_mute(cvp, capture, mute);
++	mutex_unlock(&p->lock);
++
++	return ret;
++}
++EXPORT_SYMBOL_GPL(q6voice_set_mute);
++
++bool q6voice_get_mute(struct q6voice *v, enum q6voice_path_type path,
++		      bool capture)
++{
++	struct q6voice_path *p = &v->paths[path];
++
++	return capture ? p->tx_mute : p->rx_mute;
++}
++EXPORT_SYMBOL_GPL(q6voice_get_mute);
++
+ u32 q6voice_get_topology(struct q6voice *v, enum q6voice_path_type path,
+ 			 bool capture)
+ {
+diff --git a/sound/soc/qcom/qdsp6/q6voice.h b/sound/soc/qcom/qdsp6/q6voice.h
+index 73562627ef2e..e6f14a111841 100644
+--- a/sound/soc/qcom/qdsp6/q6voice.h
++++ b/sound/soc/qcom/qdsp6/q6voice.h
+@@ -34,6 +34,11 @@ void q6voice_set_port(struct q6voice *v, enum q6voice_path_type path,
+ void q6voice_set_format(struct q6voice *v, enum q6voice_path_type path,
+ 			bool capture, const struct q6voice_port_format *fmt);
+ 
++int q6voice_set_mute(struct q6voice *v, enum q6voice_path_type path,
++		     bool capture, bool mute);
++bool q6voice_get_mute(struct q6voice *v, enum q6voice_path_type path,
++		      bool capture);
++
+ u32 q6voice_get_topology(struct q6voice *v, enum q6voice_path_type path,
+ 			 bool capture);
+ void q6voice_set_topology(struct q6voice *v, enum q6voice_path_type path,

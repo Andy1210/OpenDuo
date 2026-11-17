@@ -1,0 +1,4 @@
+duo2-autosleep is held: while this file exists the phone does not suspend
+by itself when its panels go dark. Remove it to switch automatic sleep on
+(no restart needed): sudo rm /etc/duo2/autosleep-hold
+Put it back to switch it off again. docs/hardware/power.md.

@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "duo2-os video codecs",
+  "description": "Tells YouTube that AV1 cannot be played, so it serves VP9 or H.264, which the Surface Duo 2's video core decodes in hardware (it has no AV1 decoder).",
+  "version": "1.0",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.youtube.com/*",
+        "https://m.youtube.com/*",
+        "https://music.youtube.com/*",
+        "https://www.youtube-nocookie.com/*"
+      ],
+      "js": ["codecs.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    }
+  ]
+}

@@ -1,0 +1,67 @@
+From 6f72b3bd80caff39b9c96584ea5f00e9749420ac Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 21:59:24 +0100
+Subject: [PATCH 116/137] power: supply: qcom_battmgr: Wake the system when a
+ charger comes or goes
+
+A phone wakes up when it is plugged in. The battery manager reports a
+charger plugged or unplugged (USB or wireless) with a notification over
+GLINK, whose interrupt is delivered in suspend-to-idle too; but
+power_supply_changed() only takes a wakeup source, which does not end a
+suspend, so the system slept on and noticed the charger only at its next
+wakeup.
+
+Report a hard wakeup event on the USB and wireless supplies for these
+notifications; their power/wakeup setting in sysfs (on by default)
+decides. Battery notifications (capacity, temperature) still do not
+wake the system.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/power/supply/qcom_battmgr.c | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
+index 97c8501c2996..3d682da3f30d 100644
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -10,6 +10,7 @@
+ #include <linux/mutex.h>
+ #include <linux/nvmem-consumer.h>
+ #include <linux/of_device.h>
++#include <linux/pm_wakeup.h>
+ #include <linux/power_supply.h>
+ #include <linux/property.h>
+ #include <linux/soc/qcom/pdr.h>
+@@ -1188,6 +1189,19 @@ static const struct power_supply_desc sm8350_wls_psy_desc = {
+ 	.get_property = qcom_battmgr_wls_get_property,
+ };
+ 
++/*
++ * A charger came or went: wake the system, as a phone lights up when it is
++ * plugged in. The message arrives in the GLINK interrupt, which is also
++ * delivered in suspend-to-idle; power_supply_changed() alone only takes a
++ * wakeup source, which does not end a suspend. The supply's own wakeup
++ * setting (power/wakeup in sysfs, on by default) decides.
++ */
++static void qcom_battmgr_charger_wakeup(struct power_supply *psy)
++{
++	if (psy && device_may_wakeup(&psy->dev))
++		pm_wakeup_dev_event(&psy->dev, 0, true);
++}
++
+ static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
+ 				      const struct qcom_battmgr_message *msg,
+ 				      int len)
+@@ -1213,9 +1227,11 @@ static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
+ 		break;
+ 	case NOTIF_USB_PROPERTY:
+ 		power_supply_changed(battmgr->usb_psy);
++		qcom_battmgr_charger_wakeup(battmgr->usb_psy);
+ 		break;
+ 	case NOTIF_WLS_PROPERTY:
+ 		power_supply_changed(battmgr->wls_psy);
++		qcom_battmgr_charger_wakeup(battmgr->wls_psy);
+ 		break;
+ 	default:
+ 		dev_err(battmgr->dev, "unknown notification: %#x\n", notification);

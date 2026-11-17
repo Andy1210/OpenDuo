@@ -1,0 +1,21 @@
+# From luma-duo2 (none24smu, Apache-2.0): tie each touchscreen to its panel output.
+# Surface Duo 2: duo2-touchd's two touchscreens, one per panel, each tied to
+# its panel's display output. libinput reports WL_OUTPUT as the device's
+# output name, and phoc maps the touchscreen to that output.
+ACTION!="remove", SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="Surface Duo 2 Touchscreen Left", ENV{WL_OUTPUT}="DSI-1"
+ACTION!="remove", SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="Surface Duo 2 Touchscreen Right", ENV{WL_OUTPUT}="DSI-2"
+# duo2-touchd's pen (the heat processor's pen reports): a tablet device per
+# panel, on the same panel coordinates as that panel's touchscreen.
+ACTION!="remove", SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="Surface Duo 2 Pen Left", ENV{WL_OUTPUT}="DSI-1"
+ACTION!="remove", SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="Surface Duo 2 Pen Right", ENV{WL_OUTPUT}="DSI-2"
+# No LIBINPUT_CALIBRATION_MATRIX: the heat processor's x stretch and shift are
+# corrected inside duo2-touchd (/etc/duo2/touch-calibration), before it clamps
+# a contact to its panel; here (after the clamp) the panels' edges near the
+# hinge could not be reached.
+# The digitizer's own input devices (spi 045E:0C1D, Touchscreen, Stylus...:
+# the kernel's single-point fallback and the firmware's own pen report, both
+# with no panel) are not for the compositor: the pen comes from duo2-touchd.
+# Opened by libinput, they kept the HID device open, so the digitizer was
+# never powered down and up again between duo2-touchd instances, and opened
+# during spi-hid's start they kept it powered off ("ready" never came).
+ACTION!="remove", SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="spi 045E:0C1D*", ENV{LIBINPUT_IGNORE_DEVICE}="1"

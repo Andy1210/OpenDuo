@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Nibfair
+GenericName=Pen games
+GenericName[hu]=Tollas játékok
+Comment=Fishing, slicing and pottery for the Slim Pen: hover, tilt, press, buzz
+Comment[hu]=Horgászat, vágás és fazekasság a Slim Pennel: lebegtetés, döntés, nyomás, rezgés
+Keywords=pen;stylus;game;fishing;slicing;pottery;
+Keywords[hu]=toll;játék;horgászat;vágás;fazekas;
+Exec=nibfair
+Icon=org.duo2os.Nibfair
+Terminal=false
+Categories=Game;ArcadeGame;
+StartupNotify=true
+StartupWMClass=org.duo2os.Nibfair

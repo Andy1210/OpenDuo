@@ -1,0 +1,16 @@
+# Clocks' alarms copied for before the first unlock of an encrypted home
+# (homecrypt/README.md, duo2-alarms-de). Only while the home is encrypted and
+# unlocked; enabled globally (the administrator has no Clocks).
+[Unit]
+Description=Clocks' alarms for before the first unlock (encrypted home)
+ConditionPathExists=/run/duo2-home/encrypted
+ConditionPathExists=!/run/duo2-home/locked
+ConditionPathIsDirectory=/var/lib/duo2-de
+
+[Service]
+ExecStart=/usr/local/lib/duo2-homecrypt/duo2-alarms-de
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

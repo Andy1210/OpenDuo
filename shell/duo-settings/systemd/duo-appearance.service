@@ -1,0 +1,6 @@
+[Unit]
+Description=Dark or light apps by the time of day (Settings > Appearance, Automatic)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/duo-appearance

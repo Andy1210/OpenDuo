@@ -1,0 +1,39 @@
+From 111c3cbc7d8e214179a6704d7c4a6f53b84024c9 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 17:02:49 +0100
+Subject: [PATCH 126/137] scsi: ufs: qcom: Don't enable the clocks again while
+ they are enabled
+
+ufs_qcom_enable_lane_clks() enables all of the host's clocks in bulk and
+sets is_lane_clks_enabled, and ufs_qcom_disable_lane_clks() disables them
+only when that flag is set, but the enable path never looks at it. A
+runtime resume calls it from ufs_qcom_resume() and, with the link in
+hibern8, once more from ufs_qcom_setup_clocks(), so every cycle leaves
+one more enable behind. On the Surface Duo 2 (SM8350) the enable count of
+every UFS host clock grows by about one every ten seconds (31 after half
+an hour, over 1300 after a few hours). The clocks then stay on in system
+suspend, and since the host's ref_clk is RPMh's CXO, the SoC never shuts
+the XO down or collapses CX while suspended (aosd / cxsd stay 0).
+
+Make the enable a no-op while the clocks are enabled, like the disable
+(the per-clock version of these helpers had this check).
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/ufs/host/ufs-qcom.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/drivers/ufs/host/ufs-qcom.c b/drivers/ufs/host/ufs-qcom.c
+index 954be9343f42..42eb6efd4416 100644
+--- a/drivers/ufs/host/ufs-qcom.c
++++ b/drivers/ufs/host/ufs-qcom.c
+@@ -356,6 +356,9 @@ static int ufs_qcom_enable_lane_clks(struct ufs_qcom_host *host)
+ {
+ 	int err;
+ 
++	if (host->is_lane_clks_enabled)
++		return 0;
++
+ 	err = clk_bulk_prepare_enable(host->num_clks, host->clks);
+ 	if (err)
+ 		return err;

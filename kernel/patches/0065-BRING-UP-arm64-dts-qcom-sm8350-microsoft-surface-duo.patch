@@ -1,0 +1,170 @@
+From 99afb1237b61444352b9ce0b6d1a10edc083019d Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 00:03:58 +0100
+Subject: [PATCH 065/137] BRING-UP: arm64: dts: qcom:
+ sm8350-microsoft-surface-duo2: Add the camera sensors and enable CAMSS
+
+Describe the four camera sensors on the CCI buses for the identification
+driver (tele IMX481 CCI0 bus 0 0x1a, wide IMX563 CCI0 bus 1 0x1a,
+ultrawide IMX481 CCI1 bus 0 0x10, front IMX481 CCI1 bus 1 0x1a) with the
+vendor DT's supplies (PM8008i / PM8008j), MCLKs and XCLR lines (gpio 17,
+106, 117, 115, with their active pin states), and enable CAMSS with the
+CSIPHY supplies (L5B 0.88 V, L6B 1.2 V). No endpoints yet.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../qcom/sm8350-microsoft-surface-duo2.dts    | 119 ++++++++++++++++++
+ 1 file changed, 119 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+index f2f8cecc81d5..0d3e607758df 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+@@ -558,6 +558,14 @@ vreg_l1d_1p2: ldo1 {
+  * stock power sequence of their reads) and are read-only: they hold the
+  * factory calibration of the modules.
+  */
++/* CSIPHY supplies as in the vendor DT; no sensor endpoints yet (BRING-UP) */
++&camss {
++	vdda-phy-supply = <&vreg_l5b_0p88>;
++	vdda-pll-supply = <&vreg_l6b_1p2>;
++
++	status = "okay";
++};
++
+ &cci0 {
+ 	status = "okay";
+ };
+@@ -566,7 +574,71 @@ &cci1 {
+ 	status = "okay";
+ };
+ 
++/*
++ * The four sensors (BRING-UP: imx48x powers each up, reads its model number
++ * and powers it down; no endpoints yet). Supplies, MCLKs and XCLR lines as
++ * in the vendor DT; the MCLKs at 19.2 MHz.
++ */
++&cci0_i2c0 {
++	camera_tele: camera@1a {
++		compatible = "sony,imx481";
++		reg = <0x1a>;
++
++		dovdd-supply = <&vreg_l3j_1p8>;
++		avdd-supply = <&vreg_l5j_2p8>;
++		dvdd-supply = <&vreg_l2j_1p05>;
++
++		clocks = <&camcc CAM_CC_MCLK1_CLK>;
++		assigned-clocks = <&camcc CAM_CC_MCLK1_CLK>;
++		assigned-clock-rates = <19200000>;
++
++		reset-gpios = <&tlmm 17 GPIO_ACTIVE_LOW>;
++
++		pinctrl-0 = <&cam_mclk1_default &cam_tele_reset_default>;
++		pinctrl-names = "default";
++	};
++};
++
++&cci0_i2c1 {
++	camera_wide: camera@1a {
++		compatible = "sony,imx563";
++		reg = <0x1a>;
++
++		dovdd-supply = <&vreg_l3j_1p8>;
++		avdd-supply = <&vreg_l6i_2p8>;
++		vcustom-supply = <&vreg_l5i_1p8>;
++		dvdd-supply = <&vreg_l1j_1p1>;
++
++		clocks = <&camcc CAM_CC_MCLK0_CLK>;
++		assigned-clocks = <&camcc CAM_CC_MCLK0_CLK>;
++		assigned-clock-rates = <19200000>;
++
++		reset-gpios = <&tlmm 106 GPIO_ACTIVE_LOW>;
++
++		pinctrl-0 = <&cam_mclk0_default &cam_wide_reset_default>;
++		pinctrl-names = "default";
++	};
++};
++
+ &cci1_i2c0 {
++	camera_uw: camera@10 {
++		compatible = "sony,imx481";
++		reg = <0x10>;
++
++		dovdd-supply = <&vreg_l3j_1p8>;
++		avdd-supply = <&vreg_l4i_2p8>;
++		dvdd-supply = <&vreg_l2i_1p05>;
++
++		clocks = <&camcc CAM_CC_MCLK2_CLK>;
++		assigned-clocks = <&camcc CAM_CC_MCLK2_CLK>;
++		assigned-clock-rates = <19200000>;
++
++		reset-gpios = <&tlmm 117 GPIO_ACTIVE_LOW>;
++
++		pinctrl-0 = <&cam_mclk2_default &cam_uw_reset_default>;
++		pinctrl-names = "default";
++	};
++
+ 	eeprom@50 {
+ 		compatible = "st,24c64", "atmel,24c64";
+ 		reg = <0x50>;
+@@ -576,6 +648,24 @@ eeprom@50 {
+ };
+ 
+ &cci1_i2c1 {
++	camera_front: camera@1a {
++		compatible = "sony,imx481";
++		reg = <0x1a>;
++
++		dovdd-supply = <&vreg_l3j_1p8>;
++		avdd-supply = <&vreg_l3i_2p8>;
++		dvdd-supply = <&vreg_l1i_1p05>;
++
++		clocks = <&camcc CAM_CC_MCLK3_CLK>;
++		assigned-clocks = <&camcc CAM_CC_MCLK3_CLK>;
++		assigned-clock-rates = <19200000>;
++
++		reset-gpios = <&tlmm 115 GPIO_ACTIVE_LOW>;
++
++		pinctrl-0 = <&cam_mclk3_default &cam_front_reset_default>;
++		pinctrl-names = "default";
++	};
++
+ 	eeprom@50 {
+ 		compatible = "onnn,n24s64b", "atmel,24c64";
+ 		reg = <0x50>;
+@@ -1058,6 +1148,35 @@ earpiece: speaker@0,3 {
+ &tlmm {
+ 	gpio-reserved-ranges = <4 4>, <12 4>, <56 4>, <76 4>;
+ 
++	/* The camera sensors' XCLR lines (the vendor DT's active states) */
++	cam_tele_reset_default: cam-tele-reset-default-state {
++		pins = "gpio17";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	cam_wide_reset_default: cam-wide-reset-default-state {
++		pins = "gpio106";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	cam_front_reset_default: cam-front-reset-default-state {
++		pins = "gpio115";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	cam_uw_reset_default: cam-uw-reset-default-state {
++		pins = "gpio117";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
+ 	pm8008i_reset_default: pm8008i-reset-default-state {
+ 		pins = "gpio33";
+ 		function = "gpio";

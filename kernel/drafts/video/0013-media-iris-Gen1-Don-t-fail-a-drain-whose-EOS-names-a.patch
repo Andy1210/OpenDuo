@@ -1,0 +1,55 @@
+From b688fd6f4f6cda7a57dca4acf0a25e648df7fe63 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Mon, 9 Nov 2026 21:37:28 +0100
+Subject: [PATCH 13/16] media: iris: Gen1: Don't fail a drain whose EOS names a
+ dequeued buffer
+
+The drain of a Gen1 decoder ends with an empty fill-buffer-done carrying
+HFI_BUFFERFLAG_EOS. iris handles the EOS (the last-buffer state, the
+output flush) and then looks the buffer up among the queued capture
+buffers; when it is not there, the instance goes to the error state
+("error in ftb done").
+
+The Surface Duo 2's SM8350 firmware (vpu20_4v) can name, for VP9, an
+output buffer that is not queued at that moment: seen with GStreamer's
+v4l2vp9dec at the end of a file (stream 1, tag 0, filled 0, flags
+0x20000021, the capture queue empty), after which the teardown in the
+error state brought the firmware down ("Err_Fatal ... vpx_decoder.c").
+FFmpeg's vp9_v4l2m2m, which holds its frames until the end, ended every
+VP9 file with the same "error in ftb done".
+
+Treat an unmatched empty EOS fill-buffer-done as the end of the drain
+it is: the next capture buffer queued comes back with
+V4L2_BUF_FLAG_LAST, as iris_vb2_buf_queue() already does in the
+drain-last state.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../platform/qcom/iris/iris_hfi_gen1_response.c     | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen1_response.c b/drivers/media/platform/qcom/iris/iris_hfi_gen1_response.c
+index abeb74fb61ee..0cbc54d59ff1 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen1_response.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen1_response.c
+@@ -505,8 +505,19 @@ static void iris_hfi_gen1_session_ftb_done(struct iris_inst *inst, void *packet)
+ 				break;
+ 		}
+ 	}
+-	if (!found)
++	if (!found) {
++		/*
++		 * The end of a drain: an empty EOS fill-buffer-done. The
++		 * SM8350 firmware sends it for VP9 on an output buffer the
++		 * client has already dequeued (FFmpeg dequeues all of them by
++		 * the end of a stream). The drain is over all the same (see
++		 * above); the next capture buffer queued is returned with
++		 * V4L2_BUF_FLAG_LAST (iris_vb2_buf_queue()).
++		 */
++		if ((hfi_flags & HFI_BUFFERFLAG_EOS) && !filled_len)
++			return;
+ 		goto error;
++	}
+ 
+ 	buf->data_offset = offset;
+ 	buf->data_size = filled_len;

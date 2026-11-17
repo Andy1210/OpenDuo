@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# A silent check of the call audio path on the phone, without a call:
+#
+#   scripts/duo2-voice-check [earpiece|speaker] [SECS]
+#
+# The card goes to its Voice Call profile (PipeWire, as the GUI user) with
+# the chosen output, the WSA digital gains at 0 (-84 dB: nothing audible
+# even if the DSP played something; without a call it plays silence), and
+# the voice front ends (VoiceMMode1 and VoiceMMode2) are opened in both
+# directions for SECS seconds (default 3), as duo2-callaudio does during a
+# call. That brings up the DSP side (MVM, CVP) and the back ends: the
+# microphone (DMIC3) runs into the DSP's vocproc for those seconds, nothing
+# is recorded or leaves the DSP. Printed: the kernel's log lines meanwhile,
+# the DAPM state of the amplifiers and the macros, the PCM states, the
+# ADSP votes; afterwards the card goes back to HiFi and everything must be
+# off again. duo2-callaudio is stopped meanwhile (it would set the call
+# gains) and started again afterwards if it ran.
+set -euo pipefail
+. "$(dirname "$0")/lib/remote.sh"
+OUT=${1:-earpiece}
+SECS=${2:-3}
+case $OUT in earpiece) PROFILE='Voice Call (Earpiece, Mic)' ;; speaker) PROFILE='Voice Call (Mic, Speaker)' ;;
+    *) echo "usage: $0 [earpiece|speaker] [SECS]" >&2; exit 2 ;; esac
+case $SECS in [1-9]|10) ;; *) echo "SECS: 1..10" >&2; exit 2 ;; esac
+
+CARD=MicrosoftSurfac
+T0=$(duo2_ssh date +%s)
+duo2_ssh "sudo amixer -c $CARD cget name='VoiceMMode1 Capture Switch' >/dev/null 2>&1" ||
+    { echo "the running kernel has no voice front ends" >&2; exit 1; }
+
+WAS=$(duo2_user 'systemctl --user is-active duo2-callaudio 2>/dev/null || true')
+[ "$WAS" = active ] && duo2_user 'systemctl --user stop duo2-callaudio'
+
+restore() {
+    duo2_user "pactl set-card-profile alsa_card.platform-sound HiFi" || true
+    [ "$WAS" = active ] && duo2_user 'systemctl --user start duo2-callaudio' || true
+}
+trap restore EXIT
+
+echo "== profile $PROFILE"
+duo2_user "pactl set-card-profile alsa_card.platform-sound '$PROFILE'"
+sleep 1
+duo2_user "pactl list short sinks; pactl list short sources | grep -v monitor"
+duo2_ssh "sudo amixer -q -c $CARD cset name='WSA_RX0 Digital Volume' 0
+sudo amixer -q -c $CARD cset name='WSA_RX1 Digital Volume' 0
+for c in 'Receiver DAC Switch' 'SpkrLeft DAC Switch' 'SpkrRight DAC Switch' 'WSA_RX0 Digital Volume' \
+         'WSA_RX1 Digital Volume' 'WSA_CODEC_DMA_RX_0 Voice Mixer VoiceMMode1' \
+         'VoiceMMode1 Capture Mixer VA_CODEC_DMA_TX_0' 'VoiceMMode1 TX Topology' 'VA DMIC MUX0'; do
+    printf '%-46s %s\n' \"\$c\" \"\$(sudo amixer -c $CARD cget name=\"\$c\" | sed -n 's/^  : values=//p')\"
+done"
+
+echo "== voice front ends open for $SECS s"
+duo2_user "python3 - <<'PY'
+import importlib.machinery, importlib.util, sys, time, types
+sys.modules.setdefault('gi', types.ModuleType('gi'))
+src = open('/usr/local/lib/duo2-telephony/duo2-callaudio').read()
+# only the libasound part is needed here
+start = src.index('SND_PCM_STREAM_PLAYBACK = 0'); end = src.index('def amixer(')
+ns = {}
+exec('import ctypes\n' + src[start:end], ns)
+alsa = ns['Alsa']()
+opened = []
+for dev in (3, 4):
+    name = 'hw:CARD=$CARD,DEV=%d' % dev
+    try:
+        opened.append(alsa.open_voice(name)); print(name, 'open')
+    except OSError as e:
+        print(name, e)
+time.sleep(0.5)
+for d in (3, 4):
+    for s in ('p', 'c'):
+        try:
+            st = open('/proc/asound/card0/pcm%d%s/sub0/status' % (d, s)).read().split()[1]
+        except Exception:
+            st = '?'
+        print('pcm%d%s %s' % (d, s, st))
+time.sleep(max(0, $SECS - 0.5))
+for h in opened:
+    alsa.close(h)
+print('closed')
+PY" &
+PY=$!
+sleep 2
+duo2_ssh "sudo sh -c '
+d=/sys/kernel/debug/asoc/Microsoft-SurfaceDuo2
+grep -h \": On\" \$d/*/dapm/* 2>/dev/null | sort | head -40
+for c in LPASS_HW_MACRO LPASS_HW_DCODEC; do echo \"\$c prepare=\$(cat /sys/kernel/debug/clk/\$c/clk_prepare_count 2>/dev/null)\"; done'"
+# the amplifiers: PA_FSM_CTL 3410, PA_FSM_STA 3413, PA_FSM_ERR_COND 3414,
+# INTR_STATUS0/1 3483/3484, PDM_WD_CTL 344b (one regmap debugfs line each)
+duo2_ssh 'sudo bash -s' <<'AMPS'
+for a in 1 2 3; do
+    d=sdw:1:0:0217:0202:00:$a
+    case $a in 1) n=SpkrLeft ;; 2) n=SpkrRight ;; 3) n=Receiver ;; esac
+    printf '%-9s' $n
+    for r in 3410 3413 3414 3483 3484 344b; do
+        v=$(dd if=/sys/kernel/debug/regmap/$d/registers bs=9 skip=$((0x$r)) count=1 2>/dev/null |
+            awk -v r=$r 'tolower($1) == r ":" { print $2 }')
+        printf ' %s=%s' $r "${v:-?}"
+    done
+    echo
+done
+AMPS
+wait $PY
+
+echo "== kernel log since the start (q6 / apr / voice / wsa / soundwire / asoc)"
+duo2_ssh "sudo journalctl -k --since @$T0 --no-pager -o short-monotonic | grep -viE 'spi_hid|spi-hid' |
+    grep -iE 'q6|apr|voice|cvp|mvm|cvs|wsa|soundwire|swr|asoc|afe|macro|lpass' | tail -60 || true"
+
+echo "== back to HiFi"
+restore
+trap - EXIT
+sleep 6
+duo2_ssh "sudo sh -c 'grep -h \": On\" /sys/kernel/debug/asoc/Microsoft-SurfaceDuo2/*/dapm/* 2>/dev/null | head; cat /proc/asound/card0/pcm3p/sub0/status /proc/asound/card0/pcm3c/sub0/status'"

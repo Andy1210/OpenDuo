@@ -1,0 +1,44 @@
+#!/bin/sh
+# ExecStartPre of waydroid-container.service (the root container manager,
+# started on demand over D-Bus): refuse to start an unhardened Waydroid.
+# docs/hardware/android.md.
+#
+#  1. the local Waydroid patches are in place (duo2-waydroid-patch --check)
+#  2. the LXC config ends with the duo2 include, and the node list has
+#     nothing the patched Waydroid would not write (a config from before
+#     the patches)
+#  3. /run/duo2-waydroid/lxc-devices.conf: the binderfs major (dynamic)
+#  4. the AppArmor profile is loaded, the firewall table is in place
+set -eu
+LXC=/var/lib/waydroid/lxc/waydroid
+INC='lxc.include = /etc/duo2/waydroid/lxc.conf'
+
+/usr/local/sbin/duo2-waydroid-patch --check
+
+if [ -f "$LXC/config" ]; then
+    if [ "$(tail -n 1 "$LXC/config")" != "$INC" ]; then
+        grep -vxF "$INC" "$LXC/config" > "$LXC/config.duo2" || true
+        printf '%s\n' "$INC" >> "$LXC/config.duo2"
+        mv "$LXC/config.duo2" "$LXC/config"
+        echo "duo2-waydroid-prestart: hardening include appended to $LXC/config"
+    fi
+fi
+if [ -f "$LXC/config_nodes" ] &&
+   grep -qE ' /dev/(video|fb|graphics/fb|uhid|uinput|input|char|kmsg|mem|sd|block)| /sys/kernel/debug ' "$LXC/config_nodes"; then
+    grep -vE ' /dev/(video|fb|graphics/fb|uhid|uinput|input|char|kmsg|mem|sd|block)| /sys/kernel/debug ' \
+        "$LXC/config_nodes" > "$LXC/config_nodes.duo2" || true
+    mv "$LXC/config_nodes.duo2" "$LXC/config_nodes"
+    echo "duo2-waydroid-prestart: host device entries removed from $LXC/config_nodes"
+fi
+
+install -d -m 0755 /run/duo2-waydroid
+major=$(awk '$2 == "binder" { print $1 }' /proc/devices)
+[ -n "$major" ] || { echo "duo2-waydroid-prestart: no binder major in /proc/devices (CONFIG_ANDROID_BINDERFS)" >&2; exit 1; }
+printf '# written by duo2-waydroid-prestart: the binderfs devices\nlxc.cgroup2.devices.allow = c %s:* rwm\n' "$major" \
+    > /run/duo2-waydroid/lxc-devices.conf
+
+apparmor_parser -r -W /etc/apparmor.d/lxc-duo2-waydroid
+grep -q '^lxc-duo2-waydroid ' /sys/kernel/security/apparmor/profiles ||
+    { echo "duo2-waydroid-prestart: AppArmor profile lxc-duo2-waydroid not loaded" >&2; exit 1; }
+
+nft -f /etc/duo2/waydroid/firewall.nft

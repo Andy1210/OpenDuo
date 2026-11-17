@@ -1,0 +1,9 @@
+# duo2-os: networkd keeps its hands off the modem's network devices. The IPA
+# device (rmnet_ipa0) carries the multiplexed data links ModemManager creates
+# on it (qmapmux0.0, ...); duo2-wwan configures those from the bearer
+# (address, MTU, default route with a metric above WiFi's, DNS).
+[Match]
+Name=rmnet_ipa* qmapmux* rmnet_data* wwan*
+
+[Link]
+Unmanaged=yes

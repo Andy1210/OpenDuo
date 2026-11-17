@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Install (or remove) a git pre-commit hook that runs scripts/check-personal-data
+# on what is about to be committed. Opt-in, per clone.
+#
+#   scripts/install-personal-data-hook            warn: print the findings, commit anyway
+#   scripts/install-personal-data-hook --block    refuse the commit while there are findings
+#                                                 (git commit --no-verify still commits)
+#   scripts/install-personal-data-hook --remove   take the hook out again
+#
+# The mode is a git setting of this clone (duo2.personalDataBlock), so it can
+# also be switched with `git config duo2.personalDataBlock true|false`.
+# An existing pre-commit hook that is not this one is left alone.
+set -euo pipefail
+
+R=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+hooks=$(git -C "$R" rev-parse --git-path hooks)
+case $hooks in /*) ;; *) hooks=$R/$hooks ;; esac
+hook=$hooks/pre-commit
+MARK="# duo2-os: check-personal-data hook"
+
+ours() { [ -f "$hook" ] && grep -qF "$MARK" "$hook"; }
+
+case ${1:-} in
+--remove)
+    if ours; then rm -f "$hook"; echo "removed $hook"; else echo "no check-personal-data hook in $hook"; fi
+    git -C "$R" config --unset duo2.personalDataBlock 2>/dev/null || true
+    exit 0 ;;
+--block) block=true ;;
+"") block=false ;;
+*) sed -n '2,12p' "$0" >&2; exit 2 ;;
+esac
+
+if [ -e "$hook" ] && ! ours; then
+    echo "$hook exists and is not this hook: left alone. Call scripts/check-personal-data from it instead." >&2
+    exit 1
+fi
+
+mkdir -p "$hooks"
+cat >"$hook" <<EOF
+#!/bin/sh
+$MARK (scripts/install-personal-data-hook)
+top=\$(git rev-parse --show-toplevel) || exit 0
+[ -x "\$top/scripts/check-personal-data" ] || exit 0
+"\$top/scripts/check-personal-data" && exit 0
+status=\$?
+[ \$status -eq 1 ] || { echo "check-personal-data failed (\$status); committing anyway" >&2; exit 0; }
+if [ "\$(git config --bool duo2.personalDataBlock)" = true ]; then
+    echo "commit refused: personal data above (fix it, or git commit --no-verify if it is fine)" >&2
+    exit 1
+fi
+echo "warning: personal data above; committed anyway (scripts/install-personal-data-hook --block refuses)" >&2
+exit 0
+EOF
+chmod 755 "$hook"
+git -C "$R" config duo2.personalDataBlock "$block"
+echo "installed $hook ($( [ "$block" = true ] && echo "refuses commits with findings" || echo "warns only"))"

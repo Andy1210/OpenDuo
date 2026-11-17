@@ -1,0 +1,7 @@
+[Unit]
+Description=Stop the Android session when no Android window is open
+BindsTo=duo2-waydroid-session.service
+After=duo2-waydroid-session.service
+
+[Service]
+ExecStart=/bin/sh -c '. /run/duo-wc/session.env && exec /usr/local/lib/duo2-waydroid/duo2-waydroid-idle'

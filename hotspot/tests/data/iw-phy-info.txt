@@ -1,0 +1,118 @@
+Wiphy phy0
+	wiphy index: 0
+	max # scan SSIDs: 16
+	max scan IEs length: 339 bytes
+	max # sched scan SSIDs: 16
+	max # match sets: 16
+	Retry short limit: 7
+	Retry long limit: 4
+	Coverage class: 0 (up to 0m)
+	Device supports RSN-IBSS.
+	Device supports AP-side u-APSD.
+	Device supports T-DLS.
+	Supported Ciphers:
+		* WEP40 (00-0f-ac:1)
+		* CCMP-128 (00-0f-ac:4)
+		* GCMP-256 (00-0f-ac:9)
+	Available Antennas: TX 0x3 RX 0x3
+	Configured Antennas: TX 0x3 RX 0x3
+	Supported interface modes:
+		 * managed
+		 * AP
+		 * P2P-client
+		 * P2P-GO
+		 * P2P-device
+	Band 1:
+		Capabilities: 0x19ef
+			RX LDPC
+			HT20/HT40
+			SM Power Save disabled
+			RX HT20 SGI
+			RX HT40 SGI
+			TX STBC
+			RX STBC 1-stream
+			Max AMSDU length: 7935 bytes
+			DSSS/CCK HT40
+		Maximum RX AMPDU length 65535 bytes (exponent: 0x003)
+		Minimum RX AMPDU time spacing: 16 usec (0x07)
+		HT TX/RX MCS rate indexes supported: 0-15
+		HE Iftypes: managed
+			HE MAC Capabilities (0x08011a000040):
+				+HTC HE Supported
+			HE PHY Capabilities: (0x22200802018000000000):
+				HE40/2.4GHz
+		HE Iftypes: AP
+			HE MAC Capabilities (0x08011a000040):
+				+HTC HE Supported
+		Bitrates (non-HT):
+			* 1.0 Mbps
+			* 2.0 Mbps (short preamble supported)
+			* 54.0 Mbps
+		Frequencies:
+			* 2412.0 MHz [1] (30.0 dBm)
+			* 2417.0 MHz [2] (30.0 dBm)
+			* 2422.0 MHz [3] (30.0 dBm)
+			* 2427.0 MHz [4] (30.0 dBm)
+			* 2432.0 MHz [5] (30.0 dBm)
+			* 2437.0 MHz [6] (30.0 dBm)
+			* 2442.0 MHz [7] (30.0 dBm)
+			* 2447.0 MHz [8] (30.0 dBm)
+			* 2452.0 MHz [9] (30.0 dBm)
+			* 2457.0 MHz [10] (30.0 dBm)
+			* 2462.0 MHz [11] (30.0 dBm)
+			* 2467.0 MHz [12] (30.0 dBm) (no IR)
+			* 2472.0 MHz [13] (30.0 dBm) (no IR)
+			* 2484.0 MHz [14] (disabled)
+	Band 2:
+		Capabilities: 0x19ef
+			RX LDPC
+			HT20/HT40
+			SM Power Save disabled
+		Maximum RX AMPDU length 65535 bytes (exponent: 0x003)
+		VHT Capabilities (0x339979fa):
+			Max MPDU length: 11454
+			Supported Channel Width: neither 160 nor 80+80
+		VHT RX MCS set:
+			1 streams: MCS 0-9
+		HE Iftypes: managed
+			HE MAC Capabilities (0x08011a000040):
+				+HTC HE Supported
+		HE Iftypes: AP
+			HE MAC Capabilities (0x08011a000040):
+				+HTC HE Supported
+		Bitrates (non-HT):
+			* 6.0 Mbps
+		Frequencies:
+			* 5180.0 MHz [36] (24.0 dBm)
+			* 5200.0 MHz [40] (24.0 dBm)
+			* 5220.0 MHz [44] (24.0 dBm)
+			* 5240.0 MHz [48] (24.0 dBm)
+			* 5260.0 MHz [52] (24.0 dBm) (radar detection)
+			* 5280.0 MHz [56] (24.0 dBm) (radar detection)
+			* 5300.0 MHz [60] (24.0 dBm) (radar detection)
+			* 5320.0 MHz [64] (24.0 dBm) (radar detection)
+			* 5500.0 MHz [100] (24.0 dBm) (no IR, radar detection)
+			* 5520.0 MHz [104] (24.0 dBm) (no IR, radar detection)
+			* 5745.0 MHz [149] (13.0 dBm) (no IR)
+			* 5765.0 MHz [153] (13.0 dBm) (no IR)
+			* 5825.0 MHz [165] (disabled)
+	Band 4:
+		Capabilities: 0x19ef
+		Frequencies:
+			* 5955.0 MHz [1] (disabled)
+	Supported commands:
+		 * new_interface
+		 * set_interface
+	software interface modes (can always be added):
+	valid interface combinations:
+		 * #{ managed } <= 2, #{ AP, P2P-client, P2P-GO } <= 16, #{ P2P-device } <= 1,
+		   total <= 16, #channels <= 1, STA/AP BI must match, radar detect widths: { 20 MHz (no HT), 20 MHz, 40 MHz, 80 MHz, 80+80 MHz, 160 MHz }
+
+		 * #{ managed } <= 2, #{ AP, P2P-client, P2P-GO } <= 16, #{ P2P-device } <= 1,
+		   total <= 3, #channels <= 2, STA/AP BI must match
+
+	HT Capability overrides:
+		 * MCS: ff ff ff ff ff ff ff ff ff ff
+	Device supports TX status socket option.
+	Supported extended features:
+		* [ RRM ]: RRM

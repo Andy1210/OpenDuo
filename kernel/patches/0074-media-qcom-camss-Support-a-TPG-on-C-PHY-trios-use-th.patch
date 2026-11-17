@@ -1,0 +1,203 @@
+From 02a57c7bd16633fab24f3c85a2e91e388494de55 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 01:19:23 +0100
+Subject: [PATCH 074/137] media: qcom: camss: Support a TPG on C-PHY trios, use
+ three on SM8350
+
+A TPG resource can now say that its lanes are C-PHY trios: a CSID linked
+to it takes the generator's lane count and PHY type (CSID gen2: the PHY
+type select of CSI2_RX_CFG0). The TPG 1.0.2 of SM8350 sends on three
+trios: found with the bring-up receiver parameters, which go (on a 4-lane
+D-PHY receiver its lane FIFOs overflow, with 1 or 2 trios the frames are
+unbounded, with three the CSID sees whole frames).
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../platform/qcom/camss/camss-csid-gen2.c     | 23 ++++++-------------
+ .../media/platform/qcom/camss/camss-csid.c    |  5 ++++
+ .../media/platform/qcom/camss/camss-csid.h    |  4 ++++
+ drivers/media/platform/qcom/camss/camss-tpg.h |  1 +
+ drivers/media/platform/qcom/camss/camss.c     |  8 ++++---
+ 5 files changed, 22 insertions(+), 19 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/camss/camss-csid-gen2.c b/drivers/media/platform/qcom/camss/camss-csid-gen2.c
+index ad41c7d14eca..6d98b7934664 100644
+--- a/drivers/media/platform/qcom/camss/camss-csid-gen2.c
++++ b/drivers/media/platform/qcom/camss/camss-csid-gen2.c
+@@ -10,7 +10,6 @@
+ #include <linux/interrupt.h>
+ #include <linux/io.h>
+ #include <linux/kernel.h>
+-#include <linux/moduleparam.h>
+ #include <linux/of.h>
+ 
+ #include "camss-csid.h"
+@@ -172,14 +171,6 @@
+ #define		TPG_COLOR_BOX_CFG_MODE		0
+ #define		TPG_COLOR_BOX_PATTERN_SEL	2
+ 
+-/* BRING-UP: the receiver settings for a TPG link, to find what the TPG sends */
+-static unsigned int tpg_lanes;
+-module_param(tpg_lanes, uint, 0644);
+-MODULE_PARM_DESC(tpg_lanes, "BRING-UP: CSID lanes for a TPG link (0: the TPG's own)");
+-static unsigned int tpg_phy_type;
+-module_param(tpg_phy_type, uint, 0644);
+-MODULE_PARM_DESC(tpg_phy_type, "BRING-UP: CSID PHY type for a TPG link (0 D-PHY, 1 C-PHY)");
+-
+ /* the vendor CSID 480 register layout: RDI n format measurement and byte counters */
+ #define CSID_RDI_FORMAT_MEASURE0(rdi)	((csid_is_lite(csid) ? 0x278 : 0x378) + 0x100 * (rdi))
+ #define CSID_RDI_FORMAT_MEASURE1(rdi)	((csid_is_lite(csid) ? 0x27c : 0x37c) + 0x100 * (rdi))
+@@ -197,13 +188,11 @@ static void __csid_configure_rx(struct csid_device *csid,
+ 
+ 	if (!lane_cnt)
+ 		lane_cnt = 4;
+-	if (csid->tpg_linked && tpg_lanes >= 1 && tpg_lanes <= 4)
+-		lane_cnt = tpg_lanes;
+ 
+ 	val = (lane_cnt - 1) << CSI2_RX_CFG0_NUM_ACTIVE_LANES;
+ 	val |= phy->lane_assign << CSI2_RX_CFG0_DL0_INPUT_SEL;
+ 	val |= phy->csiphy_id << CSI2_RX_CFG0_PHY_NUM_SEL;
+-	if (csid->tpg_linked && tpg_phy_type)
++	if (phy->cphy)
+ 		val |= 1 << CSI2_RX_CFG0_PHY_TYPE_SEL;
+ 	writel_relaxed(val, csid->base + CSID_CSI2_RX_CFG0);
+ 	dev_info(csid->camss->dev, "csid%u: rx cfg0 0x%08x (%s)\n", csid->id, val,
+@@ -367,11 +356,9 @@ static void csid_dbg_stop(struct csid_device *csid)
+ {
+ 	int i;
+ 
+-	writel_relaxed(0, csid->base + CSID_CSI2_RX_IRQ_MASK);
+ 	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++) {
+ 		if (!(csid->phy.en_vc & BIT(i)))
+ 			continue;
+-		writel_relaxed(0, csid->base + CSID_CSI2_RDIN_IRQ_MASK(i));
+ 		dev_info(csid->camss->dev,
+ 			 "csid%u rdi%d: irqs %u sof %u eof %u, rx status 0x%08x, rdi status 0x%08x, measure 0x%08x 0x%08x, bytes 0x%08x 0x%08x\n",
+ 			 csid->id, i, csid->dbg_irqs, csid->dbg_sof, csid->dbg_eof,
+@@ -380,7 +367,12 @@ static void csid_dbg_stop(struct csid_device *csid)
+ 			 readl_relaxed(csid->base + CSID_RDI_FORMAT_MEASURE1(i)),
+ 			 readl_relaxed(csid->base + CSID_RDI_BYTE_CNTR_PING(i)),
+ 			 readl_relaxed(csid->base + CSID_RDI_BYTE_CNTR_PONG(i)));
++		csid->dbg_rdi[i] = 0;
+ 	}
++	csid->dbg_rx = 0;
++	csid->dbg_irqs = 0;
++	csid->dbg_sof = 0;
++	csid->dbg_eof = 0;
+ }
+ 
+ static void csid_configure_stream(struct csid_device *csid, u8 enable)
+@@ -390,8 +382,6 @@ static void csid_configure_stream(struct csid_device *csid, u8 enable)
+ 
+ 	if (enable)
+ 		csid_dbg_start(csid);
+-	else
+-		csid_dbg_stop(csid);
+ 
+ 	/* Loop through all enabled ports and configure a stream for each */
+ 	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++)
+@@ -497,6 +487,7 @@ static void csid_subdev_init(struct csid_device *csid)
+ 
+ const struct csid_hw_ops csid_ops_gen2 = {
+ 	.configure_stream = csid_configure_stream,
++	.dbg_report = csid_dbg_stop,
+ 	.configure_testgen_pattern = csid_configure_testgen_pattern,
+ 	.hw_version = csid_hw_version,
+ 	.isr = csid_isr,
+diff --git a/drivers/media/platform/qcom/camss/camss-csid.c b/drivers/media/platform/qcom/camss/camss-csid.c
+index 47d27b7b268c..aca29bdcbcdc 100644
+--- a/drivers/media/platform/qcom/camss/camss-csid.c
++++ b/drivers/media/platform/qcom/camss/camss-csid.c
+@@ -777,6 +777,9 @@ static int csid_set_stream(struct v4l2_subdev *sd, int enable)
+ 			return -ENOLINK;
+ 	}
+ 
++	if (!enable && csid->res->hw_ops->dbg_report)
++		csid->res->hw_ops->dbg_report(csid);
++
+ 	if (csid->phy.need_vc_update) {
+ 		csid->res->hw_ops->configure_stream(csid, enable);
+ 		csid->phy.need_vc_update = false;
+@@ -1277,6 +1280,7 @@ static int csid_link_setup(struct media_entity *entity,
+ 			tpg = v4l2_get_subdevdata(sd);
+ 
+ 			csid->phy.lane_cnt = tpg->res->lane_cnt;
++			csid->phy.cphy = tpg->res->cphy;
+ 			csid->phy.csiphy_id = tpg->id;
+ 			csid->phy.lane_assign = csid_get_lane_assign(NULL, csid->phy.lane_cnt);
+ 			csid->tpg_linked = true;
+@@ -1289,6 +1293,7 @@ static int csid_link_setup(struct media_entity *entity,
+ 				return -EPERM;
+ 
+ 			csid->phy.csiphy_id = csiphy->id;
++			csid->phy.cphy = false;
+ 
+ 			lane_cfg = &csiphy->cfg.csi2->lane_cfg;
+ 			csid->phy.lane_cnt = lane_cfg->num_data;
+diff --git a/drivers/media/platform/qcom/camss/camss-csid.h b/drivers/media/platform/qcom/camss/camss-csid.h
+index d02a3e3bc6d5..c9924888dbdb 100644
+--- a/drivers/media/platform/qcom/camss/camss-csid.h
++++ b/drivers/media/platform/qcom/camss/camss-csid.h
+@@ -67,6 +67,7 @@ struct csid_testgen_config {
+ struct csid_phy_config {
+ 	u8 csiphy_id;
+ 	u8 lane_cnt;
++	bool cphy;
+ 	u32 lane_assign;
+ 	u32 en_vc;
+ 	u8 need_vc_update;
+@@ -81,6 +82,9 @@ struct csid_hw_ops {
+ 	 */
+ 	void (*configure_stream)(struct csid_device *csid, u8 enable);
+ 
++	/* BRING-UP: report what the receiver saw, at stream off */
++	void (*dbg_report)(struct csid_device *csid);
++
+ 	/*
+ 	 * configure_testgen_pattern - Validates and configures output pattern mode
+ 	 * of test pattern generator
+diff --git a/drivers/media/platform/qcom/camss/camss-tpg.h b/drivers/media/platform/qcom/camss/camss-tpg.h
+index 831cafa578d5..6f3571324ab9 100644
+--- a/drivers/media/platform/qcom/camss/camss-tpg.h
++++ b/drivers/media/platform/qcom/camss/camss-tpg.h
+@@ -76,6 +76,7 @@ struct tpg_hw_ops {
+ 
+ struct tpg_subdev_resources {
+ 	u8 lane_cnt;
++	bool cphy;			/* the lanes are C-PHY trios */
+ 	const struct tpg_formats *formats;
+ 	const struct tpg_hw_ops *hw_ops;
+ };
+diff --git a/drivers/media/platform/qcom/camss/camss.c b/drivers/media/platform/qcom/camss/camss.c
+index 308ae652f2aa..8f58e6b26201 100644
+--- a/drivers/media/platform/qcom/camss/camss.c
++++ b/drivers/media/platform/qcom/camss/camss.c
+@@ -2254,7 +2254,7 @@ static const struct resources_icc icc_res_sm8250[] = {
+ 
+ /*
+  * SM8350 (Titan 580): two TPG 1.0.2 blocks, TPG n in place of CSIPHY n, on
+- * that PHY's clocks.
++ * that PHY's clocks. A TPG 1.0.2 sends on three C-PHY trios.
+  */
+ static const struct camss_subdev_resources tpg_res_8350[] = {
+ 	/* TPG0 */
+@@ -2266,7 +2266,8 @@ static const struct camss_subdev_resources tpg_res_8350[] = {
+ 				{ 300000000 } },
+ 		.reg = { "tpg0", "cpas_top" },
+ 		.tpg = {
+-			.lane_cnt = 4,
++			.lane_cnt = 3,
++			.cphy = true,
+ 			.formats = &tpg_formats_gen1,
+ 			.hw_ops = &tpg_ops_1_0
+ 		}
+@@ -2280,7 +2281,8 @@ static const struct camss_subdev_resources tpg_res_8350[] = {
+ 				{ 300000000 } },
+ 		.reg = { "tpg1", "cpas_top" },
+ 		.tpg = {
+-			.lane_cnt = 4,
++			.lane_cnt = 3,
++			.cphy = true,
+ 			.formats = &tpg_formats_gen1,
+ 			.hw_ops = &tpg_ops_1_0
+ 		}

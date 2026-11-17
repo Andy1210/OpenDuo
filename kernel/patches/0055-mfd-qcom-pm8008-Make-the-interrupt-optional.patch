@@ -1,0 +1,87 @@
+From a45885f7fdaf4c6499fc00b681f1e3cb8d4af018 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 05:53:50 +0100
+Subject: [PATCH 055/137] mfd: qcom-pm8008: Make the interrupt optional
+
+On the Microsoft Surface Duo 2 the two PM8008 camera PMICs have no
+interrupt line wired (the vendor device tree describes none), and the
+driver fails to probe without one, although the regulators do not need
+it.
+
+Register only the regulator function when the device has no interrupt.
+The GPIO and temperature alarm functions need the interrupt controller
+and are left out. Relax the binding accordingly.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../devicetree/bindings/mfd/qcom,pm8008.yaml    | 17 ++++++++++-------
+ drivers/mfd/qcom-pm8008.c                       | 16 ++++++++++++++++
+ 2 files changed, 26 insertions(+), 7 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/mfd/qcom,pm8008.yaml b/Documentation/devicetree/bindings/mfd/qcom,pm8008.yaml
+index 0c6e1870db1d..9b6e5721d0bf 100644
+--- a/Documentation/devicetree/bindings/mfd/qcom,pm8008.yaml
++++ b/Documentation/devicetree/bindings/mfd/qcom,pm8008.yaml
+@@ -88,18 +88,21 @@ properties:
+ required:
+   - compatible
+   - reg
+-  - interrupts
+   - vdd-l1-l2-supply
+   - vdd-l3-l4-supply
+   - vdd-l5-supply
+   - vdd-l6-supply
+   - vdd-l7-supply
+-  - gpio-controller
+-  - "#gpio-cells"
+-  - gpio-ranges
+-  - interrupt-controller
+-  - "#interrupt-cells"
+-  - "#thermal-sensor-cells"
++
++# Without the interrupt line only the regulators are available.
++dependentRequired:
++  interrupts:
++    - gpio-controller
++    - "#gpio-cells"
++    - gpio-ranges
++    - interrupt-controller
++    - "#interrupt-cells"
++    - "#thermal-sensor-cells"
+ 
+ additionalProperties: false
+ 
+diff --git a/drivers/mfd/qcom-pm8008.c b/drivers/mfd/qcom-pm8008.c
+index 60204cc9a2dc..5b646b840337 100644
+--- a/drivers/mfd/qcom-pm8008.c
++++ b/drivers/mfd/qcom-pm8008.c
+@@ -183,6 +183,10 @@ static const struct mfd_cell pm8008_cells[] = {
+ 	MFD_CELL_NAME("pm8008-gpio"),
+ };
+ 
++static const struct mfd_cell pm8008_regulator_cell[] = {
++	MFD_CELL_NAME("pm8008-regulator"),
++};
++
+ static void devm_irq_domain_fwnode_release(void *data)
+ {
+ 	struct fwnode_handle *fwnode = data;
+@@ -231,6 +235,18 @@ static int pm8008_probe(struct i2c_client *client)
+ 	 */
+ 	usleep_range(1000, 2000);
+ 
++	/*
++	 * Some boards (Microsoft Surface Duo 2) do not wire the interrupt
++	 * line. The regulators work without it; the GPIO and temperature
++	 * alarm functions need the interrupt controller and are left out.
++	 */
++	if (client->irq <= 0) {
++		dev_info(dev, "no interrupt, registering the regulators only\n");
++		return devm_mfd_add_devices(dev, PLATFORM_DEVID_AUTO,
++					    pm8008_regulator_cell, 1, NULL, 0,
++					    NULL);
++	}
++
+ 	name = devm_kasprintf(dev, GFP_KERNEL, "%pOF-internal", dev->of_node);
+ 	if (!name)
+ 		return -ENOMEM;

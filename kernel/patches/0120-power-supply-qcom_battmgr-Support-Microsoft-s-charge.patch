@@ -1,0 +1,245 @@
+From 8e114e2ba5b070095c22580c79af00a14817ac54 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 22:34:16 +0100
+Subject: [PATCH 120/137] power: supply: qcom_battmgr: Support Microsoft's
+ charge hold on the Surface Duo 2
+
+The Surface Duo 2's battery manager firmware does not answer
+BATTMGR_CHG_CTRL_LIMIT_EN (the request times out), so the generic charge
+thresholds cannot work there. Its own way to keep the battery short of
+full is a Microsoft property: the stock qti_battery_charger sets
+property 22 ("DOC", the hold behind Microsoft's optimized charging,
+switched by the persist.vendor.battery.doc_en property through
+/sys/class/qcom-battery/doc_en) with opcode 0x86 and reads it with 0x85,
+on the ordinary battery manager channel. Requests and responses are 304
+bytes; a response carries the property, its value and a return code.
+
+Offer it on the Surface Duo 2 as the battery's charge_types: "Standard"
+or "Long Life" (the hold on). Where the firmware holds the charge is the
+firmware's decision.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/power/supply/qcom_battmgr.c | 139 ++++++++++++++++++++++++++++
+ 1 file changed, 139 insertions(+)
+
+diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
+index f11c39adb752..80ba6149db12 100644
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -9,6 +9,7 @@
+ #include <linux/module.h>
+ #include <linux/mutex.h>
+ #include <linux/nvmem-consumer.h>
++#include <linux/of.h>
+ #include <linux/of_device.h>
+ #include <linux/pm_wakeup.h>
+ #include <linux/power_supply.h>
+@@ -106,6 +107,17 @@ enum qcom_battmgr_variant {
+ #define CHARGE_CTRL_END_THR_MAX		100
+ #define CHARGE_CTRL_DELTA_SOC		5
+ 
++/*
++ * Microsoft's battery manager properties (Surface Duo 2 firmware): read and
++ * written with their own opcodes on the battery manager channel, as the
++ * stock qti_battery_charger did. DOC is the firmware's charge hold behind
++ * Microsoft's optimized charging: on, the battery is held short of full.
++ */
++#define BATTMGR_MS_PROP_GET		0x85
++#define BATTMGR_MS_PROP_SET		0x86
++#define BATTMGR_MS_PROP_DOC		22
++#define BATTMGR_MS_DATA_LEN		280
++
+ struct qcom_battmgr_enable_request {
+ 	struct pmic_glink_hdr hdr;
+ 	__le32 battery_id;
+@@ -147,6 +159,22 @@ struct qcom_battmgr_charge_ctrl_request {
+ 	__le32 delta_soc;
+ };
+ 
++struct qcom_battmgr_ms_prop_request {
++	struct pmic_glink_hdr hdr;
++	__le32 battery_id;
++	__le32 property;
++	__le32 value;
++	u8 data[BATTMGR_MS_DATA_LEN];
++};
++
++struct qcom_battmgr_ms_prop_response {
++	struct pmic_glink_hdr hdr;
++	__le32 property;
++	__le32 value;
++	__le32 ret_code;
++	u8 data[BATTMGR_MS_DATA_LEN];
++};
++
+ struct qcom_battmgr_message {
+ 	struct pmic_glink_hdr hdr;
+ 	union {
+@@ -335,6 +363,9 @@ struct qcom_battmgr {
+ 
+ 	struct work_struct enable_work;
+ 
++	/* the last value Microsoft's property GET returned */
++	u32 ms_prop_value;
++
+ 	/*
+ 	 * @lock is used to prevent concurrent power supply requests to the
+ 	 * firmware, as it then stops responding.
+@@ -510,6 +541,50 @@ static int qcom_battmgr_bat_sc8280xp_update(struct qcom_battmgr *battmgr,
+ 	return ret;
+ }
+ 
++static int qcom_battmgr_ms_prop(struct qcom_battmgr *battmgr, int opcode,
++				u32 property, u32 value)
++{
++	struct qcom_battmgr_ms_prop_request request = {
++		.hdr.owner = cpu_to_le32(PMIC_GLINK_OWNER_BATTMGR),
++		.hdr.type = cpu_to_le32(PMIC_GLINK_REQ_RESP),
++		.hdr.opcode = cpu_to_le32(opcode),
++		.property = cpu_to_le32(property),
++		.value = cpu_to_le32(value),
++	};
++	int ret;
++
++	mutex_lock(&battmgr->lock);
++	ret = qcom_battmgr_request(battmgr, &request, sizeof(request));
++	mutex_unlock(&battmgr->lock);
++
++	return ret;
++}
++
++/* charge_types: Standard, or Long Life = the firmware's charge hold (DOC) */
++static int qcom_battmgr_charge_hold_get(struct qcom_battmgr *battmgr,
++					union power_supply_propval *val)
++{
++	int ret;
++
++	ret = qcom_battmgr_ms_prop(battmgr, BATTMGR_MS_PROP_GET, BATTMGR_MS_PROP_DOC, 0);
++	if (ret)
++		return ret;
++
++	val->intval = battmgr->ms_prop_value ? POWER_SUPPLY_CHARGE_TYPE_LONGLIFE :
++					       POWER_SUPPLY_CHARGE_TYPE_STANDARD;
++	return 0;
++}
++
++static int qcom_battmgr_charge_hold_set(struct qcom_battmgr *battmgr, int type)
++{
++	if (type != POWER_SUPPLY_CHARGE_TYPE_STANDARD &&
++	    type != POWER_SUPPLY_CHARGE_TYPE_LONGLIFE)
++		return -EINVAL;
++
++	return qcom_battmgr_ms_prop(battmgr, BATTMGR_MS_PROP_SET, BATTMGR_MS_PROP_DOC,
++				    type == POWER_SUPPLY_CHARGE_TYPE_LONGLIFE);
++}
++
+ static int qcom_battmgr_bat_get_property(struct power_supply *psy,
+ 					 enum power_supply_property psp,
+ 					 union power_supply_propval *val)
+@@ -521,6 +596,9 @@ static int qcom_battmgr_bat_get_property(struct power_supply *psy,
+ 	if (!battmgr->service_up)
+ 		return -EAGAIN;
+ 
++	if (psp == POWER_SUPPLY_PROP_CHARGE_TYPES)
++		return qcom_battmgr_charge_hold_get(battmgr, val);
++
+ 	if (battmgr->variant == QCOM_BATTMGR_SC8280XP ||
+ 	    battmgr->variant == QCOM_BATTMGR_X1E80100)
+ 		ret = qcom_battmgr_bat_sc8280xp_update(battmgr, psp);
+@@ -764,6 +842,7 @@ static int qcom_battmgr_bat_is_writeable(struct power_supply *psy,
+ 	switch (psp) {
+ 	case POWER_SUPPLY_PROP_CHARGE_CONTROL_START_THRESHOLD:
+ 	case POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD:
++	case POWER_SUPPLY_PROP_CHARGE_TYPES:
+ 		return 1;
+ 	default:
+ 		return 0;
+@@ -786,6 +865,8 @@ static int qcom_battmgr_bat_set_property(struct power_supply *psy,
+ 		return qcom_battmgr_set_charge_start_threshold(battmgr, pval->intval);
+ 	case POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD:
+ 		return qcom_battmgr_set_charge_end_threshold(battmgr, pval->intval);
++	case POWER_SUPPLY_PROP_CHARGE_TYPES:
++		return qcom_battmgr_charge_hold_set(battmgr, pval->intval);
+ 	default:
+ 		return -EINVAL;
+ 	}
+@@ -896,6 +977,44 @@ static const struct power_supply_desc sm8350_bat_psy_desc = {
+ 	.get_property = qcom_battmgr_bat_get_property,
+ };
+ 
++/* the Surface Duo 2: SM8350 plus Microsoft's charge hold as charge_types */
++static const enum power_supply_property sm8350_ms_bat_props[] = {
++	POWER_SUPPLY_PROP_STATUS,
++	POWER_SUPPLY_PROP_HEALTH,
++	POWER_SUPPLY_PROP_PRESENT,
++	POWER_SUPPLY_PROP_CHARGE_TYPE,
++	POWER_SUPPLY_PROP_CAPACITY,
++	POWER_SUPPLY_PROP_VOLTAGE_OCV,
++	POWER_SUPPLY_PROP_VOLTAGE_NOW,
++	POWER_SUPPLY_PROP_VOLTAGE_MAX,
++	POWER_SUPPLY_PROP_CURRENT_NOW,
++	POWER_SUPPLY_PROP_TEMP,
++	POWER_SUPPLY_PROP_TECHNOLOGY,
++	POWER_SUPPLY_PROP_CHARGE_COUNTER,
++	POWER_SUPPLY_PROP_CYCLE_COUNT,
++	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
++	POWER_SUPPLY_PROP_CHARGE_FULL,
++	POWER_SUPPLY_PROP_MODEL_NAME,
++	POWER_SUPPLY_PROP_TIME_TO_FULL_AVG,
++	POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG,
++	POWER_SUPPLY_PROP_INTERNAL_RESISTANCE,
++	POWER_SUPPLY_PROP_STATE_OF_HEALTH,
++	POWER_SUPPLY_PROP_POWER_NOW,
++	POWER_SUPPLY_PROP_CHARGE_TYPES,
++};
++
++static const struct power_supply_desc sm8350_ms_bat_psy_desc = {
++	.name = "qcom-battmgr-bat",
++	.type = POWER_SUPPLY_TYPE_BATTERY,
++	.properties = sm8350_ms_bat_props,
++	.num_properties = ARRAY_SIZE(sm8350_ms_bat_props),
++	.charge_types = BIT(POWER_SUPPLY_CHARGE_TYPE_STANDARD) |
++			BIT(POWER_SUPPLY_CHARGE_TYPE_LONGLIFE),
++	.get_property = qcom_battmgr_bat_get_property,
++	.set_property = qcom_battmgr_bat_set_property,
++	.property_is_writeable = qcom_battmgr_bat_is_writeable,
++};
++
+ static const enum power_supply_property sm8550_bat_props[] = {
+ 	POWER_SUPPLY_PROP_STATUS,
+ 	POWER_SUPPLY_PROP_HEALTH,
+@@ -1596,6 +1715,24 @@ static void qcom_battmgr_sm8350_callback(struct qcom_battmgr *battmgr,
+ 	case BATTMGR_CHG_CTRL_LIMIT_EN:
+ 		battmgr->error = 0;
+ 		break;
++	case BATTMGR_MS_PROP_GET:
++	case BATTMGR_MS_PROP_SET: {
++		const struct qcom_battmgr_ms_prop_response *ms = (const void *)resp;
++
++		if (len != sizeof(*ms)) {
++			dev_warn(battmgr->dev, "invalid length for %#x: %zd\n", opcode, len);
++			battmgr->error = -ENODATA;
++			break;
++		}
++		if (le32_to_cpu(ms->ret_code)) {
++			battmgr->error = -EIO;
++			break;
++		}
++		if (opcode == BATTMGR_MS_PROP_GET)
++			battmgr->ms_prop_value = le32_to_cpu(ms->value);
++		battmgr->error = 0;
++		break;
++	}
+ 	default:
+ 		dev_warn(battmgr->dev, "unknown message %#x\n", opcode);
+ 		break;
+@@ -1728,6 +1865,8 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
+ 	} else {
+ 		if (battmgr->variant == QCOM_BATTMGR_SM8550)
+ 			psy_desc = &sm8550_bat_psy_desc;
++		else if (of_machine_is_compatible("microsoft,surface-duo2"))
++			psy_desc = &sm8350_ms_bat_psy_desc;
+ 		else
+ 			psy_desc = &sm8350_bat_psy_desc;
+ 

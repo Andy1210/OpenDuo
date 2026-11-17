@@ -1,0 +1,13 @@
+# The first unlock of an encrypted home (homecrypt/README.md): started by the
+# lock's PIN check (duo-lock-helper verify) with the key in
+# /run/duo2-home/unlock.key. Once no call is up, duo-wc and the user's
+# services stop, the pre-unlock tmpfs goes, the key goes to the kernel, and
+# they start again on the real home. Not enabled: nothing else starts it.
+[Unit]
+Description=Encrypted home: the first unlock
+ConditionPathExists=/run/duo2-home/unlock.key
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/duo2-home-crypt settle
+TimeoutStartSec=infinity

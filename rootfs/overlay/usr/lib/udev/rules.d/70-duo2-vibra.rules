@@ -1,0 +1,11 @@
+# Surface Duo 2: the vibration motor (PM8350B haptics, the qcom-spmi-haptics
+# input force-feedback device) is feedbackd's vibra. feedbackd's own rules
+# only know other phones' device names.
+#
+# feedbackd runs in the GUI user's session, which has no logind seat
+# (duo-wc gets its devices from seatd), so a uaccess tag would give nobody
+# access. The device belongs to the feedbackd group instead, which the GUI
+# user is in. The node reports no input events: what it lets an app do is
+# vibrate the motor, nothing more (the GUI user has no `input` group: raw
+# touch and key devices stay closed, docs/hardware/security.md).
+ACTION!="remove", SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT}=="1", ATTRS{name}=="qcom-spmi-haptics", GROUP="feedbackd", MODE="0660", ENV{FEEDBACKD_TYPE}="vibra"

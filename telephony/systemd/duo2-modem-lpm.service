@@ -1,0 +1,18 @@
+# duo2-os: once the modem is up, put it from 'shutting-down' into low-power,
+# as Android's RIL does (telephony/duo2-modem-lpm). Started with rmtfs (which
+# starts the modem) and again on every restart of rmtfs; ModemManager waits for
+# it (ModemManager.service.d/duo2.conf).
+[Unit]
+Description=Modem: low-power mode once it is up (the RIL's first request)
+After=rmtfs.service
+PartOf=rmtfs.service
+Before=ModemManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/duo2-modem-lpm
+TimeoutStartSec=120
+
+[Install]
+WantedBy=rmtfs.service

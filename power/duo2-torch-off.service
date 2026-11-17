@@ -1,0 +1,15 @@
+# The torch (the camera's flash LED lit as a light) off at every shutdown and
+# reboot (duo2-torch-off: the kernel does not switch it off, and the PMIC is
+# not necessarily reset by a restart), the empty-battery power-off included.
+# Started at boot, it does nothing until it is stopped.
+[Unit]
+Description=Switch the torch off at shutdown
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+ExecStop=/usr/local/sbin/duo2-torch-off shutdown
+
+[Install]
+WantedBy=multi-user.target

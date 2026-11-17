@@ -1,0 +1,24 @@
+# The developer tools (devmode/README.md "Developer tools"): bring-up and
+# debugging programs, installed only while Developer mode is on. One
+# installed path per line; duo-devmode keeps their copies in
+# /usr/local/lib/openduo-devtools (root's) and installs or removes them when
+# the switch changes and at every boot (duo-devmode-sync.service).
+#
+# Sleep: one timed suspend with the SoC's sleep counters
+/usr/local/sbin/duo2-sleeptest
+# Audio bring-up: a test tone on the speakers
+/usr/local/sbin/duo2-tone
+# WiFi bring-up: the factory MAC with a way back; joining a network by hand
+/usr/local/sbin/duo2-wifi-mac-trial
+/usr/local/sbin/duo2-wifi-join
+# VoLTE bring-up: the IMS data service's logger (telephony/debug/imsd-logger)
+/usr/local/sbin/duo2-imsd-logger
+# Synthetic touches and keys, the window list (compositor/duo-wc/tools; they
+# need the compositor's admin socket or a trusted connection)
+/usr/local/lib/duo-wc/tools/touch.py
+/usr/local/lib/duo-wc/tools/key.py
+/usr/local/lib/duo-wc/tools/toplevels.py
+# The pose detection checked in six positions (sensors/tools)
+/usr/local/bin/duo2-pose-check
+# The screen-cast and screenshot portals tried as an app would
+/usr/local/bin/duo-screencast-test

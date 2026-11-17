@@ -1,0 +1,120 @@
+#!/usr/bin/python3 -sE
+# duo2-imsa: the modem's IMS registration and IMS services (QMI IMSA), read
+# only, for duo2-volte and by hand (as root: sudo duo2-imsa).
+#
+# The modem answers IMSA queries with InvalidOperation from a client that is
+# not bound to a subscription, and over QRTR a QMI client is a process's own
+# socket, so qmicli cannot bind in one run and ask in the next. Here one
+# socket does both: IMSA Bind (the first subscription; the client's own
+# state, nothing stored in the modem), Get IMS Registration Status, Get IMS
+# Services Status. Exit status 0 = registered, 1 = not, 2 = no answer.
+# Prints no identifier (an error message from the network has long digit
+# runs masked).
+import re
+import socket
+import struct
+import sys
+import time
+
+AF_QIPCRTR = 42
+CTRL_PORT = 0xFFFFFFFE
+NEW_SERVER, NEW_LOOKUP = 4, 10
+IMSA = 0x21
+BIND, GET_REG, GET_SERVICES = 0x0033, 0x0020, 0x0021
+REG = {0: "not-registered", 1: "registering", 2: "registered", 3: "limited-registered"}
+SERVICE = {0: "unavailable", 1: "limited", 2: "available"}
+TECH = {0: "wlan", 1: "wwan", 2: "interworking-wlan"}
+
+
+class Client:
+    def __init__(self, timeout=3.0):
+        self.timeout = timeout
+        self.txn = 0
+        self.sock = socket.socket(AF_QIPCRTR, socket.SOCK_DGRAM)
+        self.sock.settimeout(timeout)
+        self.addr = self._lookup()
+
+    def _lookup(self):
+        local = self.sock.getsockname()[0]
+        self.sock.sendto(struct.pack("<5I", NEW_LOOKUP, IMSA, 0, 0, 0), (local, CTRL_PORT))
+        end = time.monotonic() + self.timeout
+        while time.monotonic() < end:
+            data, src = self.sock.recvfrom(65536)
+            if src[1] == CTRL_PORT and len(data) >= 20:
+                cmd, svc, _inst, node, port = struct.unpack("<5I", data[:20])
+                if cmd == NEW_SERVER and svc == IMSA and node == 0:
+                    return (node, port)
+        raise OSError("no IMSA service on the modem")
+
+    def call(self, msg_id, tlvs=()):
+        """(error code, TLVs) of the response."""
+        self.txn = (self.txn + 1) & 0xFFFF or 1
+        body = b"".join(struct.pack("<BH", t, len(v)) + v for t, v in tlvs)
+        self.sock.sendto(struct.pack("<BHHH", 0, self.txn, msg_id, len(body)) + body, self.addr)
+        end = time.monotonic() + self.timeout
+        while time.monotonic() < end:
+            data, src = self.sock.recvfrom(65536)
+            if src != self.addr or len(data) < 7:
+                continue
+            typ, txn, mid, ln = struct.unpack_from("<BHHH", data, 0)
+            if typ != 2 or txn != self.txn or mid != msg_id:
+                continue
+            out, i, b = {}, 0, data[7 : 7 + ln]
+            while i + 3 <= len(b):
+                t, n = struct.unpack_from("<BH", b, i)
+                out[t] = b[i + 3 : i + 3 + n]
+                i += 3 + n
+            res = out.get(0x02, b"\xff\xff\xff\xff")
+            status, error = struct.unpack("<HH", res[:4])
+            return (error if status else 0), out
+        raise OSError("no answer to IMSA 0x%04x" % msg_id)
+
+
+def u32(tlvs, t):
+    v = tlvs.get(t)
+    return struct.unpack("<I", v[:4])[0] if v and len(v) >= 4 else None
+
+
+def main():
+    try:
+        c = Client()
+        err, _ = c.call(BIND, [(0x10, struct.pack("<I", 0))])
+        if err:
+            print("IMSA bind: QMI error %d" % err)
+        err, reg = c.call(GET_REG)
+        if err:
+            print("IMS registration: QMI error %d" % err)
+            return 2
+        status = u32(reg, 0x12)
+        tech = u32(reg, 0x14)
+        line = "IMS registration: %s" % REG.get(status, status)
+        if tech is not None:
+            line += " (%s)" % TECH.get(tech, tech)
+        code = reg.get(0x11)
+        if code and len(code) >= 2 and struct.unpack("<H", code[:2])[0]:
+            line += ", error %d" % struct.unpack("<H", code[:2])[0]
+        msg = reg.get(0x13)
+        if msg:
+            text = msg.decode("utf-8", "replace").strip("\0 ")
+            if text:
+                line += ", '%s'" % re.sub(r"\d{6,}", "<masked>", text)[:80]
+        print(line)
+        err, srv = c.call(GET_SERVICES)
+        if err:
+            print("IMS services: QMI error %d" % err)
+        else:
+            for name, st, te in (("voice", 0x11, 0x14), ("SMS", 0x10, 0x13)):
+                s, t = u32(srv, st), u32(srv, te)
+                if s is not None:
+                    print(
+                        "IMS %s service: %s%s"
+                        % (name, SERVICE.get(s, s), "" if t is None else " (%s)" % TECH.get(t, t))
+                    )
+        return 0 if status in (2, 3) else 1
+    except OSError as e:
+        print("IMSA: %s" % e)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

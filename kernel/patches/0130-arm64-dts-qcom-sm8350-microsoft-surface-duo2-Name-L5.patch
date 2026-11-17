@@ -1,0 +1,28 @@
+From 2ba503039205855700d815bad3841535622c66ef Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Mon, 9 Nov 2026 17:19:50 +0100
+Subject: [PATCH 130/137] arm64: dts: qcom: sm8350-microsoft-surface-duo2: Name
+ L5B after itself
+
+L5B carried L3B's regulator-name, so the two shared one name (debugfs:
+"'vreg_l3b_0p9' already exists in 'regulator'") and regulator_summary
+listed L5B's consumers under L3B's name.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+index 1479be51b7ac..20f1793e03e5 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+@@ -442,7 +442,7 @@ vreg_l3b_0p9: ldo3 {
+ 		};
+ 
+ 		vreg_l5b_0p88: ldo5 {
+-			regulator-name = "vreg_l3b_0p9";
++			regulator-name = "vreg_l5b_0p88";
+ 			regulator-min-microvolt = <880000>;
+ 			regulator-max-microvolt = <888000>;
+ 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;

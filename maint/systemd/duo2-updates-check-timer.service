@@ -1,0 +1,12 @@
+[Unit]
+Description=OpenDuo: the daily look for system updates (WiFi only unless set otherwise)
+Documentation=file:///usr/local/lib/duo2-maint/duo2-updates
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/duo2-updates run-check --notify --timer
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=30min

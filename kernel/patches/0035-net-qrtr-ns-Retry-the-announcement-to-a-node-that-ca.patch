@@ -1,0 +1,167 @@
+From e522672ae4ce2de84b7b67940bf9895cd5b8a616 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 04:57:48 +0100
+Subject: [PATCH 035/137] net: qrtr: ns: Retry the announcement to a node that
+ cannot receive it yet
+
+The core sends its HELLO to a new endpoint from a work item, which
+retries every 100 ms while the endpoint returns -EAGAIN, and until that
+HELLO is out qrtr_node_enqueue() refuses every other packet to the node
+with -EAGAIN. When the remote's HELLO reaches the name service first,
+announce_servers() therefore fails on the very first server, the whole
+announcement is dropped ("failed to announce new service"), and nothing
+ever sends it again: the remote never learns about any service of the
+local node.
+
+On the Surface Duo 2 (SM8350) the modem loses this race in about half of
+its boots. It then waits for the remote filesystem service (rmtfs) that it
+was never told about, never opens its EFS partitions, and its watchdog
+kills it 65 seconds after the start: "dog_hal_common.c:177:DOG detects
+stalled initialization". The recovered modem often loses the race again,
+so the modem crashes in a loop. Every boot with the error message ended in
+the watchdog crash, every boot without it got past its EFS stage.
+
+Keep a retry count per node and try the announcement again from a delayed
+work on the (ordered) name service workqueue while it fails with -EAGAIN,
+for up to ten seconds. A BYE from the node drops the node and with it the
+pending retries.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ net/qrtr/ns.c | 75 +++++++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 73 insertions(+), 2 deletions(-)
+
+diff --git a/net/qrtr/ns.c b/net/qrtr/ns.c
+index bcb090ee79d4..c8cc1ed159ee 100644
+--- a/net/qrtr/ns.c
++++ b/net/qrtr/ns.c
+@@ -25,6 +25,7 @@ static struct {
+ 	u32 lookup_count;
+ 	struct workqueue_struct *workqueue;
+ 	struct work_struct work;
++	struct delayed_work announce_work;
+ 	void (*saved_data_ready)(struct sock *sk);
+ 	int local_node;
+ } qrtr_ns;
+@@ -70,6 +71,7 @@ struct qrtr_node {
+ 	unsigned int id;
+ 	struct xarray servers;
+ 	u32 server_count;
++	unsigned int announce_retries;
+ };
+ 
+ /* Max nodes, server, lookup limits are chosen based on the current platform
+@@ -80,6 +82,10 @@ struct qrtr_node {
+ #define QRTR_NS_MAX_SERVERS 256
+ #define QRTR_NS_MAX_LOOKUPS 128
+ 
++/* Retrying the announcement to a node that cannot receive it yet */
++#define QRTR_NS_ANNOUNCE_RETRY_MS	100
++#define QRTR_NS_ANNOUNCE_RETRIES	100
++
+ static u16 node_count;
+ 
+ static struct qrtr_node *node_get(unsigned int node_id)
+@@ -231,13 +237,52 @@ static int announce_servers(struct sockaddr_qrtr *sq)
+ 			if (ret == -ENODEV)
+ 				continue;
+ 
+-			pr_err("failed to announce new service\n");
++			/* Not yet: the caller retries */
++			if (ret != -EAGAIN)
++				pr_err("failed to announce new service\n");
+ 			return ret;
+ 		}
+ 	}
+ 	return 0;
+ }
+ 
++/*
++ * Retry the announcements that could not be sent yet (see ctrl_cmd_hello()).
++ * Runs on the ordered NS workqueue, like everything else touching the nodes.
++ */
++static void qrtr_ns_announce_worker(struct work_struct *work)
++{
++	struct sockaddr_qrtr sq = {
++		.sq_family = AF_QIPCRTR,
++		.sq_port = QRTR_PORT_CTRL,
++	};
++	struct qrtr_node *node;
++	unsigned long index;
++	bool again = false;
++	int ret;
++
++	xa_for_each(&nodes, index, node) {
++		if (!node->announce_retries)
++			continue;
++
++		sq.sq_node = node->id;
++		ret = announce_servers(&sq);
++		if (ret == -EAGAIN && --node->announce_retries) {
++			again = true;
++			continue;
++		}
++
++		if (ret < 0)
++			pr_err("failed to announce the services to node %u: %d\n",
++			       node->id, ret);
++		node->announce_retries = 0;
++	}
++
++	if (again)
++		queue_delayed_work(qrtr_ns.workqueue, &qrtr_ns.announce_work,
++				   msecs_to_jiffies(QRTR_NS_ANNOUNCE_RETRY_MS));
++}
++
+ static struct qrtr_server *server_add(unsigned int service,
+ 				      unsigned int instance,
+ 				      unsigned int node_id,
+@@ -329,7 +374,31 @@ static int server_del(struct qrtr_node *node, unsigned int port, bool bcast)
+ 
+ static int ctrl_cmd_hello(struct sockaddr_qrtr *sq)
+ {
+-	return announce_servers(sq);
++	struct qrtr_node *node;
++	int ret;
++
++	ret = announce_servers(sq);
++	if (ret != -EAGAIN)
++		return ret;
++
++	/*
++	 * The remote said hello before the transport could carry anything
++	 * back to it: the core sends its own HELLO from a work item that
++	 * retries while the endpoint returns -EAGAIN, and refuses every other
++	 * packet to the node with -EAGAIN until then (a GLINK remote may also
++	 * refuse an intent request this early). A remote that never gets the
++	 * list waits for the local services forever (a modem stalls its boot
++	 * waiting for the remote filesystem service), so try again shortly.
++	 */
++	node = node_get(sq->sq_node);
++	if (!node)
++		return -ENOMEM;
++
++	node->announce_retries = QRTR_NS_ANNOUNCE_RETRIES;
++	queue_delayed_work(qrtr_ns.workqueue, &qrtr_ns.announce_work,
++			   msecs_to_jiffies(QRTR_NS_ANNOUNCE_RETRY_MS));
++
++	return 0;
+ }
+ 
+ static int ctrl_cmd_bye(struct sockaddr_qrtr *from)
+@@ -711,6 +780,7 @@ int qrtr_ns_init(void)
+ 
+ 	INIT_LIST_HEAD(&qrtr_ns.lookups);
+ 	INIT_WORK(&qrtr_ns.work, qrtr_ns_worker);
++	INIT_DELAYED_WORK(&qrtr_ns.announce_work, qrtr_ns_announce_worker);
+ 
+ 	ret = sock_create_kern(&init_net, AF_QIPCRTR, SOCK_DGRAM,
+ 			       PF_QIPCRTR, &qrtr_ns.sock);
+@@ -784,6 +854,7 @@ void qrtr_ns_remove(void)
+ 	write_unlock_bh(&qrtr_ns.sock->sk->sk_callback_lock);
+ 
+ 	cancel_work_sync(&qrtr_ns.work);
++	cancel_delayed_work_sync(&qrtr_ns.announce_work);
+ 	synchronize_net();
+ 	destroy_workqueue(qrtr_ns.workqueue);
+ 

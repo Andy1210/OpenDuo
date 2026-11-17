@@ -1,0 +1,47 @@
+# duo2-os: the IMS Data service for VoLTE (telephony/README.md "VoLTE"). The modem's IMS stack asks this server (QRTR service 770)
+# for its PDNs; it creates and connects ModemManager bearers for them and
+# reports their addresses back. Our build: telephony/81voltd/ (1.2.0 + patches).
+#
+# NOT enabled: during the VoLTE trial `duo2-volte start` starts it and
+# `duo2-volte undo` stops it, so a reboot is the way back as well.
+#
+# No PrivateNetwork: since the CVE-2026-68294 fix the kernel allows
+# AF_QIPCRTR only in the initial network namespace.
+[Unit]
+Description=IMS data service for the modem (81voltd, VoLTE)
+Wants=ModemManager.service
+After=ModemManager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/81voltd
+# Emergency PDN requests are refused at once: the modem then places an
+# emergency call over CS without waiting for its own timer (owner decision). Empty = refuse none.
+Environment=QVD_REFUSE_APNS=sos
+# This program's info messages (requests, connection changes; no addresses).
+Environment=G_MESSAGES_DEBUG=81voltd
+Restart=on-failure
+RestartSec=5
+# It disconnects and deletes its bearers when stopped.
+TimeoutStopSec=30
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_QIPCRTR
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

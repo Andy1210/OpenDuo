@@ -1,0 +1,12 @@
+# Enabled by `duo-appearance set auto` (Settings > Appearance > Automatic),
+# disabled by the other choices: the switch lands within 15 minutes.
+[Unit]
+Description=Dark or light apps by the time of day (Settings > Appearance, Automatic)
+
+[Timer]
+OnStartupSec=30
+OnCalendar=*:0/15
+Persistent=true
+
+[Install]
+WantedBy=timers.target

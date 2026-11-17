@@ -1,0 +1,14 @@
+#!/bin/sh
+# @PKG@: what depmod made in the modules' directory.
+set -e
+REL=@RELEASE@
+case "$1" in
+remove | purge)
+    M=/usr/lib/modules/$REL
+    rm -f "$M"/modules.alias "$M"/modules.alias.bin "$M"/modules.builtin.alias.bin "$M"/modules.builtin.bin \
+        "$M"/modules.dep "$M"/modules.dep.bin "$M"/modules.devname "$M"/modules.softdep "$M"/modules.symbols \
+        "$M"/modules.symbols.bin "$M"/modules.weakdep
+    rmdir "$M" 2>/dev/null || true
+    ;;
+esac
+exit 0

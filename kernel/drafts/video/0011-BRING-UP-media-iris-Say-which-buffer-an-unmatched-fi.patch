@@ -1,0 +1,78 @@
+From a1c88c436f23ac8b05eb505db467f1f373ec090e Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Mon, 9 Nov 2026 20:31:45 +0100
+Subject: [PATCH 11/16] BRING-UP: media: iris: Say which buffer an unmatched
+ fill-buffer-done names
+
+With FFmpeg's VP9 wrapper (vp9_v4l2m2m) the Gen1 decoder stops after a
+few hundred frames with "error in ftb done": the firmware returned an
+output buffer that the driver does not hold as queued. GStreamer's
+v4l2vp9dec decodes the same file. Print the fill-buffer-done's stream,
+tag, offset, length and flags, and the capture queue and DPB list as the
+driver sees them, so the next occurrence tells a buffer reported twice,
+a stale offset or a buffer the firmware never got apart.
+
+Debugging aid only, not for upstream.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../qcom/iris/iris_hfi_gen1_response.c        | 39 +++++++++++++++++++
+ 1 file changed, 39 insertions(+)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen1_response.c b/drivers/media/platform/qcom/iris/iris_hfi_gen1_response.c
+index e2b95c22f4d1..abeb74fb61ee 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen1_response.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen1_response.c
+@@ -385,6 +385,42 @@ static void iris_hfi_gen1_session_etb_done(struct iris_inst *inst, void *packet)
+ 	dev_err(inst->core->dev, "error in etb done\n");
+ }
+ 
++/*
++ * BRING-UP: say which buffer a fill-buffer-done named that the driver does
++ * not hold as queued, and what the driver does hold, so an "error in ftb
++ * done" can be told apart: a buffer reported twice, a stale offset, a DPB
++ * reported on the OPB stream, or a buffer the firmware never got.
++ */
++static void iris_hfi_gen1_dump_unmatched_fbd(struct iris_inst *inst, u32 stream_id,
++					     u32 output_tag, u32 offset, u32 filled_len,
++					     u32 hfi_flags, u32 pic_type)
++{
++	struct v4l2_m2m_ctx *m2m_ctx = inst->m2m_ctx;
++	struct v4l2_m2m_buffer *m2m_buffer, *n;
++	struct device *dev = inst->core->dev;
++	struct iris_buffer *buf;
++	char list[256];
++	int len = 0;
++
++	dev_err(dev, "fbd: stream %u tag %u offset %u filled %u flags %#x pic %#x, split %d, cap seq %u out seq %u, fw min %u\n",
++		stream_id, output_tag, offset, filled_len, hfi_flags, pic_type,
++		iris_split_mode_enabled(inst), inst->sequence_cap, inst->sequence_out,
++		inst->fw_min_count);
++
++	v4l2_m2m_for_each_dst_buf_safe(m2m_ctx, m2m_buffer, n) {
++		buf = to_iris_buffer(&m2m_buffer->vb);
++		len += scnprintf(list + len, sizeof(list) - len, " %u:%#x@%u",
++				 buf->index, buf->attr, buf->data_offset);
++	}
++	dev_err(dev, "fbd: capture queue (index:attr@offset):%s\n", len ? list : " empty");
++
++	len = 0;
++	list_for_each_entry(buf, &inst->buffers[BUF_DPB].list, list)
++		len += scnprintf(list + len, sizeof(list) - len, " %u:%#x@%u",
++				 buf->index, buf->attr, buf->data_offset);
++	dev_err(dev, "fbd: DPB list (index:attr@offset):%s\n", len ? list : " empty");
++}
++
+ static void iris_hfi_gen1_session_ftb_done(struct iris_inst *inst, void *packet)
+ {
+ 	struct hfi_msg_session_fbd_uncompressed_plane0_pkt *uncom_pkt = packet;
+@@ -531,6 +567,9 @@ static void iris_hfi_gen1_session_ftb_done(struct iris_inst *inst, void *packet)
+ error:
+ 	iris_inst_change_state(inst, IRIS_INST_ERROR);
+ 	dev_err(core->dev, "error in ftb done\n");
++	iris_hfi_gen1_dump_unmatched_fbd(inst, inst->domain == DECODER ?
++					 uncom_pkt->stream_id : 0, output_tag, offset,
++					 filled_len, hfi_flags, pic_type);
+ }
+ 
+ struct iris_hfi_gen1_response_pkt_info {

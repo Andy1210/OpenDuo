@@ -1,0 +1,44 @@
+From e072c497df9c4acf1ae2f0202af9cf100ed3088f Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Fri, 6 Nov 2026 18:02:51 +0100
+Subject: [PATCH 020/137] PCI: qcom: Do not advertise native hot-plug on the
+ Root Ports
+
+The Root Ports keep the hardware's Hot-Plug Capable and Hot-Plug Surprise
+bits in their Slot Capabilities, although no hot-plug interrupt is wired
+up and the endpoints are soldered down (or powered through pwrctrl).
+
+With Hot-Plug Capable set, the port is a hot-plug bridge, and without a
+native pciehp the PCI core never moves it to D3hot. During system suspend
+the D3cold check then fails at the Root Port, the link stays up and the
+controller keeps its clocks, interconnect votes and GDSC on, which keeps
+the SoC out of its deep sleep states (e.g. on the Surface Duo 2 with a
+WCN6855: "pcie_0_gdsc status stuck at 'on'" on every suspend).
+
+Clear both bits, as is already done for the Attention Button.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/pci/controller/dwc/pcie-qcom.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/drivers/pci/controller/dwc/pcie-qcom.c b/drivers/pci/controller/dwc/pcie-qcom.c
+index 89a476c37098..d4aea99f4b35 100644
+--- a/drivers/pci/controller/dwc/pcie-qcom.c
++++ b/drivers/pci/controller/dwc/pcie-qcom.c
+@@ -396,6 +396,15 @@ static void qcom_pcie_set_slot_cap(struct dw_pcie *pci)
+ 	 * Attention Button Present in Slot Capabilities.
+ 	 */
+ 	val &= ~PCI_EXP_SLTCAP_ABP;
++
++	/*
++	 * Nor native hot-plug: there is no hot-plug interrupt, and the
++	 * endpoints are soldered down or powered by pwrctrl. Left set, Hot-Plug
++	 * Capable marks the port a hot-plug bridge, which the PCI core never
++	 * puts into D3hot without pciehp, so the link can never reach D3cold
++	 * and the controller stays powered through system suspend.
++	 */
++	val &= ~(PCI_EXP_SLTCAP_HPC | PCI_EXP_SLTCAP_HPS);
+ 	writel(val, pci->dbi_base + offset + PCI_EXP_SLTCAP);
+ 
+ 	dw_pcie_dbi_ro_wr_dis(pci);

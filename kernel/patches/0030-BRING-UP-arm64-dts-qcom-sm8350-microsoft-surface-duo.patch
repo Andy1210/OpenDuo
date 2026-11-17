@@ -1,0 +1,219 @@
+From 8d6eca797e92c415eda61c37e1feb6c767a6b5a3 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 03:00:00 +0100
+Subject: [PATCH 030/137] BRING-UP: arm64: dts: qcom:
+ sm8350-microsoft-surface-duo2: Add the speakers and microphones
+
+Three WSA883x on the WSA SoundWire bus (stock MP DTBO "Surface Duo2 MP",
+board id 0x10008/0x0c): SpkrLeft (unique id 1, SD_N gpio128), SpkrRight
+(2, gpio42) and the earpiece amplifier "Receiver" (3, gpio131), all on
+S10B 1.8 V. No headset codec (stock: qcom,wcd-disabled) and no jack. The
+digital microphones sit on the LPASS DMIC pins (DMIC0-5), powered from
+L2C (the stock VA mic bias); recorded through the VA macro. The earpiece
+is probed but kept out of the card until the speakers are proven.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../qcom/sm8350-microsoft-surface-duo2.dts    | 171 ++++++++++++++++++
+ 1 file changed, 171 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+index 1f24ad6b63f8..1e8363fc4564 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+@@ -100,6 +100,88 @@ cont_splash_mem: memory@e1000000 {
+ 		};
+ 	};
+ 
++	/*
++	 * Speakers and microphones (the stock "lahaina-qrd-snd-card" of the MP
++	 * board, without its WCD938x: there is no headset codec and no jack).
++	 * Three WSA883x on the WSA SoundWire bus: SpkrLeft and SpkrRight take
++	 * WSA_SPK1/2, the earpiece amplifier ("Receiver") hangs on WSA_SPK1 too
++	 * and is used instead of SpkrLeft (stock: "WSA SPKRRECV"). Microphones
++	 * are digital, on the LPASS DMIC pins, recorded through the VA macro
++	 * (stock records through the TX macro; same pins).
++	 *
++	 * The earpiece is left out of the card until the speakers work: with the
++	 * same master ports as SpkrLeft it must never stream at the same time.
++	 */
++	sound {
++		compatible = "qcom,sm8350-sndcard";
++		model = "Microsoft-SurfaceDuo2";
++		audio-routing = "SpkrLeft IN", "WSA_SPK1 OUT",
++				"SpkrRight IN", "WSA_SPK2 OUT",
++				"VA DMIC0", "vdd-micb",
++				"VA DMIC1", "vdd-micb",
++				"VA DMIC2", "vdd-micb",
++				"VA DMIC3", "vdd-micb",
++				"VA DMIC4", "vdd-micb",
++				"VA DMIC5", "vdd-micb";
++
++		mm1-dai-link {
++			link-name = "MultiMedia1";
++
++			cpu {
++				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA1>;
++			};
++		};
++
++		mm2-dai-link {
++			link-name = "MultiMedia2";
++
++			cpu {
++				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA2>;
++			};
++		};
++
++		mm3-dai-link {
++			link-name = "MultiMedia3";
++
++			cpu {
++				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA3>;
++			};
++		};
++
++		wsa-dai-link {
++			link-name = "WSA Playback";
++
++			cpu {
++				sound-dai = <&q6afedai WSA_CODEC_DMA_RX_0>;
++			};
++
++			codec {
++				sound-dai = <&spkr_left>, <&spkr_right>,
++					    <&swr0 0>, <&wsamacro 0>;
++			};
++
++			platform {
++				sound-dai = <&q6routing>;
++			};
++		};
++
++		va-dai-link {
++			link-name = "VA Capture";
++
++			cpu {
++				sound-dai = <&q6afedai VA_CODEC_DMA_TX_0>;
++			};
++
++			codec {
++				sound-dai = <&vamacro 0>;
++			};
++
++			platform {
++				sound-dai = <&q6routing>;
++			};
++		};
++	};
++
+ 	/*
+ 	 * QCA6490 (= WCN6855) WiFi on PCIe0 + Bluetooth on UART13. Enable lines
+ 	 * and rails from the stock DT: WL_EN gpio64, BT_EN gpio65, SW_CTRL
+@@ -735,6 +817,56 @@ slpi-sleepstate {
+ 	};
+ };
+ 
++/*
++ * The stock DT addresses the amplifiers as <0x2 0x217022N>: SoundWire
++ * manufacturer 0x0217, part 0x0202 (WSA883x), unique id N. Master ports
++ * as the stock "qcom,swr-port-mapping": 1-3 DAC/COMP/BOOST left, 4-6 right,
++ * 7/8 the V/I sense of left/right.
++ */
++&swr0 {
++	status = "okay";
++
++	spkr_left: speaker@0,1 {
++		compatible = "sdw10217020200";
++		reg = <0 1>;
++		pinctrl-0 = <&spkr_1_sd_n_default>;
++		pinctrl-names = "default";
++		powerdown-gpios = <&tlmm 128 GPIO_ACTIVE_LOW>;
++		vdd-supply = <&vreg_s10b_1p8>;
++		qcom,port-mapping = <1 2 3 7>;
++		sound-name-prefix = "SpkrLeft";
++		#sound-dai-cells = <0>;
++		#thermal-sensor-cells = <0>;
++	};
++
++	spkr_right: speaker@0,2 {
++		compatible = "sdw10217020200";
++		reg = <0 2>;
++		pinctrl-0 = <&spkr_2_sd_n_default>;
++		pinctrl-names = "default";
++		powerdown-gpios = <&tlmm 42 GPIO_ACTIVE_LOW>;
++		vdd-supply = <&vreg_s10b_1p8>;
++		qcom,port-mapping = <4 5 6 8>;
++		sound-name-prefix = "SpkrRight";
++		#sound-dai-cells = <0>;
++		#thermal-sensor-cells = <0>;
++	};
++
++	/* The earpiece: stock "Receiver", fed from WSA_SPK1 like SpkrLeft. */
++	earpiece: speaker@0,3 {
++		compatible = "sdw10217020200";
++		reg = <0 3>;
++		pinctrl-0 = <&spkr_3_sd_n_default>;
++		pinctrl-names = "default";
++		powerdown-gpios = <&tlmm 131 GPIO_ACTIVE_LOW>;
++		vdd-supply = <&vreg_s10b_1p8>;
++		qcom,port-mapping = <1 2 3 7>;
++		sound-name-prefix = "Receiver";
++		#sound-dai-cells = <0>;
++		#thermal-sensor-cells = <0>;
++	};
++};
++
+ &tlmm {
+ 	gpio-reserved-ranges = <4 4>, <12 4>, <56 4>, <76 4>;
+ 
+@@ -872,6 +1004,31 @@ disp1_te: disp1-te-state {
+ 		drive-strength = <2>;
+ 		bias-pull-down;
+ 	};
++
++	/* WSA883x SD_N (shutdown, active low): held low until the driver probes. */
++	spkr_1_sd_n_default: spkr-1-sd-n-default-state {
++		pins = "gpio128";
++		function = "gpio";
++		drive-strength = <16>;
++		bias-disable;
++		output-low;
++	};
++
++	spkr_2_sd_n_default: spkr-2-sd-n-default-state {
++		pins = "gpio42";
++		function = "gpio";
++		drive-strength = <16>;
++		bias-disable;
++		output-low;
++	};
++
++	spkr_3_sd_n_default: spkr-3-sd-n-default-state {
++		pins = "gpio131";
++		function = "gpio";
++		drive-strength = <16>;
++		bias-disable;
++		output-low;
++	};
+ };
+ 
+ &uart2 {
+@@ -950,3 +1107,17 @@ &usb_2_qmpphy {
+ 	vdda-phy-supply = <&vreg_l5b_0p88>;
+ 	vdda-pll-supply = <&vreg_l6b_1p2>;
+ };
++
++/* DMIC0-5 on the LPASS pins; their supply is the stock VA mic bias (L2C). */
++&vamacro {
++	pinctrl-0 = <&dmic01_active>, <&dmic23_active>, <&dmic45_active>;
++	pinctrl-names = "default";
++	vdd-micb-supply = <&vreg_l2c_1p8>;
++	qcom,dmic-sample-rate = <2400000>;
++
++	status = "okay";
++};
++
++&wsamacro {
++	status = "okay";
++};

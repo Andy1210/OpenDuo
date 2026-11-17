@@ -1,0 +1,842 @@
+#!/usr/bin/python3 -I
+"""duo-settings-helper: what Duo Settings needs root for.
+
+    duo-settings-helper refresh 60|90           the panels' refresh (the panel
+                                                driver's module parameter, kept
+                                                in /etc/duo-settings/display.conf;
+                                                takes effect when duo-wc starts)
+    duo-settings-helper refresh-boot            write the kept refresh to the
+                                                driver (duo-panel-refresh.service)
+    duo-settings-helper wc-conf KEY VALUE       /etc/duo-wc/duo-wc.conf: hinge_gap
+                                                on|off, scale 2|2.25|2.5|2.75|3,
+                                                idle_timeout SECONDS, session_lock on
+                                                (never off: no app may switch the lock
+                                                off), pen_button right_click|off,
+                                                pen_dot on|off, pen_input apps|all,
+                                                pen_apps "rnote, krita" (app ids,
+                                                comma separated); all but scale are
+                                                applied live too
+    duo-settings-helper pen palm both|panel|off the pen's palm rejection (on both
+                                                screens, the pen's screen, off):
+                                                /etc/duo2/pen.conf, which duo2-touchd
+                                                reads again by itself
+    duo-settings-helper pen feel off|ink|pencil|marker|chisel|brush
+                                                the pen's writing feel (its haptics
+                                                while the tip touches): /etc/duo2/pen.conf,
+                                                which duo2-pend reads again by itself
+    duo-settings-helper pen strength 1..100     the strength of the pen's haptics
+    duo-settings-helper pen click on|off        a click in the pen when its top
+                                                button is pressed
+    duo-settings-helper pen fw-available        the pen firmware on this phone (JSON: the
+                                                newest set in /var/lib/duo2-pen-fw, its
+                                                parts and versions; pen-fw.py inspect)
+    duo-settings-helper pen fw-update           update the pen with it: pen-fw.py
+                                                update --go --until-done (all its checks:
+                                                charger, the pen at 50 %, no other device,
+                                                newer and Microsoft-signed parts only) as
+                                                the transient unit duo2-pen-fw-update,
+                                                progress in /run/duo2-pen-fw/status.json
+    duo-settings-helper pen fw-stop             stop it (the pen keeps its firmware)
+    duo-settings-helper pen charge on|off       charging the pen from the phone (the
+                                                Surface Duo 2 Pen Cover): power/'s
+                                                duo2-pen-charger on|off, which keeps it
+                                                in /etc/duo2/pen-charger and runs the
+                                                stock rule
+    duo-settings-helper pose dual|span|single DSI-1|single DSI-2
+                                                duo-wc's pose, live
+    duo-settings-helper laptop on|off|toggle    laptop mode (one panel a desk, the other
+                                                a keyboard and a touchpad), live
+    duo-settings-helper laptop auto on|off      laptop mode in the laptop posture
+    duo-settings-helper laptop keys DSI-1|DSI-2 its keyboard panel when the posture does
+                                                not say (duo-wc keeps both settings)
+    duo-settings-helper display on_connect ask|desk|mirror
+                                                what a display plugged in is used as
+    duo-settings-helper display mirror active|both
+                                                what a mirroring display shows (the
+                                                panel in use, or both; duo-wc keeps them)
+    duo-settings-helper restart-display         restart duo-wc (open apps close), once
+                                                the user says yes to the shell's
+                                                question (duo-wc's confirm: no app
+                                                can restart the display by itself)
+    duo-settings-helper posed KEY on|off        /etc/duo-posed.conf: enabled,
+                                                auto_rotate, auto_pose; then
+                                                duo-posed reads it again
+    duo-settings-helper posed panels both|left|right
+                                                the user's panel choice over the
+                                                sensors (duo-posed's panels), and
+                                                the pose it means, live
+    duo-settings-helper timezone ZONE           e.g. Europe/Budapest
+    duo-settings-helper ntp on|off              network time
+    duo-settings-helper locale-set LANG REGION DAY
+                                                language and formats: LANG and REGION
+                                                are generated locales (xx_YY.UTF-8),
+                                                DAY auto|mon|sun|sat is the first day
+                                                of the week; /etc/locale.conf, applied
+                                                when the session restarts
+    duo-settings-helper touch-matrix left|right A B C D E F | reset
+                                                a panel's libinput calibration
+                                                (a udev rule over the shipped one)
+    duo-settings-helper battery refresh|clear   the battery usage statistics
+                                                (duo2-battery-stats, battery/): a
+                                                fresh report now, or clear the
+                                                usage history; a signal to the
+                                                collector, then waits for its report
+                                                and prints it (JSON)
+
+    duo-settings-helper identity                the phone's own identifiers for
+                                                Settings > About > Status, as one
+                                                JSON line: the serial number (SMBIOS,
+                                                root-only) and the modem's IMEIs
+                                                (QMI, outside the session's QRTR ban)
+
+    duo-settings-helper geoclue-deny [APP_ID...]
+                                                the apps geoclue refuses a position
+                                                (Settings > Privacy; desktop ids):
+                                                /etc/geoclue/conf.d/91-duo2-apps.conf,
+                                                then geoclue starts anew if it runs
+
+Run by Duo Settings as `sudo -n duo-settings-helper ...`; install-files.sh
+puts a sudoers rule for exactly this file in /etc/sudoers.d/duo-settings.
+Every argument is checked against a fixed list or pattern: nothing from the
+caller reaches a shell or a free path.
+
+Duo Settings is an app like any other (docs/hardware/security.md): duo-wc
+refuses it everything but the state on the user's socket. The display
+preferences it changes live go through here, as root, to duo-wc's admin
+socket, and only those: any app of the user can reach this helper too, so it
+offers nothing that unlocks, looks at the screen or switches the lock off.
+"""
+
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import time
+
+WC_CONF = "/etc/duo-wc/duo-wc.conf"
+POSED_CONF = "/etc/duo-posed.conf"
+DISPLAY_CONF = "/etc/duo-settings/display.conf"
+REFRESH_PARAM = "/sys/module/panel_microsoft_elgin/parameters/refresh"
+ZONEINFO = "/usr/share/zoneinfo"
+TOUCH_RULES = "/etc/udev/rules.d/91-duo2-touch-calibration.rules"
+PEN_CONF = "/etc/duo2/pen.conf"
+PALM_MODES = ("both", "panel", "off")
+FEELS = ("off", "ink", "pencil", "marker", "chisel", "brush")
+PEN_FW = "/usr/local/lib/duo2-touch-tools/pen-fw.py"
+PEN_FW_SETS = "/var/lib/duo2-pen-fw"  # root only: the firmware sets (one folder each)
+PEN_FW_STATUS = "/run/duo2-pen-fw/status.json"
+PEN_FW_UNIT = "duo2-pen-fw-update"
+PEN_CHARGER = "/usr/local/sbin/duo2-pen-charger"
+LOCALE_CONF = "/etc/locale.conf"
+REGION_CONF = "/etc/duo-settings/region.conf"
+LOCALE_SRC = "/usr/share/i18n/locales"
+LOCALE_DIR = "/usr/lib/locale"
+LOCALE_RE = re.compile(r"[a-z]{2,3}_[A-Z]{2}\.UTF-8")
+DAYS = {"mon": "2", "sun": "1", "sat": "7"}
+TOUCH_NAMES = {"left": "Surface Duo 2 Touchscreen Left", "right": "Surface Duo 2 Touchscreen Right"}
+BATTERY_REPORT = "/run/duo2-battery/report.json"
+QMI_SCRIPT = "/usr/local/lib/duo-settings/duo-settings-qmi"
+DMI = "/sys/class/dmi/id"
+SYSTEMD_RUN = "/usr/bin/systemd-run"
+# The QMI reader's service: QRTR only, nothing it could write.
+QMI_UNIT_PROPERTIES = (
+    "RestrictAddressFamilies=AF_UNIX AF_QIPCRTR",
+    "NoNewPrivileges=yes",
+    "ProtectSystem=strict",
+    "ProtectHome=yes",
+    "PrivateTmp=yes",
+    "CapabilityBoundingSet=",
+    "RuntimeMaxSec=15",
+)
+BATTERY_SIGNALS = {"refresh": "USR1", "clear": "USR2"}
+
+WC_KEYS = {
+    "hinge_gap": lambda v: v in ("on", "off"),
+    "scale": lambda v: v in ("2", "2.25", "2.5", "2.75", "3"),
+    "idle_timeout": lambda v: is_ascii_number(v) and int(v) <= 86400,
+    "session_lock": lambda v: v == "on",
+    "pen_button": lambda v: v in ("right_click", "off"),
+    "pen_dot": lambda v: v in ("on", "off"),
+    "pen_input": lambda v: v in ("apps", "all"),
+    "pen_apps": lambda v: pen_apps_ok(v),
+}
+
+
+def is_ascii_number(value):
+    """A short run of ASCII digits 0-9. str.isdigit() alone also takes
+    superscripts and other scripts' digits, which int() may refuse and a
+    config parser would not read. Pure."""
+    return value.isascii() and value.isdigit() and len(value) <= 9
+
+
+def pen_apps_ok(value):
+    """duo-wc.conf's pen_apps: app ids (letters, digits, . _ -) separated by
+    commas and spaces, or nothing; nothing that could end the line or start a
+    comment. Pure."""
+    if len(value) > 1000:
+        return False
+    ok = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-, ")
+    return set(value) <= ok
+
+
+POSED_KEYS = ("enabled", "auto_rotate", "auto_pose")
+
+
+def set_conf_key(text, key, value):
+    """The config text with `key = value` (the first active line, else a
+    commented-out one, else appended). Pure."""
+    lines = text.splitlines()
+    out, done = [], False
+    for line in lines:
+        bare = line.strip()
+        if (
+            not done
+            and "=" in bare
+            and not bare.startswith("#")
+            and bare.split("=", 1)[0].strip() == key
+        ):
+            out.append("%s = %s" % (key, value))
+            done = True
+        else:
+            out.append(line)
+    if not done:
+        for i, line in enumerate(out):
+            bare = line.strip().lstrip("#").strip()
+            if "=" in bare and bare.split("=", 1)[0].strip() == key:
+                out[i] = "%s = %s" % (key, value)
+                done = True
+                break
+    if not done:
+        out.append("%s = %s" % (key, value))
+    return "\n".join(out) + "\n"
+
+
+def edit_conf(path, key, value, mode=0o644):
+    try:
+        with open(path) as f:
+            text = f.read()
+    except FileNotFoundError:
+        text = ""
+    new = set_conf_key(text, key, value)
+    if new != text:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path + ".new", "w") as f:
+            f.write(new)
+        os.chmod(path + ".new", mode)
+        os.replace(path + ".new", path)
+
+
+def pen_fw_set():
+    """The newest firmware set folder (by its version-like name), or None."""
+    try:
+        names = [n for n in os.listdir(PEN_FW_SETS) if os.path.isdir(os.path.join(PEN_FW_SETS, n))]
+    except OSError:
+        return None
+
+    def key(n):
+        return [int(x) if x.isascii() and x.isdigit() else -1 for x in n.split(".")]
+
+    return os.path.join(PEN_FW_SETS, max(names, key=key)) if names else None
+
+
+def pen_fw_unit_active():
+    return subprocess.run(["systemctl", "is-active", "--quiet", PEN_FW_UNIT]).returncode == 0
+
+
+def pen_fw(command):
+    if command == "fw-available":
+        d = pen_fw_set()
+        if not d:
+            print("{}")
+            return 0
+        r = subprocess.run(
+            [sys.executable, "-I", PEN_FW, "inspect", "--json", d],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=60,
+        )
+        print(r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else "{}")
+        return 0
+    if command == "fw-update":
+        d = pen_fw_set()
+        if not d or pen_fw_unit_active():
+            return 1
+        return subprocess.run(
+            [
+                "systemd-run",
+                "--unit=" + PEN_FW_UNIT,
+                "--collect",
+                "--quiet",
+                "-p",
+                "RuntimeMaxSec=7200",
+                sys.executable,
+                "-I",
+                PEN_FW,
+                "update",
+                "--fw",
+                d,
+                "--go",
+                "--until-done",
+                "--status",
+                PEN_FW_STATUS,
+            ],
+            stdout=subprocess.DEVNULL,
+        ).returncode
+    if command == "fw-stop":
+        if pen_fw_unit_active():
+            subprocess.run(["systemctl", "stop", PEN_FW_UNIT], stdout=subprocess.DEVNULL)
+        return 0
+    return 2
+
+
+def read_key(path, key):
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.split("#", 1)[0]
+                if "=" in line and line.split("=", 1)[0].strip() == key:
+                    return line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return None
+
+
+def write_refresh(value):
+    try:
+        with open(REFRESH_PARAM, "w") as f:
+            f.write(value)
+        return True
+    except OSError as e:
+        print("duo-settings-helper: %s: %s" % (REFRESH_PARAM, e), file=sys.stderr)
+        return False
+
+
+def valid_zone(zone):
+    if not re.fullmatch(r"[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+){0,2}", zone):
+        return False
+    path = os.path.realpath(os.path.join(ZONEINFO, zone))
+    return path.startswith(ZONEINFO + "/") and os.path.isfile(path)
+
+
+def generated_locales(listing=None):
+    """The xx_YY.UTF-8 locales built into the system (`locale -a`), sorted. Pure
+    when `listing` (the command's output) is given."""
+    if listing is None:
+        listing = subprocess.run(
+            ["locale", "-a"],
+            capture_output=True,
+            text=True,
+            env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+        ).stdout
+    out = set()
+    for name in listing.split():
+        m = re.fullmatch(r"([a-z]{2,3}_[A-Z]{2})\.utf-?8", name, re.I)
+        if m:
+            out.add(m.group(1) + ".UTF-8")
+    return sorted(out)
+
+
+def valid_locale_args(lang, region, day, generated):
+    return (
+        LOCALE_RE.fullmatch(lang) is not None
+        and LOCALE_RE.fullmatch(region) is not None
+        and lang in generated
+        and region in generated
+        and day in ("auto", "mon", "sun", "sat")
+    )
+
+
+def time_source(read, base, first):
+    """A locale source holding only `base`'s LC_TIME with first_weekday `first`
+    (1 Sunday, 2 Monday, 7 Saturday). `read(name)` returns a locales file's text
+    (a `copy "x"` is followed). Pure."""
+    name, text = base, None
+    for _ in range(6):
+        text = read(name)
+        m = re.search(r"^LC_TIME\n(.*?)^END LC_TIME", text, re.S | re.M)
+        if not m:
+            raise ValueError("no LC_TIME in " + name)
+        body = m.group(1)
+        c = re.match(r'\s*copy\s+"([A-Za-z0-9_@.-]+)"\s*$', body)
+        if not c:
+            break
+        name = c.group(1)
+    else:
+        raise ValueError("copy loop")
+    esc = re.search(r"^escape_char\s+(\S)", text, re.M)
+    com = re.search(r"^comment_char\s+(\S)", text, re.M)
+    body = re.sub(r"^first_weekday\s.*\n?", "", body, flags=re.M)
+    body = (
+        re.sub(r"^(week\s.*)$", r"\1\nfirst_weekday %s" % first, body, count=1, flags=re.M)
+        if re.search(r"^week\s", body, re.M)
+        else body + "first_weekday %s\n" % first
+    )
+    return "comment_char %s\nescape_char %s\nLC_TIME\n%sEND LC_TIME\n" % (
+        com.group(1) if com else "%",
+        esc.group(1) if esc else "/",
+        body,
+    )
+
+
+def time_locale_name(region, day):
+    return region + "@" + day
+
+
+def locale_conf_text(lang, region, tname):
+    return (
+        "# Written by Duo Settings (Language & region). /etc/default/locale is a link to\n"
+        "# this file; duo-wc.service reads it when the session starts.\n"
+        "LANG=%s\nLC_NUMERIC=%s\nLC_TIME=%s\nLC_MONETARY=%s\nLC_PAPER=%s\nLC_MEASUREMENT=%s\n"
+        % (lang, region, tname, region, region, region)
+    )
+
+
+def first_weekday_of(locale_name):
+    r = subprocess.run(
+        ["locale", "first_weekday"],
+        capture_output=True,
+        text=True,
+        env={"LC_ALL": locale_name, "PATH": "/usr/bin:/bin"},
+    )
+    return r.stdout.strip()
+
+
+def locale_set(lang, region, day):
+    tname = region
+    if day != "auto" and first_weekday_of(region) != DAYS[day]:
+        tname = time_locale_name(region, day)
+
+        def read(n):
+            with open(os.path.join(LOCALE_SRC, n)) as f:
+                return f.read()
+
+        src = time_source(read, region.split(".")[0], DAYS[day])
+        tmp = "/run/duo-locale-src"
+        with open(tmp, "w") as f:
+            f.write(src)
+        subprocess.run(
+            [
+                "localedef",
+                "--no-archive",
+                "-c",
+                "-i",
+                tmp,
+                "-f",
+                "UTF-8",
+                os.path.join(LOCALE_DIR, tname),
+            ],
+            capture_output=True,
+        )
+        os.unlink(tmp)
+        if first_weekday_of(tname) != DAYS[day]:
+            print("duo-settings-helper: could not build %s" % tname, file=sys.stderr)
+            return False
+    os.makedirs(os.path.dirname(REGION_CONF), exist_ok=True)
+    edit_conf(REGION_CONF, "first_weekday", day)
+    with open(LOCALE_CONF + ".new", "w") as f:
+        f.write(locale_conf_text(lang, region, tname))
+    os.chmod(LOCALE_CONF + ".new", 0o644)
+    os.replace(LOCALE_CONF + ".new", LOCALE_CONF)
+    return True
+
+
+def valid_matrix(vals):
+    if len(vals) != 6:
+        return False
+    try:
+        nums = [float(v) for v in vals]
+    except ValueError:
+        return False
+    if not all(re.fullmatch(r"-?[0-9]+(\.[0-9]+)?", v) for v in vals):
+        return False
+    a, b, c, d, e, f = nums
+    # A calibration, not a remapping: near identity.
+    return (
+        0.8 <= a <= 1.2
+        and 0.8 <= e <= 1.2
+        and abs(b) <= 0.2
+        and abs(d) <= 0.2
+        and abs(c) <= 0.2
+        and abs(f) <= 0.2
+    )
+
+
+def touch_rules(current, panel, matrix):
+    """The rules file text with `panel`'s line replaced (matrix None: removed).
+    Pure."""
+    name = TOUCH_NAMES[panel]
+    keep = [
+        ln
+        for ln in current.splitlines()
+        if ln.strip() and not ln.startswith("#") and ('ATTRS{name}=="%s"' % name) not in ln
+    ]
+    if matrix is not None:
+        keep.append(
+            'ACTION!="remove", SUBSYSTEM=="input", KERNEL=="event*", '
+            'ATTRS{name}=="%s", ENV{LIBINPUT_CALIBRATION_MATRIX}="%s"' % (name, " ".join(matrix))
+        )
+    if not keep:
+        return ""
+    head = (
+        "# Written by Duo Settings (Touch calibration): overrides the shipped\n"
+        "# matrix in 90-duo2-touch.rules. Delete to go back to it.\n"
+    )
+    return head + "\n".join(sorted(keep)) + "\n"
+
+
+def touch_matrix(panel, matrix):
+    try:
+        with open(TOUCH_RULES) as f:
+            cur = f.read()
+    except FileNotFoundError:
+        cur = ""
+    text = touch_rules(cur, panel, matrix)
+    if text:
+        with open(TOUCH_RULES + ".new", "w") as f:
+            f.write(text)
+        os.chmod(TOUCH_RULES + ".new", 0o644)
+        os.replace(TOUCH_RULES + ".new", TOUCH_RULES)
+    elif os.path.exists(TOUCH_RULES):
+        os.unlink(TOUCH_RULES)
+    subprocess.run(["udevadm", "control", "--reload"], check=False)
+    subprocess.run(
+        [
+            "udevadm",
+            "trigger",
+            "--action=change",
+            "--subsystem-match=input",
+            "--attr-match=name=" + TOUCH_NAMES[panel],
+        ],
+        check=False,
+    )
+    subprocess.run(["udevadm", "settle", "--timeout=5"], check=False)
+    return True
+
+
+WC_ADMIN = "/run/duo-wc/admin.sock"
+# What wc-conf also applies live: config key -> (request, argument builder).
+WC_LIVE = {
+    "hinge_gap": ("set_hinge_gap", lambda v: {"gap": v}),
+    "idle_timeout": ("set_idle_timeout", lambda v: {"seconds": int(v)}),
+    "session_lock": ("set_session_lock", lambda v: {"session_lock": v}),
+    "pen_button": ("set_pen", lambda v: {"button": v}),
+    "pen_dot": ("set_pen", lambda v: {"dot": v}),
+    "pen_input": ("set_pen", lambda v: {"input": v}),
+    "pen_apps": ("set_pen", lambda v: {"apps": v}),
+}
+# Keys an older duo-wc does not know: one in duo-wc.conf would stop it from
+# starting. They are written only after the running duo-wc took them live
+# (its answer names the field).
+WC_NEW = {"pen_input": "input", "pen_apps": "apps"}
+
+
+def laptop_request(args):
+    """`laptop ...` -> the arguments of duo-wc's set_laptop, or None when
+    they are not allowed. Pure."""
+    if len(args) == 1 and args[0] in ("on", "off", "toggle"):
+        return {"laptop": args[0]}
+    if len(args) == 2 and args[0] == "auto" and args[1] in ("on", "off"):
+        return {"auto": args[1]}
+    if len(args) == 2 and args[0] == "keys" and args[1] in ("DSI-1", "DSI-2"):
+        return {"keys": args[1]}
+    return None
+
+
+def display_request(args):
+    """`display ...` -> the arguments of duo-wc's set_external, or None when
+    they are not allowed. Pure."""
+    if len(args) == 2 and args[0] == "on_connect" and args[1] in ("ask", "desk", "mirror"):
+        return {"on_connect": args[1]}
+    if len(args) == 2 and args[0] == "mirror" and args[1] in ("active", "both", "DSI-1", "DSI-2"):
+        return {"mirror": args[1]}
+    return None
+
+
+POSES = {
+    ("dual",): {"pose": "dual"},
+    ("span",): {"pose": "span"},
+    ("single", "DSI-1"): {"pose": "single", "output": "DSI-1"},
+    ("single", "DSI-2"): {"pose": "single", "output": "DSI-2"},
+}
+
+
+def wc_admin(request, **args):
+    """One request on duo-wc's admin socket (as root): True if it was done."""
+    return wc_admin_reply(request, **args) is not None
+
+
+def wc_admin_reply(request, **args):
+    """One request on duo-wc's admin socket (as root): its answer (the "ok"
+    part), or None when it was not done."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(3)
+            s.connect(WC_ADMIN)
+            s.sendall((json.dumps(dict(id=1, request=request, **args)) + "\n").encode())
+            buf = b""
+            while not buf.endswith(b"\n"):
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                buf += chunk
+        reply = json.loads(buf.decode() or "{}")
+        return reply.get("ok", {}) if isinstance(reply, dict) and "ok" in reply else None
+    except (OSError, ValueError):
+        return None
+
+
+def battery_stats(action, report=None, wait_s=10.0):
+    """Ask the collector for a fresh report (refresh) or to clear its usage
+    history (clear); True once its report has been rewritten."""
+    report = report or BATTERY_REPORT
+    try:
+        before = os.stat(report).st_mtime_ns
+    except OSError:
+        before = None
+    r = subprocess.run(
+        [
+            "systemctl",
+            "kill",
+            "--kill-whom=main",
+            "--signal=" + BATTERY_SIGNALS[action],
+            "duo2-battery-stats.service",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if r.returncode != 0:
+        return False
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        try:
+            if os.stat(report).st_mtime_ns != before:
+                return True
+        except OSError:
+            pass
+        time.sleep(0.1)
+    return False
+
+
+JUNK_SERIALS = (
+    "",
+    "0",
+    "none",
+    "unknown",
+    "default string",
+    "to be filled by o.e.m.",
+    "not specified",
+    "system serial number",
+    "not applicable",
+)
+
+
+def clean_serial(text):
+    """A SMBIOS serial, or None for the empty and placeholder ones. Pure."""
+    value = (text or "").strip()
+    if value.lower() in JUNK_SERIALS or not re.fullmatch(r"[A-Za-z0-9._-]{4,64}", value):
+        return None
+    return value
+
+
+def read_serial(base=DMI):
+    for name in ("product_serial", "board_serial", "chassis_serial"):
+        try:
+            with open(os.path.join(base, name)) as f:
+                got = clean_serial(f.read())
+        except OSError:
+            continue
+        if got:
+            return got
+    return None
+
+
+def qmi_ids():
+    """The modem's IMEIs: the reader runs as a transient system service, which
+    systemd (PID 1) starts without the session's seccomp filter. -> list of
+    {"sub", "imei", "sv"} ([] when it fails)."""
+    cmd = [
+        SYSTEMD_RUN,
+        "--quiet",
+        "--pipe",
+        "--wait",
+        "--collect",
+        "--service-type=exec",
+        "--description=duo-settings: modem identity",
+    ]
+    cmd += ["--property=" + p for p in QMI_UNIT_PROPERTIES]
+    cmd += ["--", "/usr/bin/python3", "-I", QMI_SCRIPT]
+    try:
+        r = subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=25,
+            env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
+        )
+        data = json.loads(r.stdout.strip().splitlines()[-1]) if r.returncode == 0 else {}
+    except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
+        return []
+    out = []
+    for item in data.get("ids", []):
+        if isinstance(item, dict) and re.fullmatch(r"[0-9]{14,16}", str(item.get("imei", ""))):
+            sv = str(item.get("sv", ""))
+            out.append(
+                {
+                    "sub": int(item.get("sub", 0)),
+                    "imei": item["imei"],
+                    "sv": sv if sv.isascii() and sv.isdigit() else "",
+                }
+            )
+    return out
+
+
+def identity():
+    print(json.dumps({"serial": read_serial(), "imeis": qmi_ids()}))
+    return 0
+
+
+GEOCLUE_APPS_CONF = "/etc/geoclue/conf.d/91-duo2-apps.conf"
+GEOCLUE_APP_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+def valid_app_ids(ids):
+    return len(ids) <= 64 and all(GEOCLUE_APP_ID.fullmatch(i) for i in ids)
+
+
+def geoclue_apps_text(ids):
+    """geoclue's per-app sections for the refused apps (`allowed=false`:
+    geoclue answers them no whatever the agent says)."""
+    out = [
+        "# Written by duo-settings-helper (Settings > Privacy): the apps that may",
+        "# not learn the phone's position. One section per desktop id.",
+    ]
+    for app in sorted(set(ids)):
+        out += ["", "[%s]" % app, "allowed=false", "system=false", "users="]
+    return "\n".join(out) + "\n"
+
+
+def geoclue_deny(ids):
+    tmp = GEOCLUE_APPS_CONF + ".new"
+    os.makedirs(os.path.dirname(GEOCLUE_APPS_CONF), exist_ok=True)
+    with open(tmp, "w") as f:
+        f.write(geoclue_apps_text(ids))
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, GEOCLUE_APPS_CONF)
+    # geoclue reads its config when it starts (it is D-Bus activated and
+    # stops when idle): a running one starts anew, its clients reconnect.
+    subprocess.run(["systemctl", "try-restart", "geoclue.service"], check=False)
+    return True
+
+
+def main(argv):
+    n = len(argv)
+    if n == 2 and argv[0] == "refresh" and argv[1] in ("60", "90"):
+        edit_conf(DISPLAY_CONF, "refresh", argv[1])
+        return 0 if write_refresh(argv[1]) else 1
+    if argv == ["refresh-boot"]:
+        value = read_key(DISPLAY_CONF, "refresh")
+        if value not in ("60", "90"):
+            return 0
+        for _ in range(100):  # the panel module may still be loading
+            if os.path.exists(REFRESH_PARAM):
+                break
+            time.sleep(0.1)
+        return 0 if write_refresh(value) else 1
+    if n == 3 and argv[0] == "wc-conf" and argv[1] in WC_KEYS and WC_KEYS[argv[1]](argv[2]):
+        if argv[1] in WC_NEW:
+            request, build = WC_LIVE[argv[1]]
+            reply = wc_admin_reply(request, **build(argv[2]))
+            if not isinstance(reply, dict) or WC_NEW[argv[1]] not in reply:
+                print(
+                    "duo-wc does not know %s yet (update duo-wc first)" % argv[1], file=sys.stderr
+                )
+                return 1
+            edit_conf(WC_CONF, argv[1], argv[2])
+            return 0
+        edit_conf(WC_CONF, argv[1], argv[2])
+        if argv[1] in WC_LIVE:
+            request, build = WC_LIVE[argv[1]]
+            wc_admin(request, **build(argv[2]))
+        return 0
+    if n == 3 and argv[:2] == ["pen", "palm"] and argv[2] in PALM_MODES:
+        edit_conf(PEN_CONF, "palm_rejection", argv[2])
+        return 0
+    if n == 3 and argv[:2] == ["pen", "feel"] and argv[2] in FEELS:
+        edit_conf(PEN_CONF, "writing_feel", argv[2])
+        return 0
+    if (
+        n == 3
+        and argv[:2] == ["pen", "strength"]
+        and is_ascii_number(argv[2])
+        and 1 <= int(argv[2]) <= 100
+    ):
+        edit_conf(PEN_CONF, "feel_strength", str(int(argv[2])))
+        return 0
+    if n == 2 and argv[0] == "pen" and argv[1] in ("fw-available", "fw-update", "fw-stop"):
+        return pen_fw(argv[1])
+    if n == 3 and argv[:2] == ["pen", "click"] and argv[2] in ("on", "off"):
+        edit_conf(PEN_CONF, "button_click", argv[2])
+        return 0
+    if n == 3 and argv[:2] == ["pen", "charge"] and argv[2] in ("on", "off"):
+        return subprocess.run([PEN_CHARGER, argv[2]], stdout=subprocess.DEVNULL).returncode
+    if argv[:1] == ["laptop"] and laptop_request(argv[1:]) is not None:
+        return 0 if wc_admin("set_laptop", **laptop_request(argv[1:])) else 1
+    if argv[:1] == ["display"] and display_request(argv[1:]) is not None:
+        return 0 if wc_admin("set_external", **display_request(argv[1:])) else 1
+    if argv[:1] == ["pose"] and tuple(argv[1:]) in POSES:
+        return 0 if wc_admin("set_pose", **POSES[tuple(argv[1:])]) else 1
+    if argv == ["restart-display"]:
+        # Not `systemctl restart`: any app can run this helper. duo-wc asks
+        # the user in the shell, and restarts (it exits, systemd brings it
+        # back) only on that question's yes.
+        return 0 if wc_admin("confirm", action="restart-display") else 1
+    if argv[:2] == ["posed", "panels"] and n == 3 and argv[2] in ("both", "left", "right"):
+        edit_conf(POSED_CONF, "panels", argv[2])
+        subprocess.run(["systemctl", "try-reload-or-restart", "duo-posed.service"], check=False)
+        pose = {"both": ("dual",), "left": ("single", "DSI-1"), "right": ("single", "DSI-2")}[
+            argv[2]
+        ]
+        wc_admin("set_pose", **POSES[pose])
+        return 0
+    if n == 3 and argv[0] == "posed" and argv[1] in POSED_KEYS and argv[2] in ("on", "off"):
+        edit_conf(POSED_CONF, argv[1], argv[2])
+        subprocess.run(["systemctl", "try-reload-or-restart", "duo-posed.service"], check=False)
+        return 0
+    if n == 2 and argv[0] == "timezone" and valid_zone(argv[1]):
+        return subprocess.run(["timedatectl", "set-timezone", argv[1]]).returncode
+    if n == 2 and argv[0] == "ntp" and argv[1] in ("on", "off"):
+        return subprocess.run(
+            ["timedatectl", "set-ntp", "true" if argv[1] == "on" else "false"]
+        ).returncode
+    if n == 4 and argv[0] == "locale-set" and valid_locale_args(*argv[1:], generated_locales()):
+        return 0 if locale_set(*argv[1:]) else 1
+    if n >= 3 and argv[0] == "touch-matrix" and argv[1] in TOUCH_NAMES:
+        if argv[2:] == ["reset"]:
+            return 0 if touch_matrix(argv[1], None) else 1
+        if valid_matrix(argv[2:]):
+            return 0 if touch_matrix(argv[1], argv[2:]) else 1
+    if n == 2 and argv[0] == "battery" and argv[1] in BATTERY_SIGNALS:
+        if not battery_stats(argv[1]):
+            return 1
+        try:
+            with open(BATTERY_REPORT) as f:  # the report on stdout: Duo Settings
+                sys.stdout.write(f.read(4 << 20))  # needs no group to read it
+        except OSError:
+            return 1
+        return 0
+    if argv == ["identity"]:
+        return identity()
+    if argv[:1] == ["geoclue-deny"] and valid_app_ids(argv[1:]):
+        return 0 if geoclue_deny(argv[1:]) else 1
+    print(__doc__.strip(), file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    # Whatever sudo handed over: the helper starts only the system's tools.
+    os.environ["PATH"] = "/usr/sbin:/usr/bin:/sbin:/bin"
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,6 @@
+# duo2-os: the video core's ENCODER node (iris, "qcom-iris-encoder") is
+# root's only. The first H.264 encode with it (GStreamer v4l2h264enc,
+# 1080p NV12) froze the whole phone until a hard reset, without a kernel
+# line (docs/hardware/video.md), and nothing installed needs it. The
+# decoder node stays the video group's (the GUI user, the players).
+SUBSYSTEM=="video4linux", ATTR{name}=="qcom-iris-encoder", GROUP="root", MODE="0600", TAG-="uaccess", TAG-="seat"

@@ -1,0 +1,72 @@
+From 3055ee789b7f4eae20bd79c73859f479f2e1e5af Mon Sep 17 00:00:00 2001
+From: duo2 <duo2@localhost>
+Date: Sat, 7 Nov 2026 00:26:49 +0100
+Subject: [PATCH 4/4] hexagonrpcd: HEXAGONRPCD_FARF_MASK sets the DSP process's
+ runtime FARF levels
+
+---
+ hexagonrpcd/rpcd.c | 37 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 37 insertions(+)
+
+diff --git a/hexagonrpcd/rpcd.c b/hexagonrpcd/rpcd.c
+index 23db48f..fb6bef1 100644
+--- a/hexagonrpcd/rpcd.c
++++ b/hexagonrpcd/rpcd.c
+@@ -28,6 +28,7 @@
+ #include <signal.h>
+ #include <stdbool.h>
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <string.h>
+ #include <sys/ioctl.h>
+ #include <sys/types.h>
+@@ -128,6 +129,39 @@ err:
+ 	return ret;
+ }
+ 
++/*
++ * adsp_current_process.set_logging_params2(mask, files[]) (method 6; the
++ * older set_logging_params, method 2, takes the same words): the runtime
++ * FARF levels of the process on the DSP, as the stock libadsprpc sets them
++ * from a <process>.farf file. 0x1f = low, medium, high, error and fatal.
++ */
++static const struct fastrpc_function_def_interp2 adsp_current_process_set_logging_params2_def = {
++	.msg_id = 6, .in_nums = 1, .in_bufs = 1, .out_nums = 0, .out_bufs = 0,
++};
++static const struct fastrpc_function_def_interp2 adsp_current_process_set_logging_params_def = {
++	.msg_id = 2, .in_nums = 1, .in_bufs = 1, .out_nums = 0, .out_bufs = 0,
++};
++
++static void set_farf_mask(int fd, const char *maskstr)
++{
++	struct fastrpc_context *ctx;
++	uint32_t mask = strtoul(maskstr, NULL, 0);
++	int ret;
++
++	ret = remotectl_open(fd, "adsp_current_process", &ctx, remotectl_err);
++	if (ret)
++		return;
++
++	ret = fastrpc2(&adsp_current_process_set_logging_params2_def, fd, ctx->handle,
++		       mask, 0, NULL);
++	if (ret)
++		ret = fastrpc2(&adsp_current_process_set_logging_params_def, fd, ctx->handle,
++			       mask, 0, NULL);
++	fprintf(stderr, "Runtime FARF mask 0x%x: %s\n", mask, ret ? strerror(errno) : "set");
++
++	remotectl_close(ctx, remotectl_err);
++}
++
+ static void print_usage(const char *argv0)
+ {
+ 	printf("Usage: %s [options] -f DEVICE\n\n", argv0);
+@@ -325,6 +359,9 @@ int main(int argc, char* argv[])
+ 		goto err_close_dev;
+ 	}
+ 
++	if (getenv("HEXAGONRPCD_FARF_MASK"))
++		set_farf_mask(fd, getenv("HEXAGONRPCD_FARF_MASK"));
++
+ 	ret = start_clients(n_progs, progs, pids);
+ 	if (ret)
+ 		goto err_close_dev;

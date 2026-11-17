@@ -1,0 +1,8 @@
+# duo2-os: what the preinstalled apps need once duo-wc's session is up
+# (shell/duo-apps/session-start). Started by duo-apps-session.path.
+[Unit]
+Description=Session start for the preinstalled apps (portals, user dirs, alarm services)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/duo-apps/session-start

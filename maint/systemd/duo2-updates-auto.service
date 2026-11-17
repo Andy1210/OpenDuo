@@ -1,0 +1,10 @@
+[Unit]
+Description=OpenDuo: install the system updates at night (when switched on, on WiFi and the charger)
+Documentation=file:///usr/local/lib/duo2-maint/duo2-updates
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/duo2-updates run-install --auto
+TimeoutStartSec=3h

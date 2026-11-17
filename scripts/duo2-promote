@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# Make the kernel tried with duo2-try the known-good one.
+#
+#   scripts/duo2-promote                    the running kernel must be the tried one
+#   scripts/duo2-promote --rollback         put the previous known-good kernel back
+#   scripts/duo2-promote --rollback-initrd  put duo2.conf's previous initramfs back
+#
+# /boot/efi/duo2/{Image,<dtb>} move to /boot/efi/duo2/prev/, the test files
+# take their place, the try entry is removed. duo2.conf keeps its options.
+# Old /lib/modules/<release> directories are kept (prune by hand).
+#
+# A tried initramfs becomes duo2.conf's own, /duo2/initrd-boot.img (the one
+# it replaces goes to prev/). The rescue entry's /duo2/initrd.img
+# (rescue.conf) is never written here: it is the fallback when a boot
+# initramfs is broken, and it is renewed by hand (scripts/build-initrd.sh).
+set -euo pipefail
+. "$(dirname "$0")/lib/remote.sh"
+
+# A phone with packaged kernels (openduo-kernel-surface-duo2-*, maint/duo2-boot)
+# boots the newest good one first (version 10.N): duo2.conf (version 1) is
+# then their fallback, not the default. Said at the end of every promote.
+packaged_note() {
+    n=$(duo2_ssh "sudo sh -c 'ls /boot/efi/loader/entries/openduo-*.conf 2>/dev/null' | grep -vc '+0-' || true" 2>/dev/null || true)
+    [ "${n:-0}" = 0 ] || echo "note: $n packaged kernel entries sort before duo2.conf: the newest good one boots first (sudo duo2-boot status)"
+}
+trap packaged_note EXIT
+
+# Run on the phone after prev/duo2.conf has been saved (single quotes: the
+# phone's shell expands it).
+INITRD_PROMOTE='if sudo test -f /boot/efi/duo2/test/initrd.img; then
+    IE=/boot/efi/loader/entries
+    if [ "$(sudo sed -n "s/^initrd *//p" $IE/duo2.conf)" = /duo2/initrd-boot.img ]; then
+        sudo cp /boot/efi/duo2/initrd-boot.img /boot/efi/duo2/prev/initrd-boot.img
+    else
+        sudo rm -f /boot/efi/duo2/prev/initrd-boot.img
+    fi
+    sudo cp /boot/efi/duo2/test/initrd.img /boot/efi/duo2/initrd-boot.img
+    sudo cmp /boot/efi/duo2/test/initrd.img /boot/efi/duo2/initrd-boot.img
+    sudo sed -i "s|^initrd .*|initrd  /duo2/initrd-boot.img|" $IE/duo2.conf
+    echo "promoted the tried initramfs as /duo2/initrd-boot.img (rescue.conf keeps /duo2/initrd.img)"
+fi'
+
+if [ "${1:-}" = --rollback-initrd ]; then
+    duo2_esp_ssh 'set -e
+    IE=/boot/efi/loader/entries
+    if sudo test -f /boot/efi/duo2/prev/initrd-boot.img; then
+        sudo cp /boot/efi/duo2/prev/initrd-boot.img /boot/efi/duo2/initrd-boot.img
+        echo "the previous /duo2/initrd-boot.img is back"
+    else
+        sudo sed -i "s|^initrd .*|initrd  /duo2/initrd.img|" $IE/duo2.conf
+        echo "duo2.conf boots the rescue entry'"'"'s /duo2/initrd.img again"
+    fi
+    sync'
+    exit 0
+fi
+
+# The DTB the known-good entry boots; a try may bring another one along.
+DTB=$(basename "$(duo2_ssh "sudo sed -n 's/^devicetree //p' /boot/efi/loader/entries/duo2.conf")")
+if [ "${1:-}" = --rollback ]; then
+    duo2_esp_ssh "set -e
+    sudo test -f /boot/efi/duo2/prev/Image
+    sudo cp /boot/efi/duo2/prev/Image /boot/efi/duo2/Image
+    P=\$(sudo cat /boot/efi/duo2/prev/dtb-name 2>/dev/null || echo $DTB)
+    sudo cp /boot/efi/duo2/prev/\$P /boot/efi/duo2/\$P
+    sudo sed -i \"s|^devicetree .*|devicetree /duo2/\$P|\" /boot/efi/loader/entries/duo2.conf
+    sync; echo 'previous kernel restored as duo2.conf; reboot to use it'"
+    exit 0
+fi
+
+REL=$(duo2_ssh uname -r)
+TRY=$(duo2_ssh "tr ' ' '\n' < /proc/cmdline | sed -n 's/^duo2.try=//p'")
+# A --same-kernel try can only have brought a new initramfs.
+# A --same-kernel try brings new options and/or a new initramfs: the try's
+# options minus what duo2-try adds (hung_task_timeout_secs=60, duo2.try=).
+case $TRY in same-*)
+    duo2_esp_ssh "set -e
+    E=/boot/efi/loader/entries
+    T=\$(sudo sh -c 'ls \$0/duo2-test*.conf' \$E | head -1)
+    sudo mkdir -p /boot/efi/duo2/prev
+    sudo cp \$E/duo2.conf /boot/efi/duo2/prev/duo2.conf
+    O=\$(sudo sed -n 's/^options //p' \$T | sed 's/ hung_task_timeout_secs=60//; s/ duo2.try=[^ ]*//')
+    sudo sed -i \"s|^options .*|options \$O|\" \$E/duo2.conf
+    $INITRD_PROMOTE
+    # a DTB-only try (duo2-try --same-kernel --dtb): the DTB, same name
+    D=\$(sudo sed -n 's|^devicetree /duo2/test/||p' \$T)
+    if [ -n \"\$D\" ] && sudo test -f /boot/efi/duo2/test/\$D; then
+        sudo cp /boot/efi/duo2/Image /boot/efi/duo2/prev/Image
+        sudo cp /boot/efi/duo2/$DTB /boot/efi/duo2/prev/$DTB
+        echo $DTB | sudo tee /boot/efi/duo2/prev/dtb-name >/dev/null
+        sudo cp /boot/efi/duo2/test/\$D /boot/efi/duo2/\$D
+        sudo cmp /boot/efi/duo2/test/\$D /boot/efi/duo2/\$D
+        sudo sed -i \"s|^devicetree .*|devicetree /duo2/\$D|\" \$E/duo2.conf
+        echo \"promoted the tried DTB \$D\"
+    fi
+    sudo sh -c 'rm -rf /boot/efi/duo2/test /boot/efi/loader/entries/duo2-test*.conf'
+    sync; echo \"duo2.conf options now: \$O\""
+    exit 0 ;;
+esac
+TDTB=$(basename "$(duo2_ssh "sudo sh -c 'sed -n \"s/^devicetree //p\" /boot/efi/loader/entries/duo2-test*.conf' | head -1")")
+[ -n "$TDTB" ] || { echo "no try entry on the ESP" >&2; exit 1; }
+[ -n "$TRY" ] && [ "$TRY" = "$REL" ] || {
+    echo "the running kernel ($REL) was not started by duo2-try: boot the test first" >&2; exit 1; }
+duo2_esp_ssh "set -e
+sudo test -f /boot/efi/duo2/test/Image
+sudo mkdir -p /boot/efi/duo2/prev
+sudo cp /boot/efi/duo2/Image /boot/efi/duo2/prev/Image
+sudo cp /boot/efi/duo2/$DTB /boot/efi/duo2/prev/$DTB
+echo $DTB | sudo tee /boot/efi/duo2/prev/dtb-name >/dev/null
+sudo cp /boot/efi/duo2/test/Image /boot/efi/duo2/Image
+sudo cp /boot/efi/duo2/test/$TDTB /boot/efi/duo2/$TDTB
+sudo cmp /boot/efi/duo2/test/Image /boot/efi/duo2/Image
+sudo cp /boot/efi/loader/entries/duo2.conf /boot/efi/duo2/prev/duo2.conf
+T=\$(sudo sh -c 'ls /boot/efi/loader/entries/duo2-test*.conf' | head -1)
+O=\$(sudo sed -n 's/^options //p' \$T | sed 's/ hung_task_timeout_secs=60//; s/ duo2.try=[^ ]*//')
+sudo sed -i -e 's/^title .*/title   duo2-os ($REL)/' -e 's|^devicetree .*|devicetree /duo2/$TDTB|' -e \"s|^options .*|options \$O|\" /boot/efi/loader/entries/duo2.conf
+echo \"options: \$O\"
+$INITRD_PROMOTE
+sudo sh -c 'rm -rf /boot/efi/duo2/test /boot/efi/loader/entries/duo2-test*.conf'
+sync
+echo 'promoted $REL to duo2.conf (previous kernel in /boot/efi/duo2/prev)'"

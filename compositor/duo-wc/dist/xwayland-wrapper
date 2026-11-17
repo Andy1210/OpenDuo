@@ -1,0 +1,12 @@
+#!/bin/sh
+# duo-wc's Xwayland (compositor/duo-wc/src/xwayland.rs), installed as
+# /usr/local/lib/duo-wc/xwayland/Xwayland: duo-wc puts this directory first
+# on the PATH it starts Xwayland with. duo-wc listened on its X display
+# (DISPLAY=:N in the session) before Xwayland ran, and the first X11 client
+# is waiting on those sockets: they are handed to the real server here, after
+# the arguments Smithay gives it (its own display's sockets).
+for fd in ${DUO_XWAYLAND_LISTENFD:-}; do
+    set -- "$@" -listenfd "$fd"
+done
+unset DUO_XWAYLAND_LISTENFD
+exec /usr/bin/Xwayland "$@"

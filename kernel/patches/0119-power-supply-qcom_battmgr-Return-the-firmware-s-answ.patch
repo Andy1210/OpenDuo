@@ -1,0 +1,39 @@
+From efc8f02f519ddb2d7876cac646c168f266bbf411 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 22:33:09 +0100
+Subject: [PATCH 119/137] power: supply: qcom_battmgr: Return the firmware's
+ answer from the charge thresholds
+
+The charge_control_start_threshold / end_threshold setters returned 0
+whatever the firmware said, so a write that the firmware refused or did
+not answer (BATTMGR_CHG_CTRL_LIMIT_EN times out on a firmware that does
+not know it, as the SM8350 one on a Surface Duo 2 does) looked like a
+limit that took effect. Return the request's result.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/power/supply/qcom_battmgr.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
+index 3d682da3f30d..f11c39adb752 100644
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -705,7 +705,7 @@ static int qcom_battmgr_set_charge_start_threshold(struct qcom_battmgr *battmgr,
+ 		battmgr->info.charge_ctrl_end = target_soc;
+ 	}
+ 
+-	return 0;
++	return ret;
+ }
+ 
+ static int qcom_battmgr_set_charge_end_threshold(struct qcom_battmgr *battmgr, int end_soc)
+@@ -726,7 +726,7 @@ static int qcom_battmgr_set_charge_end_threshold(struct qcom_battmgr *battmgr, i
+ 		battmgr->info.charge_ctrl_end = end_soc;
+ 	}
+ 
+-	return 0;
++	return ret;
+ }
+ 
+ static int qcom_battmgr_charge_control_thresholds_init(struct qcom_battmgr *battmgr)

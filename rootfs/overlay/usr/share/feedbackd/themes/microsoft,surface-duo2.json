@@ -1,0 +1,32 @@
+{
+  "name": "microsoft,surface-duo2",
+  "parent-name": "default",
+  "profiles": [
+    {
+      "name": "full",
+      "feedbacks": [
+        {"event-name": "button-pressed", "type": "Dummy"},
+        {"event-name": "button-released", "type": "Dummy"},
+        {"event-name": "window-close", "type": "Dummy"}
+      ]
+    },
+    {
+      "name": "quiet",
+      "feedbacks": [
+        {"event-name": "button-pressed", "type": "VibraPattern", "magnitudes": [0.6], "durations": [15]},
+        {"event-name": "button-released", "type": "VibraPattern", "magnitudes": [0.0], "durations": [1]},
+        {"event-name": "window-close", "type": "VibraPattern", "magnitudes": [0.45], "durations": [15]},
+        {"event-name": "bell-terminal", "type": "VibraPattern", "magnitudes": [0.5], "durations": [20]},
+        {"event-name": "message-sent-instant", "type": "VibraPattern", "magnitudes": [0.5], "durations": [18]},
+        {"event-name": "notification-new-generic", "type": "VibraPattern", "magnitudes": [0.65, 0.0, 0.65], "durations": [25, 90, 25]},
+        {"event-name": "message-new-instant", "type": "VibraPattern", "magnitudes": [0.7, 0.0, 0.7], "durations": [30, 100, 30]},
+        {"event-name": "message-new-sms", "type": "VibraPattern", "magnitudes": [0.75, 0.0, 0.75], "durations": [40, 110, 40]},
+        {"event-name": "message-new-email", "type": "VibraPattern", "magnitudes": [0.6], "durations": [35]},
+        {"event-name": "timeout-completed", "type": "VibraPattern", "magnitudes": [0.8, 0.0, 0.8], "durations": [120, 120, 120]},
+        {"event-name": "phone-incoming-call", "type": "VibraPattern", "magnitudes": [0.9, 0.0, 0.9, 0.0], "durations": [300, 150, 300, 900]},
+        {"event-name": "alarm-clock-elapsed", "type": "VibraPattern", "magnitudes": [0.9, 0.0, 0.9, 0.0], "durations": [400, 250, 400, 700]},
+        {"event-name": "theme-demo", "type": "VibraPattern", "magnitudes": [0.65, 0.0, 0.65], "durations": [25, 90, 25]}
+      ]
+    }
+  ]
+}

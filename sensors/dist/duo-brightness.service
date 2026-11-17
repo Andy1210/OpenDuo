@@ -1,0 +1,29 @@
+# duo-brightness: automatic brightness for both panels from the light sensor
+# (SSC lightfusion through duo2_ssc). Root, because it writes the panels'
+# backlight; nothing else: no network but QRTR and duo-wc's socket, the
+# system read-only but its state directory. Acts only while
+# /etc/duo2/brightness.conf says auto = on (the quick menu's switch).
+[Unit]
+Description=duo-brightness: automatic brightness from the light sensor
+ConditionPathExists=/usr/share/qcom/sm8350/Microsoft/surfaceduo2/sensors/registry
+After=hexagonrpcd.service duo-wc.service
+Wants=hexagonrpcd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/duo-brightness
+StateDirectory=duo2-brightness
+Restart=on-failure
+RestartSec=10
+RestrictAddressFamilies=AF_UNIX AF_QIPCRTR
+NoNewPrivileges=yes
+# /sys stays writable under ProtectSystem=strict (the backlight).
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=graphical.target

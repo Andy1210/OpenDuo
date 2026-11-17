@@ -1,0 +1,323 @@
+#!/usr/bin/python3 -I
+"""duo2-pen-charger: charge the Surface Slim Pen from the phone, as stock does.
+
+The Surface Duo 2 has a wireless power transmitter for the Slim Pen, used
+with the Surface Duo 2 Pen Cover (the pen in the cover charges from the
+phone's battery). TLMM GPIO 39 switches it, low = on. The kernel gives it to
+userspace as a regulator-output connector, /sys/devices/platform/pen-charger
+(`state`: enabled / disabled; kernel/drafts/pen-charger); without it this
+tool says "unsupported" and does nothing.
+
+When it may be on is the stock rule, Microsoft's vendor daemon batteryd
+(docs/hardware/touch.md):
+
+  - only while the setting is on: /etc/duo2/pen-charger, `on` or `off`. No
+    file means off: stock leaves the line as the boot loader left it (off)
+    until the setting is first switched;
+  - and the battery at MIN_CAPACITY (20) % or more, or external power
+    connected; below that on battery it is off;
+  - looked at again every POLL_S (30) seconds and on every USB-C or
+    power-supply event.
+
+Stock has no cover, pen, temperature or time limit in software, and neither
+has this: the transmitter is on whenever the rule says so, cover or not.
+Two things differ, both towards off: a reading that fails turns it off (stock
+kept the last state and exited), and the transmitter goes off whenever the
+daemon stops (`stop`, the unit's ExecStopPost; stock left it as it was).
+
+    duo2-pen-charger status [-v]   on | off | unsupported (anyone); -v adds the
+                                   transmitter's state and the reason
+    duo2-pen-charger on|off        the setting: written to /etc/duo2/pen-charger,
+                                   then the daemon (re)started or stopped (root;
+                                   the GUI user through duo-settings-helper)
+    duo2-pen-charger run           the daemon (duo2-pen-charger.service)
+    duo2-pen-charger stop          the transmitter off now (root)
+"""
+
+import os
+import select
+import signal
+import socket
+import subprocess
+import sys
+import time
+
+SETTING = "/etc/duo2/pen-charger"
+OUTPUT = "/sys/devices/platform/pen-charger"
+POWER_SUPPLY = "/sys/class/power_supply"
+UNIT = "duo2-pen-charger.service"
+MIN_CAPACITY = 20  # stock: off below 20 % unless on external power
+POLL_S = 30  # stock: every 30 s, and on USB-C events
+OUTPUT_WAIT_S = 60  # the connector's module may still be loading at boot
+EVENT_GAP_S = 1.0  # bursts of power-supply events: one look per second
+NETLINK_KOBJECT_UEVENT = 15
+EVENT_SUBSYSTEMS = ("power_supply", "typec")
+EXTERNAL_TYPES = ("USB", "Mains", "Wireless")
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def read_text(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def setting_on(path=SETTING):
+    """The setting: True only for a file that says `on`. Pure but for the read."""
+    text = read_text(path)
+    return bool(text) and text.split()[0] == "on"
+
+
+def supported(output=OUTPUT):
+    return os.path.exists(os.path.join(output, "state"))
+
+
+def output_state(output=OUTPUT):
+    """True / False: the transmitter on / off; None: no connector."""
+    text = read_text(os.path.join(output, "state"))
+    if text == "enabled":
+        return True
+    if text == "disabled":
+        return False
+    return None
+
+
+def set_output(on, output=OUTPUT):
+    """Switch the transmitter and read it back (the connector's store returns
+    success even when the regulator refused). True when it is as asked."""
+    path = os.path.join(output, "state")
+    try:
+        with open(path, "w") as f:
+            f.write("enabled\n" if on else "disabled\n")
+    except OSError as e:
+        log("pen charger: could not write %s: %s" % (path, e))
+        return False
+    return output_state(output) == on
+
+
+def supplies(root=POWER_SUPPLY):
+    """[(name, {type, scope, online, capacity})] of the power supplies."""
+    out = []
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return out
+    for name in names:
+        d = os.path.join(root, name)
+        out.append(
+            (
+                name,
+                {k: read_text(os.path.join(d, k)) for k in ("type", "scope", "online", "capacity")},
+            )
+        )
+    return out
+
+
+def battery_capacity(found):
+    """The phone's battery level in % (the first Battery that is not a
+    device's, such as a Bluetooth pen's or mouse's), or None."""
+    for _name, p in found:
+        if p["type"] == "Battery" and p["scope"] != "Device":
+            try:
+                value = int(p["capacity"])
+            except (TypeError, ValueError):
+                return None
+            return value if 0 <= value <= 100 else None
+    return None
+
+
+def external_power(found):
+    """External power connected: any USB / mains / wireless input online
+    (stock reads the USB supply's `online`)."""
+    for _name, p in found:
+        if p["type"] in EXTERNAL_TYPES and p["scope"] != "Device" and p["online"] == "1":
+            return True
+    return False
+
+
+def decide(on, capacity, external):
+    """(transmitter on?, reason). The stock rule, with an unknown battery
+    level as off. Pure."""
+    if not on:
+        return False, "switched off"
+    if capacity is None:
+        return False, "battery level unknown"
+    if capacity < MIN_CAPACITY and not external:
+        return False, "battery %d %% (below %d %%) without external power" % (
+            capacity,
+            MIN_CAPACITY,
+        )
+    if external:
+        return True, "battery %d %%, external power" % capacity
+    return True, "battery %d %%" % capacity
+
+
+def parse_uevent(data):
+    """A kernel uevent datagram ("ACTION@devpath\\0KEY=VALUE\\0...") as a dict. Pure."""
+    fields = data.split(b"\0")
+    event = {}
+    for field in fields[1:]:
+        key, sep, value = field.partition(b"=")
+        if sep:
+            event[key.decode(errors="replace")] = value.decode(errors="replace")
+    return event
+
+
+def wants_look(event):
+    """A uevent after which the rule is looked at again. Pure."""
+    return event.get("SUBSYSTEM") in EVENT_SUBSYSTEMS and event.get("ACTION") in (
+        "add",
+        "remove",
+        "change",
+        "online",
+        "offline",
+    )
+
+
+def uevent_socket():
+    try:
+        s = socket.socket(socket.AF_NETLINK, socket.SOCK_DGRAM, NETLINK_KOBJECT_UEVENT)
+        s.bind((0, 1))
+        return s
+    except OSError as e:
+        log("pen charger: no uevents (%s), looking every %d s only" % (e, POLL_S))
+        return None
+
+
+class Daemon:
+    def __init__(self, setting=SETTING, output=OUTPUT, root=POWER_SUPPLY):
+        self.setting, self.output, self.root = setting, output, root
+        self.last = None  # (on, reason) last logged
+        self.stopping = False
+
+    def look(self):
+        """Apply the rule once. Returns False when the setting is off (the
+        daemon ends)."""
+        found = supplies(self.root)
+        on = setting_on(self.setting)
+        want, reason = decide(on, battery_capacity(found), external_power(found))
+        now = output_state(self.output)
+        ok = now == want or set_output(want, self.output)
+        if (want, reason) != self.last or not ok:
+            log(
+                "pen charger %s: %s%s"
+                % (
+                    "on" if want else "off",
+                    reason,
+                    "" if ok else " (the transmitter did not follow)",
+                )
+            )
+            self.last = (want, reason)
+        return on
+
+    def run(self):
+        signal.signal(signal.SIGTERM, self.stop)
+        signal.signal(signal.SIGINT, self.stop)
+        end = time.monotonic() + OUTPUT_WAIT_S
+        while not supported(self.output) and time.monotonic() < end and not self.stopping:
+            time.sleep(1)
+        if not supported(self.output):
+            log("pen charger: unsupported (no %s/state)" % self.output)
+            return 0
+        sock = uevent_socket()
+        try:
+            while not self.stopping and self.look():
+                deadline = time.monotonic() + POLL_S
+                while not self.stopping:
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        break
+                    if sock is None:
+                        time.sleep(min(left, 1.0))
+                        continue
+                    try:
+                        r, _w, _x = select.select([sock], [], [], left)
+                    except InterruptedError:
+                        continue
+                    if r and self.drain(sock):
+                        time.sleep(EVENT_GAP_S)
+                        self.drain(sock)
+                        break
+        finally:
+            set_output(False, self.output)
+            if sock is not None:
+                sock.close()
+        return 0
+
+    @staticmethod
+    def drain(sock):
+        """Read the waiting uevents; True when one of them matters."""
+        hit = False
+        while True:
+            try:
+                data = sock.recv(65536, socket.MSG_DONTWAIT)
+            except (BlockingIOError, InterruptedError):
+                return hit
+            except OSError:
+                return hit
+            hit = hit or wants_look(parse_uevent(data))
+
+    def stop(self, *_args):
+        self.stopping = True
+
+
+def write_setting(value, path=SETTING):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(value + "\n")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+
+def status_text(verbose, setting=SETTING, output=OUTPUT, root=POWER_SUPPLY):
+    if not supported(output):
+        return "unsupported"
+    on = setting_on(setting)
+    text = "on" if on else "off"
+    if verbose:
+        found = supplies(root)
+        want, reason = decide(on, battery_capacity(found), external_power(found))
+        now = output_state(output)
+        text += "\ntransmitter: %s\nrule: %s (%s)" % (
+            {True: "on", False: "off", None: "?"}[now],
+            "on" if want else "off",
+            reason,
+        )
+    return text
+
+
+def main(argv):
+    cmd = argv[0] if argv else "status"
+    if cmd == "status" and argv[1:] in ([], ["-v"], ["--verbose"]):
+        print(status_text(len(argv) > 1))
+        return 0
+    if cmd in ("on", "off") and len(argv) == 1:
+        if not supported():
+            print("no pen charger on this kernel (%s/state)" % OUTPUT, file=sys.stderr)
+            return 1
+        write_setting(cmd)
+        if cmd == "on":
+            subprocess.run(["systemctl", "restart", UNIT], check=False)
+        else:
+            subprocess.run(["systemctl", "stop", UNIT], check=False)
+            set_output(False)
+        print(status_text(False))
+        return 0
+    if argv == ["run"]:
+        return Daemon().run()
+    if argv == ["stop"]:
+        if supported():
+            set_output(False)
+        return 0
+    print(__doc__.strip(), file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

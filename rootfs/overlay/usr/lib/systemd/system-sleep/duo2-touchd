@@ -1,0 +1,27 @@
+#!/bin/sh
+# systemd-sleep hook (/usr/lib/systemd/system-sleep/duo2-touchd): the
+# digitizer powered off across a system suspend. Powered while the system
+# sleeps it drew ~95 mA of the ~150 mA sleep floor, and reset itself
+# (docs/hardware/touch.md). Before the suspend duo2-touchd is told (SIGURG)
+# and this waits until it says the digitizer is off (it lifts the contacts and
+# closes hidraw: spi-hid powers the digitizer down), at most 3 s; after the
+# resume it is told (SIGWINCH) and opens it again, without a wait here.
+# duo2-touchd keeps $S while its main loop runs; without it there is nobody
+# to tell (not running, still starting, or a daemon without this).
+S=${DUO2_TOUCHD_POWER:-/run/duo2-touchd.digitizer}
+case "$1" in
+pre) sig=SIGURG ;;
+post) sig=SIGWINCH ;;
+*) exit 0 ;;
+esac
+[ -e "$S" ] || exit 0
+systemctl kill --kill-whom=main --signal=$sig duo2-touchd.service 2>/dev/null || exit 0
+[ "$1" = pre ] || exit 0
+i=0
+while [ $i -lt 60 ]; do
+    [ "$(cat "$S" 2>/dev/null)" = off ] && exit 0
+    sleep 0.05
+    i=$((i + 1))
+done
+echo "duo2-touchd: the digitizer is not off after 3 s (state: $(cat "$S" 2>/dev/null || echo none))" >&2
+exit 0

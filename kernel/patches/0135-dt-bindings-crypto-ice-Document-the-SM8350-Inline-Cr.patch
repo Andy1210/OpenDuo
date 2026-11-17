@@ -1,0 +1,27 @@
+From 780c17b7ca02aba612bf506ac8b1eaaf3c51c993 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Mon, 16 Nov 2026 20:11:01 +0100
+Subject: [PATCH 135/137] dt-bindings: crypto: ice: Document the SM8350 Inline
+ Crypto Engine
+
+Add the compatible for SM8350's UFS Inline Crypto Engine. It has a core
+and an interface clock and sits in the UFS PHY's power domain, as on the
+SoCs after it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../devicetree/bindings/crypto/qcom,inline-crypto-engine.yaml    | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/Documentation/devicetree/bindings/crypto/qcom,inline-crypto-engine.yaml b/Documentation/devicetree/bindings/crypto/qcom,inline-crypto-engine.yaml
+index 23bf98c2b9fa..2423fd846db3 100644
+--- a/Documentation/devicetree/bindings/crypto/qcom,inline-crypto-engine.yaml
++++ b/Documentation/devicetree/bindings/crypto/qcom,inline-crypto-engine.yaml
+@@ -24,6 +24,7 @@ properties:
+           - qcom,sc7180-inline-crypto-engine
+           - qcom,sc7280-inline-crypto-engine
+           - qcom,shikra-inline-crypto-engine
++          - qcom,sm8350-inline-crypto-engine
+           - qcom,sm8450-inline-crypto-engine
+           - qcom,sm8550-inline-crypto-engine
+           - qcom,sm8650-inline-crypto-engine

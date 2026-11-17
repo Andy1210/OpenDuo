@@ -1,0 +1,24 @@
+# duo2-os: the mobile hotspot and USB tethering (hotspot/README.md). Started
+# by `duo2-hotspot on` / `usb on` (never at boot), stops itself when nothing
+# is shared any more; everything it set up goes with it.
+[Unit]
+Description=duo2-os mobile hotspot and USB tethering
+After=systemd-networkd.service systemd-resolved.service
+Wants=systemd-networkd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/duo2-hotspotd
+ExecReload=/bin/kill -HUP $MAINPID
+# Whatever a crash left (the table, rules, ap0, the USB function, switches,
+# the WiFi client's hold) is removed and put back; after a clean stop: nothing.
+ExecStopPost=/usr/local/sbin/duo2-hotspotd --cleanup
+KillMode=mixed
+TimeoutStopSec=20
+Restart=no
+UMask=0022
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6 AF_PACKET

@@ -1,0 +1,74 @@
+From 84fea62749edee2a9bc8311eb09956bc39cd751e Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 09:36:04 +0100
+Subject: [PATCH 110/137] BRING-UP: ASoC: qdsp6: q6voice: Trace the voice
+ services' messages
+
+trace (module parameter, off by default): every command sent to the voice
+services (MVM, CVP, CVS), every reply and every unsolicited event in the
+log, with the ports, the opcode and the first payload bytes. That is how
+the first calls on SM8350 were understood: the local sessions came up,
+the modem never had a stream session under the VoiceMMode names, and no
+event ever reached the AP.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ sound/soc/qcom/qdsp6/q6voice-common.c | 24 +++++++++++++++++++++++-
+ 1 file changed, 23 insertions(+), 1 deletion(-)
+
+diff --git a/sound/soc/qcom/qdsp6/q6voice-common.c b/sound/soc/qcom/qdsp6/q6voice-common.c
+index e0a5e4eea84e..4e9c04151e8a 100644
+--- a/sound/soc/qcom/qdsp6/q6voice-common.c
++++ b/sound/soc/qcom/qdsp6/q6voice-common.c
+@@ -11,6 +11,12 @@
+ 
+ #define TIMEOUT_MS	300
+ 
++static bool trace;
++module_param(trace, bool, 0644);
++MODULE_PARM_DESC(trace, "Log every voice service command, reply and event");
++
++static const char * const q6voice_service_names[] = { "mvm", "cvp", "cvs" };
++
+ struct q6voice_service {
+ 	struct apr_device *adev;
+ 	enum q6voice_service_type type;
+@@ -204,7 +210,14 @@ int q6voice_common_callback(struct apr_device *adev, const struct apr_resp_pkt *
+ 	struct q6voice_session *s;
+ 	unsigned long flags;
+ 
+-	dev_dbg(dev, "callback: %#x\n", data->hdr.opcode);
++	if (trace) {
++		int n = min_t(int, data->payload_size, 16);
++
++		dev_info(dev, "%s %u<-%u: opcode %#x, %d bytes: %*ph\n",
++			 q6voice_service_names[v->type], data->hdr.dest_port,
++			 data->hdr.src_port, data->hdr.opcode, data->payload_size,
++			 max(n, 0), data->payload);
++	}
+ 
+ 	if (data->hdr.dest_port >= Q6VOICE_PATH_COUNT) {
+ 		dev_warn(dev, "callback() called for unhandled/invalid path: %d\n",
+@@ -246,6 +259,11 @@ int q6voice_common_send(struct q6voice_session *s, struct apr_hdr *hdr)
+ 	s->result = 0;
+ 	spin_unlock_irqrestore(&s->lock, flags);
+ 
++	if (trace)
++		dev_info(s->dev, "%s %u->%u: send %#x, %u bytes\n",
++			 q6voice_service_names[s->svc->type], hdr->src_port,
++			 hdr->dest_port, hdr->opcode, hdr->pkt_size);
++
+ 	ret = apr_send_pkt(s->svc->adev, (struct apr_pkt *)hdr);
+ 	if (ret < 0)
+ 		return ret;
+@@ -263,6 +281,10 @@ int q6voice_common_send(struct q6voice_session *s, struct apr_hdr *hdr)
+ 		return -EIO;
+ 	}
+ 
++	if (trace)
++		dev_info(s->dev, "%s: %#x ok (handle %u)\n",
++			 q6voice_service_names[s->svc->type], hdr->opcode, s->handle);
++
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(q6voice_common_send);

@@ -1,0 +1,23 @@
+#!/bin/sh
+# systemd-sleep hook (/usr/lib/systemd/system-sleep/duo2-usb-gadget): the
+# dwc3 controller refuses to suspend while the gadget is bound to a host
+# (-EAGAIN), so unbind it for the suspend and bind it again after the resume
+# (the USB network and serial console come back on their own).
+G=/sys/kernel/config/usb_gadget/duo2/UDC
+S=/run/duo2-usb-gadget.udc
+case $1 in
+pre)
+	udc=$(cat "$G" 2>/dev/null)
+	if [ -n "$udc" ]; then
+		echo "$udc" > "$S"
+		echo > "$G"
+	fi
+	;;
+post)
+	if [ -s "$S" ]; then
+		cat "$S" > "$G" 2>/dev/null
+		rm -f "$S"
+	fi
+	;;
+esac
+exit 0

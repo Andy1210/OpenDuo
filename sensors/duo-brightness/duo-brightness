@@ -1,0 +1,381 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""duo-brightness: automatic brightness for both panels from the light sensor.
+
+The light comes from the SSC on the SLPI (duo2_ssc, the same client duo-posed
+uses): Microsoft's `lightfusion` sensor first, the one the stock Android's
+AutomaticBrightnessController listens to (it fuses the two panels' TXC
+PA22A light sensors with the hinge and the posture); without it the two
+`ambient_light_oc` sensors (the brighter of the two). The brightness goes to
+every /sys/class/backlight device (both panels, as the quick menu's slider
+does). How light becomes brightness: brightnesspolicy.py.
+
+The user's slider stays the user's: a backlight level this daemon did not
+write (the quick menu or Settings wrote it through duo-shell-helper) is taken
+as what the user wants at this light, and kept as an offset on the curve
+(/var/lib/duo2-brightness/state), as Android's adaptive brightness does.
+
+Only while the switch is on (/etc/duo2/brightness.conf: `auto = on`, which
+duo-shell-helper auto-brightness on|off writes) and a panel is lit (duo-wc's
+event stream): with the screen dark the light sensor is off (the SLPI may
+sleep) and nothing is written.
+
+  duo-brightness              the daemon (duo-brightness.service, root)
+  duo-brightness --monitor    print the light, the curve and the backlight
+                              once a second; writes nothing (also while off)
+"""
+
+import json
+import os
+import socket
+import sys
+import threading
+import time
+
+sys.path.insert(0, "/usr/local/lib/duo-posed")
+sys.path.insert(0, "/usr/local/lib/duo-brightness")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(1, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "duo-posed"))
+import brightnesspolicy as bp  # noqa: E402
+import duo2_ssc as ssc  # noqa: E402
+
+CONF = "/etc/duo2/brightness.conf"
+STATE = "/var/lib/duo2-brightness/state"
+BACKLIGHT = "/sys/class/backlight"
+WC_SOCKET = "/run/duo-wc/admin.sock"
+LIGHT_TYPES = ("lightfusion", "ambient_light_oc", "ambient_light")
+LIGHT_RATE_HZ = 4.0  # the stock AutomaticBrightnessController samples it every 250 ms
+
+
+def log(*a):
+    print(*a, flush=True)
+
+
+def read_conf(path=CONF):
+    cfg = {"auto": "off"}
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.split("#", 1)[0].strip()
+                k, sep, v = line.partition("=")
+                if sep:
+                    cfg[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return cfg
+
+
+def on(v):
+    return str(v).lower() in ("on", "1", "yes", "true")
+
+
+class Backlights:
+    """Every backlight device: the same fraction on each."""
+
+    def __init__(self, root=BACKLIGHT):
+        self.devs = []
+        try:
+            entries = sorted(os.listdir(root))
+        except OSError:
+            entries = []
+        for e in entries:
+            base = os.path.join(root, e)
+            try:
+                with open(os.path.join(base, "max_brightness")) as f:
+                    self.devs.append((base, int(f.read().strip())))
+            except (OSError, ValueError):
+                continue
+        self.written = None  # the level last written to the first device
+
+    def read(self):
+        """The first device's level as a fraction, None if unreadable."""
+        if not self.devs:
+            return None
+        base, maximum = self.devs[0]
+        try:
+            with open(os.path.join(base, "brightness")) as f:
+                return int(f.read().strip()), maximum
+        except (OSError, ValueError):
+            return None
+
+    def write(self, fraction):
+        for i, (base, maximum) in enumerate(self.devs):
+            lv = bp.level(fraction, maximum)
+            try:
+                with open(os.path.join(base, "brightness"), "w") as f:
+                    f.write(str(lv))
+                if i == 0:
+                    self.written = lv
+            except OSError as e:
+                log("%s: %s" % (base, e))
+
+
+class WcState(threading.Thread):
+    """duo-wc's event stream: which panels are lit (None: not known)."""
+
+    daemon = True
+
+    def __init__(self, path=WC_SOCKET):
+        super().__init__(name="duo-wc-events")
+        self.path = path
+        self.lit = None
+
+    def run(self):
+        while True:
+            try:
+                s = socket.socket(socket.AF_UNIX)
+                s.connect(self.path)
+                s.sendall(b'{"id":1,"request":"subscribe"}\n')
+                buf = b""
+                while True:
+                    chunk = s.recv(65536)
+                    if not chunk:
+                        break
+                    buf += chunk
+                    while b"\n" in buf:
+                        line, buf = buf.split(b"\n", 1)
+                        msg = json.loads(line or b"{}")
+                        st = msg.get("state") or (msg.get("ok") or {}).get("state")
+                        if st is not None and "lit" in st:
+                            self.lit = list(st.get("lit") or [])
+                s.close()
+            except (OSError, ValueError):
+                pass
+            self.lit = None
+            time.sleep(2.0)
+
+
+class Sensor:
+    """The light from the SSC: lux readings, enabled only while wanted."""
+
+    def __init__(self):
+        self.cli = None
+        self.sensors = []
+        self.kind = None
+        self.values = {}  # suid -> latest lux (ambient_light_oc: one per panel)
+        self.unknown = set()
+
+    def open(self):
+        self.cli = ssc.SscClient(timeout=5)
+        for t in LIGHT_TYPES:
+            found = self.cli.sensors(t)
+            if found:
+                self.kind, self.sensors = t, found
+                break
+        if not self.sensors:
+            self.close()
+            raise ssc.SscError("no light sensor (%s)" % ", ".join(LIGHT_TYPES))
+        for s in self.sensors:
+            self.cli.enable(s, rate_hz=LIGHT_RATE_HZ)
+        self.values = {}
+        log("light: %s (%s)" % (self.kind, "; ".join(s.describe() for s in self.sensors)))
+
+    def close(self):
+        if self.cli is None:
+            return
+        for s in self.sensors:
+            try:
+                self.cli.disable(s)
+            except (ssc.SscError, OSError):
+                pass
+        self.cli.close()
+        self.cli, self.sensors = None, []
+
+    def fileno(self):
+        return self.cli.fileno()
+
+    def read(self, timeout):
+        """Readings that came within `timeout`: the lux now, or None."""
+        got = False
+        mine = {s.suid for s in self.sensors}
+        for suid, mid, _ts, payload in self.cli.events(timeout):
+            if suid not in mine:
+                continue
+            if mid == ssc.MSG_STD_SENSOR_EVENT:
+                data, _status = ssc.std_event(payload)
+                if data:
+                    self.values[suid] = data[0]
+                    got = True
+            elif mid not in self.unknown and mid not in (
+                ssc.MSG_PHYSICAL_CONFIG_EVENT,
+                ssc.MSG_ATTR_EVENT,
+            ):
+                self.unknown.add(mid)
+                log("light: message %d not understood: %s" % (mid, payload.hex()))
+        if not got or not self.values:
+            return None
+        return max(self.values.values())
+
+
+def load_offset():
+    try:
+        with open(STATE) as f:
+            for line in f:
+                k, _, v = line.partition("=")
+                if k.strip() == "offset":
+                    return float(v)
+    except (OSError, ValueError):
+        pass
+    return 0.0
+
+
+def save_offset(offset):
+    try:
+        os.makedirs(os.path.dirname(STATE), exist_ok=True)
+        tmp = STATE + ".new"
+        with open(tmp, "w") as f:
+            f.write("offset = %.2f\n" % offset)
+        os.replace(tmp, STATE)
+    except OSError as e:
+        log("%s: %s" % (STATE, e))
+
+
+def monitor():
+    sensor = Sensor()
+    sensor.open()
+    light = bp.Light()
+    bl = Backlights()
+    offset = load_offset()
+    t_print = 0.0
+    lux = None
+    try:
+        while True:
+            r = sensor.read(0.25)
+            now = time.monotonic()
+            if r is not None:
+                lux = r
+                light.feed(r, now)
+            if now - t_print >= 1.0 and lux is not None:
+                t_print = now
+                ref = light.settled(now)
+                cur = bl.read()
+                tgt = bp.target(ref, offset)
+                print(
+                    "lux %8.2f  per sensor %s  smooth %8.2f  reference %8.2f  curve %5.1f  target %5.1f "
+                    "(backlight %.0f %%)  now %s"
+                    % (
+                        lux,
+                        " ".join("%.2f" % v for v in sensor.values.values()),
+                        light.smooth,
+                        ref,
+                        bp.curve(ref),
+                        tgt,
+                        100 * bp.to_fraction(tgt),
+                        "%d/%d" % cur if cur else "?",
+                    ),
+                    flush=True,
+                )
+    except KeyboardInterrupt:
+        pass
+    finally:
+        sensor.close()
+
+
+def daemon():
+    wc = WcState()
+    wc.start()
+    sensor = Sensor()
+    light = bp.Light()
+    ramp = bp.Ramp()
+    bl = Backlights()
+    if not bl.devs:
+        log("no backlight in %s: nothing to do" % BACKLIGHT)
+    offset = load_offset()
+    conf_mtime = None
+    auto = False
+    retry_at = 0.0
+    jump = False  # the next reading sets the brightness at once
+    last = time.monotonic()
+    log("duo-brightness: %d backlight(s), offset %.1f" % (len(bl.devs), offset))
+    while True:
+        now = time.monotonic()
+        try:
+            mtime = os.stat(CONF).st_mtime
+        except OSError:
+            mtime = None
+        if mtime != conf_mtime:
+            conf_mtime = mtime
+            want = on(read_conf().get("auto"))
+            if want != auto:
+                log("automatic brightness %s" % ("on" if want else "off"))
+            auto = want
+        lit = wc.lit
+        active = auto and bool(bl.devs) and (lit is None or bool(lit))
+        if not active:
+            if sensor.cli is not None:
+                sensor.close()
+                log("light sensor off (%s)" % ("switched off" if not auto else "screen dark"))
+            ramp.value = None
+            bl.written = None
+            time.sleep(0.5)
+            last = time.monotonic()
+            continue
+        if sensor.cli is None:
+            if now < retry_at:
+                time.sleep(0.5)
+                continue
+            try:
+                sensor.open()
+            except (ssc.SscError, OSError) as e:
+                log("light sensor: %s; again in 30 s" % e)
+                retry_at = now + 30
+                continue
+            light.reset()
+            cur = bl.read()
+            ramp.jump(bp.to_perceptual(cur[0] / cur[1]) if cur else 50.0)
+            bl.written = cur[0] if cur else None
+            jump = True
+        try:
+            moving = (
+                ramp.value is not None
+                and light.smooth is not None
+                and abs(ramp.value - bp.target(light.reference, offset)) > 0.05
+            )
+            r = sensor.read(0.05 if moving else 0.5)
+        except (ssc.SscError, OSError) as e:
+            log("light sensor: %s" % e)
+            sensor.close()
+            retry_at = now + 5
+            continue
+        now = time.monotonic()
+        dt, last = now - last, now
+        if r is not None:
+            light.feed(r, now)
+            if jump:
+                # The screen just came on (or the switch): straight to the target.
+                jump = False
+                ramp.jump(bp.target(r, offset))
+        # The user's own setting: a level this daemon did not write.
+        cur = bl.read()
+        if cur and bl.written is not None and cur[0] != bl.written and light.smooth is not None:
+            offset = bp.offset_for(cur[0] / cur[1], light.reference)
+            save_offset(offset)
+            ramp.jump(bp.to_perceptual(cur[0] / cur[1]))
+            bl.written = cur[0]
+            log(
+                "the user set %d/%d at %.1f lux: offset %.1f"
+                % (cur[0], cur[1], light.reference, offset)
+            )
+            continue
+        ref = light.settled(now)
+        if ref is None:
+            continue
+        tgt = bp.target(ref, offset)
+        ramp.step(tgt, dt)
+        if cur is None or bp.level(bp.to_fraction(ramp.value), cur[1]) != cur[0]:
+            bl.write(bp.to_fraction(ramp.value))
+
+
+def main(argv):
+    if "--monitor" in argv:
+        monitor()
+        return 0
+    if argv:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    daemon()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

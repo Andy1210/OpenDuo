@@ -1,0 +1,71 @@
+#!/usr/bin/python3 -I
+"""duo2-polkit-confirm ACTION PID [DETAIL]: ask the user in the shell, for polkit.
+
+polkit (the PackageKit rule, 50-duo2-packagekit.rules) runs this as its own
+user (polkitd) before PackageKit removes packages. duo-wc answers polkitd on
+its admin socket with one request only (`confirm`, confirm_users in
+duo-wc.conf): it shows the shell's question and replies when the user has
+answered, or no after 9 s. Prints "yes" or "no"; polkit allows on "yes".
+"""
+
+import json
+import socket
+import sys
+
+SOCKET = "/run/duo-wc/admin.sock"
+
+
+def app_of(pid):
+    """A readable name for the asking process (/proc/PID/comm: anyone may
+    read it; only for the question's text, it decides nothing)."""
+    try:
+        with open("/proc/%d/comm" % int(pid)) as f:
+            return f.read().strip()[:32]
+    except (OSError, ValueError):
+        return ""
+
+
+def main(argv):
+    if len(argv) < 2 or argv[0] != "remove-packages":
+        print("no")
+        return 0
+    detail = (argv[2] if len(argv) > 2 else "").strip()
+    names = sorted({part.split(";")[0] for part in detail.replace(",", " ").split() if part})
+    asker = app_of(argv[1])
+    text = ", ".join(names)[:200]
+    if asker:
+        text = ("%s: %s" % (asker, text)) if text else asker
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(9.5)
+            s.connect(SOCKET)
+            s.sendall(
+                (
+                    json.dumps(
+                        {
+                            "id": 1,
+                            "request": "confirm",
+                            "action": "remove-packages",
+                            "detail": text,
+                            "wait": True,
+                        }
+                    )
+                    + "\n"
+                ).encode()
+            )
+            buf = b""
+            while b"\n" not in buf:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+        reply = json.loads(buf.split(b"\n")[0] or b"{}")
+    except (OSError, ValueError):
+        print("no")
+        return 0
+    print("yes" if (reply.get("ok") or {}).get("yes") is True else "no")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

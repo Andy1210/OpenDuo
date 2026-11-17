@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Measure the phone's power draw in a fixed state, comparable between boots.
+#
+#   scripts/duo2-power [SETTLE_S] [SAMPLES]
+#
+# State: both panels blanked (fbcon blank), the modem remoteproc stopped (it
+# crash-loops until telephony is brought up), WiFi associated and idle, no
+# other load. After SETTLE_S seconds (default 60) the battery current is
+# sampled once a second SAMPLES times (default 30). With the USB supply
+# unchanged, the battery current is the comparable number: more negative =
+# more drawn from the battery. Also prints the USB input, the CPU idle
+# residency per state and the CPU frequencies.
+set -euo pipefail
+. "$(dirname "$0")/lib/remote.sh"
+SETTLE=${1:-60}
+N=${2:-30}
+
+duo2_ssh "bash -s" <<EOF
+set -u
+B=/sys/class/power_supply/qcom-battmgr-bat
+U=/sys/class/power_supply/qcom-battmgr-usb
+echo 4 | sudo tee /sys/class/graphics/fb0/blank >/dev/null 2>&1 || true
+for r in /sys/class/remoteproc/remoteproc*; do
+    [ "\$(cat \$r/name)" = modem ] && [ "\$(cat \$r/state)" = running ] &&
+        echo stop | sudo tee \$r/state >/dev/null
+done
+echo "kernel \$(uname -r) | cmdline extras: \$(tr ' ' '\n' < /proc/cmdline | grep -E 'cpuidle|ignore_unused|sync_state|duo2.try' | tr '\n' ' ')"
+idle() { cat /sys/devices/system/cpu/cpu*/cpuidle/state*/time 2>/dev/null | awk '{s+=\$1} END {print s+0}'; }
+sleep $SETTLE
+i0=\$(idle); t0=\$(date +%s%N)
+s=0; mn=0; mx=-99999999; u=0
+for k in \$(seq 1 $N); do
+    c=\$(cat \$B/current_now); s=\$((s + c)); u=\$((u + \$(cat \$U/current_now)))
+    [ \$c -lt \$mn ] && mn=\$c; [ \$c -gt \$mx ] && mx=\$c
+    sleep 1
+done
+i1=\$(idle); t1=\$(date +%s%N)
+echo "battery current: mean \$((s / $N / 1000)) mA (min \$((mn / 1000)), max \$((mx / 1000))), usb in \$((u / $N / 1000)) mA, \$(cat \$B/voltage_now | awk '{printf "%.2f V", \$1/1e6}'), \$(cat \$B/capacity)%"
+ncpu=\$(nproc)
+echo "cpu idle residency: \$(( (i1 - i0) * 100 / ((t1 - t0) / 1000 * ncpu) ))% of cpu time (0 = no cpuidle states)"
+for p in /sys/devices/system/cpu/cpufreq/policy*; do printf "%s %s kHz  " \$(basename \$p) \$(cat \$p/scaling_cur_freq); done; echo
+EOF

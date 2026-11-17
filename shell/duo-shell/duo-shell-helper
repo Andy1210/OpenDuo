@@ -1,0 +1,470 @@
+#!/usr/bin/python3 -I
+"""duo-shell-helper: the few things the quick menu needs root for.
+
+    duo-shell-helper wifi on|off          WLAN radio (rfkill soft block)
+    duo-shell-helper brightness PERCENT   both panels' backlight, 1..100
+    duo-shell-helper auto-rotate on|off   duo-posed's auto_rotate (its config
+                                          file), then duo-posed reads it again
+    duo-shell-helper auto-brightness on|off   automatic brightness (duo-brightness:
+                                          /etc/duo2/brightness.conf, read again
+                                          within a second)
+    duo-shell-helper panels both|left|right   duo-posed's panels (the user's
+                                          choice over the sensors), the same way
+    duo-shell-helper mobile-data on|off   the mobile data switch duo2-wwan
+                                          watches (/var/lib/duo2/mobile-data)
+    duo-shell-helper bluetooth on|off     the Bluetooth radio's rfkill soft block
+                                          (BlueZ switches it on/off as the user;
+                                          a blocked one must be freed first)
+    duo-shell-helper airplane on|off      airplane mode: on = WiFi and Bluetooth
+                                          rfkill-blocked (the ones on are noted
+                                          in /var/lib/duo2/airplane-radios) and
+                                          /var/lib/duo2/airplane = on, which
+                                          duo2-wwan watches (the modem in low
+                                          power); off = the noted radios back on
+                                          (Bluetooth powered through BlueZ), the
+                                          modem enabled. WiFi / Bluetooth may be
+                                          switched on in airplane mode as usual
+    duo-shell-helper touch retry          the touch daemon back in its stitched
+                                          mode after a fallback: its fallback
+                                          note and re-init count removed, then
+                                          duo2-touchd restarted
+    duo-shell-helper reboot | poweroff
+
+Run by the shell as `sudo -n duo-shell-helper ...`; install.sh puts a
+sudoers rule for exactly this file in /etc/sudoers.d/duo-shell. Every
+argument is checked against a fixed list: nothing from the caller reaches a
+shell or a path.
+
+Any app of the user can run this through sudo too (sudo cannot tell the
+shell from an app). So the actions that matter (wifi, bluetooth,
+mobile-data, airplane, touch retry, reboot, poweroff) need a one-time
+grant: the shell asks duo-wc for one on its trusted connection and writes
+the token on this helper's standard input; the helper redeems it on
+duo-wc's admin socket (as root) for exactly these words ("mobile-data
+off"). Without a grant (another app: Duo Settings' WiFi switch) the user is
+asked in the shell first (duo-wc's confirm, action `helper`, 20 s); no yes,
+nothing done (exit 3). Brightness, automatic brightness, auto-rotate and
+the panels' choice need neither. (compositor/duo-wc/src/grants.rs)
+"""
+
+import os
+import subprocess
+import sys
+
+RFKILL = "/sys/class/rfkill"
+BACKLIGHT = "/sys/class/backlight"
+POSED_CONF = "/etc/duo-posed.conf"
+BRIGHTNESS_CONF = "/etc/duo2/brightness.conf"
+DATA_SWITCH = "/var/lib/duo2/mobile-data"
+AIRPLANE = "/var/lib/duo2/airplane"
+AIRPLANE_RADIOS = "/var/lib/duo2/airplane-radios"
+RADIOS = ("wlan", "bluetooth")
+
+
+def set_conf_key(text, key, value):
+    """The config text with `key = value` set: the first active line for the
+    key is replaced, else a commented-out one, else a line is appended. Pure."""
+    lines = text.splitlines()
+    out, done = [], False
+    for line in lines:
+        bare = line.strip()
+        if not done and bare.split("=", 1)[0].strip() == key and "=" in bare:
+            out.append("%s = %s" % (key, value))
+            done = True
+        else:
+            out.append(line)
+    if not done:
+        for i, line in enumerate(out):
+            bare = line.strip().lstrip("#").strip()
+            if "=" in bare and bare.split("=", 1)[0].strip() == key:
+                out[i] = "%s = %s" % (key, value)
+                done = True
+                break
+    if not done:
+        out.append("%s = %s" % (key, value))
+    return "\n".join(out) + "\n"
+
+
+def percent_to_level(percent, maximum):
+    """A backlight level for 1..100 per cent of `maximum` (never 0: a panel
+    at 0 looks off). Pure."""
+    percent = max(1, min(100, int(percent)))
+    return max(1, int(round(maximum * percent / 100.0)))
+
+
+def rfkill(kind, block, root=None):
+    done = False
+    root = root or RFKILL
+    for entry in sorted(os.listdir(root)):
+        base = os.path.join(root, entry)
+        try:
+            with open(os.path.join(base, "type")) as f:
+                if f.read().strip() != kind:
+                    continue
+            with open(os.path.join(base, "soft"), "w") as f:
+                f.write("1" if block else "0")
+            done = True
+        except OSError as e:
+            print("duo-shell-helper: %s: %s" % (base, e), file=sys.stderr)
+    return done
+
+
+def brightness(percent):
+    done = False
+    for entry in sorted(os.listdir(BACKLIGHT)):
+        base = os.path.join(BACKLIGHT, entry)
+        try:
+            with open(os.path.join(base, "max_brightness")) as f:
+                maximum = int(f.read().strip())
+            with open(os.path.join(base, "brightness"), "w") as f:
+                f.write(str(percent_to_level(percent, maximum)))
+            done = True
+        except (OSError, ValueError) as e:
+            print("duo-shell-helper: %s: %s" % (base, e), file=sys.stderr)
+    return done
+
+
+def auto_brightness(on):
+    """duo-brightness's switch (it polls the file's time)."""
+    try:
+        with open(BRIGHTNESS_CONF) as f:
+            text = f.read()
+    except FileNotFoundError:
+        text = ""
+    new = set_conf_key(text, "auto", "on" if on else "off")
+    if new == text:
+        return True
+    os.makedirs(os.path.dirname(BRIGHTNESS_CONF), exist_ok=True)
+    tmp = BRIGHTNESS_CONF + ".new"
+    with open(tmp, "w") as f:
+        f.write(new)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, BRIGHTNESS_CONF)
+    return True
+
+
+def auto_rotate(on):
+    return posed_key("auto_rotate", "on" if on else "off")
+
+
+def posed_key(key, value):
+    with open(POSED_CONF) as f:
+        text = f.read()
+    new = set_conf_key(text, key, value)
+    if new != text:
+        tmp = POSED_CONF + ".new"
+        with open(tmp, "w") as f:
+            f.write(new)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, POSED_CONF)
+    # SIGHUP: duo-posed reads its configuration again without reopening the
+    # sensors (a restart waits for them); an old unit without ExecReload
+    # is restarted.
+    subprocess.run(["systemctl", "try-reload-or-restart", "duo-posed.service"], check=False)
+    return True
+
+
+def write_file(path, text):
+    """Atomically, 0644 (readable by the shell)."""
+    os.makedirs(os.path.dirname(path), mode=0o755, exist_ok=True)
+    tmp = path + ".new"
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+
+def mobile_data(on):
+    """The switch duo2-wwan watches: it disconnects or connects at once."""
+    write_file(DATA_SWITCH, "on\n" if on else "off\n")
+    return True
+
+
+def radios_on(root=None):
+    """The radios (of RADIOS) with an rfkill switch that is not blocked,
+    with the name of each one's device: [(kind, name)]."""
+    root = root or RFKILL
+    out = []
+    try:
+        entries = sorted(os.listdir(root))
+    except OSError:
+        return out
+    for entry in entries:
+        base = os.path.join(root, entry)
+        try:
+            with open(os.path.join(base, "type")) as f:
+                kind = f.read().strip()
+            with open(os.path.join(base, "soft")) as f:
+                soft = f.read().strip()
+            with open(os.path.join(base, "name")) as f:
+                name = f.read().strip()
+        except OSError:
+            continue
+        if kind in RADIOS and soft == "0" and (kind, name) not in out:
+            out.append((kind, name))
+    return out
+
+
+def parse_radios(text):
+    """The airplane-radios file: the kinds to switch back on (pure)."""
+    return [w for w in (text or "").split() if w in RADIOS]
+
+
+def bluez_powered(hci, value=None):
+    """BlueZ's Powered of /org/bluez/HCI (hci0...): read (value None: True,
+    False, or None when unknown), or set. Root may, through busctl."""
+    if not hci.startswith("hci") or not hci[3:].isdigit():
+        return None
+    path = "/org/bluez/" + hci
+    base = ["busctl", "--timeout=5"]
+    if value is None:
+        r = subprocess.run(
+            base + ["get-property", "org.bluez", path, "org.bluez.Adapter1", "Powered"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return {"b true": True, "b false": False}.get(r.stdout.strip())
+    r = subprocess.run(
+        base
+        + [
+            "set-property",
+            "org.bluez",
+            path,
+            "org.bluez.Adapter1",
+            "Powered",
+            "b",
+            "true" if value else "false",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return r.returncode == 0
+
+
+def airplane(on, root=None, state=AIRPLANE, radios_file=AIRPLANE_RADIOS, powered=bluez_powered):
+    """Airplane mode on: the radios that are on now are noted, then blocked;
+    off: the noted ones come back. A Bluetooth radio counts as on when its
+    rfkill switch is free AND BlueZ has it powered (BlueZ powers an adapter
+    up whenever its rfkill block goes, so one that was off stays blocked)."""
+    if on:
+        noted = []
+        if read_text(state) != "on":
+            for kind, name in radios_on(root):
+                if kind == "bluetooth" and powered(name) is False:
+                    continue
+                if kind not in noted:
+                    noted.append(kind)
+            write_file(radios_file, " ".join(noted) + "\n")
+        else:
+            noted = parse_radios(read_text(radios_file))  # already on: keep the first note
+        for kind in RADIOS:
+            rfkill(kind, True, root)
+        write_file(state, "on\n")
+        return True
+    noted = parse_radios(read_text(radios_file))
+    write_file(state, "off\n")
+    for kind in noted:
+        rfkill(kind, False, root)
+    if "bluetooth" in noted:
+        bluetooth_powered_soon(root, powered)
+    try:
+        os.unlink(radios_file)
+    except OSError:
+        pass
+    return True
+
+
+def bluetooth_powered_soon(root=None, powered=bluez_powered, wait=3.0):
+    """After the block went: the adapter powered (BlueZ usually does it by
+    itself; a few seconds for the controller to come back)."""
+    import time
+
+    names = [name for kind, name in radios_on(root) if kind == "bluetooth"]
+    end = time.monotonic() + wait
+    for name in names:
+        while powered(name) is not True and time.monotonic() < end:
+            if powered(name, True):
+                break
+            time.sleep(0.5)
+
+
+TOUCH_NOTES = ("/run/duo2-touchd.fallback", "/run/duo2-touchd.reinit")
+
+
+def touch_retry(notes=TOUCH_NOTES, run=subprocess.run):
+    """duo2-touchd stitched again: its notes gone, the daemon restarted."""
+    for path in notes:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+    return (
+        run(["/usr/bin/systemctl", "restart", "duo2-touchd.service"], check=False).returncode == 0
+    )
+
+
+def read_text(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+WC_ADMIN = "/run/duo-wc/admin.sock"
+GRANTED = ("wifi", "bluetooth", "mobile-data", "airplane", "touch", "reboot", "poweroff")
+
+
+def read_token(timeout_s=2.0):
+    """The grant's token, one line on standard input (none: "")."""
+    import select
+
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return ""
+        if not select.select([sys.stdin], [], [], timeout_s)[0]:
+            return ""
+        return sys.stdin.readline(128).strip()
+    except (OSError, ValueError):
+        return ""
+
+
+def needs_grant(argv):
+    """Whether these words need the shell's grant (pure)."""
+    return bool(argv) and argv[0] in GRANTED
+
+
+def redeem(action, token):
+    """Redeem a grant on duo-wc's admin socket (as root): True if valid."""
+    import json
+    import socket
+
+    if not token:
+        return False
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(3)
+            s.connect(WC_ADMIN)
+            s.sendall(
+                (
+                    json.dumps({"id": 1, "request": "redeem", "action": action, "token": token})
+                    + "\n"
+                ).encode()
+            )
+            buf = b""
+            while b"\n" not in buf:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+        reply = json.loads(buf.split(b"\n")[0] or b"{}")
+    except (OSError, ValueError):
+        return False
+    return (reply.get("ok") or {}).get("redeemed") is True
+
+
+def plan(argv):
+    """What these words do, as a callable returning True on success; None
+    when they are not a request this helper knows (pure dispatch)."""
+    if len(argv) == 2 and argv[0] == "wifi" and argv[1] in ("on", "off"):
+        return lambda: rfkill("wlan", argv[1] == "off")
+    if len(argv) == 2 and argv[0] == "brightness" and argv[1].isascii() and argv[1].isdigit():
+        return lambda: brightness(int(argv[1]))
+    if len(argv) == 2 and argv[0] == "auto-brightness" and argv[1] in ("on", "off"):
+        return lambda: auto_brightness(argv[1] == "on")
+    if len(argv) == 2 and argv[0] == "auto-rotate" and argv[1] in ("on", "off"):
+        return lambda: auto_rotate(argv[1] == "on")
+    if len(argv) == 2 and argv[0] == "mobile-data" and argv[1] in ("on", "off"):
+        return lambda: mobile_data(argv[1] == "on")
+    if len(argv) == 2 and argv[0] == "bluetooth" and argv[1] in ("on", "off"):
+        return lambda: rfkill("bluetooth", argv[1] == "off")
+    if len(argv) == 2 and argv[0] == "airplane" and argv[1] in ("on", "off"):
+        return lambda: airplane(argv[1] == "on")
+    if len(argv) == 2 and argv[0] == "panels" and argv[1] in ("both", "left", "right"):
+        return lambda: posed_key("panels", argv[1])
+    if argv == ["touch", "retry"]:
+        return touch_retry
+    if argv in (["reboot"], ["poweroff"]):
+        return lambda: os.execv("/usr/bin/systemctl", ["systemctl", argv[0]])
+    return None
+
+
+QUESTIONS = {
+    ("wifi", "on"): "switch WiFi on",
+    ("wifi", "off"): "switch WiFi off",
+    ("bluetooth", "on"): "switch Bluetooth on",
+    ("bluetooth", "off"): "switch Bluetooth off",
+    ("mobile-data", "on"): "switch mobile data on",
+    ("mobile-data", "off"): "switch mobile data off",
+    ("airplane", "on"): "switch airplane mode on",
+    ("airplane", "off"): "switch airplane mode off",
+    ("touch", "retry"): "restart the touch screen driver",
+    ("reboot",): "restart the phone",
+    ("poweroff",): "switch the phone off",
+}
+
+
+def question(argv):
+    """What the user is asked when an app wants this (pure)."""
+    return "An app asks to %s." % QUESTIONS.get(tuple(argv), " ".join(argv))
+
+
+def confirm(detail):
+    """Ask the user in the shell (duo-wc's confirm): True only on a yes."""
+    import json
+    import socket
+
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(25)
+            s.connect(WC_ADMIN)
+            s.sendall(
+                (
+                    json.dumps(
+                        {
+                            "id": 1,
+                            "request": "confirm",
+                            "action": "helper",
+                            "detail": detail,
+                            "wait": True,
+                        }
+                    )
+                    + "\n"
+                ).encode()
+            )
+            buf = b""
+            while b"\n" not in buf:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+        reply = json.loads(buf.split(b"\n")[0] or b"{}")
+    except (OSError, ValueError):
+        return False
+    return (reply.get("ok") or {}).get("yes") is True
+
+
+def main(argv):
+    run = plan(argv)
+    if run is None:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    if (
+        needs_grant(argv)
+        and not redeem(" ".join(argv), read_token())
+        and not confirm(question(argv))
+    ):
+        print(
+            "duo-shell-helper: %s: neither the shell's grant nor the user's yes" % " ".join(argv),
+            file=sys.stderr,
+        )
+        return 3
+    return 0 if run() else 1
+
+
+if __name__ == "__main__":
+    # Whatever sudo handed over: the helper starts only the system's tools.
+    os.environ["PATH"] = "/usr/sbin:/usr/bin:/sbin:/bin"
+    sys.exit(main(sys.argv[1:]))

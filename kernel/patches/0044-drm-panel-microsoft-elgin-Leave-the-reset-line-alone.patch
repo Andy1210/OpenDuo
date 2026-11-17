@@ -1,0 +1,50 @@
+From 761b11cae7e28f74df70a17e9bdc4a015781a820 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 12:11:42 +0100
+Subject: [PATCH 044/137] drm/panel: microsoft-elgin: Leave the reset line
+ alone until the first prepare
+
+The panel driver asserted the reset line at probe (GPIOD_OUT_HIGH), which
+blanked the picture the boot loader left on the command-mode panels some
+seconds before the compositor's first frame. Take the line as it is and
+make it an output in the reset sequence of the first prepare, which resets
+the panel anyway.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/gpu/drm/panel/panel-microsoft-elgin.c | 15 ++++++++++++---
+ 1 file changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/panel/panel-microsoft-elgin.c b/drivers/gpu/drm/panel/panel-microsoft-elgin.c
+index 54aa99a354ce..77b27ee62ba1 100644
+--- a/drivers/gpu/drm/panel/panel-microsoft-elgin.c
++++ b/drivers/gpu/drm/panel/panel-microsoft-elgin.c
+@@ -65,8 +65,12 @@ static inline struct elgin *to_elgin(struct drm_panel *panel)
+ 
+ static void elgin_reset(struct elgin *ctx)
+ {
+-	/* reset-gpios is active low: assert 10 ms, release, wait 10 ms */
+-	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++	/*
++	 * reset-gpios is active low: assert 10 ms, release, wait 10 ms. The
++	 * line is taken as the boot loader left it (probe): set it to an
++	 * output here, at the first prepare.
++	 */
++	gpiod_direction_output(ctx->reset_gpio, 1);
+ 	usleep_range(10000, 11000);
+ 	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
+ 	usleep_range(10000, 11000);
+@@ -318,7 +322,12 @@ static int elgin_probe(struct mipi_dsi_device *dsi)
+ 	if (ret < 0)
+ 		return dev_err_probe(dev, ret, "failed to get regulators\n");
+ 
+-	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
++	/*
++	 * As the boot loader left it: asserting the reset here blanked the
++	 * UEFI's picture seconds before the compositor's first frame. The
++	 * first prepare resets the panel anyway.
++	 */
++	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_ASIS);
+ 	if (IS_ERR(ctx->reset_gpio))
+ 		return dev_err_probe(dev, PTR_ERR(ctx->reset_gpio),
+ 				     "failed to get reset-gpios\n");

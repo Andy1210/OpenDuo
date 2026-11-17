@@ -1,0 +1,38 @@
+#!/bin/sh
+# duo2-os: a duo-wc session hook (installed into /usr/local/lib/duo-wc/session.d/
+# by install-files.sh; the session runs it once at every start, with its
+# trust: closing a window is the session's, not an app's).
+#
+# Clocks rings its alarms only while it runs (an autostart entry in GNOME,
+# which this session does not run). Clocks 48 has no background mode of its
+# own: as a D-Bus service it quits 10 s after its window closes; started
+# plainly it stays after its window closes. So when alarms are set, it is
+# started plainly and its window closed as soon as it appears (a short flash
+# on the panel, only at session start and only with alarms set); after that a
+# tap on its icon just opens the window again.
+set -u
+# The session has announced the display to the user manager already; give
+# the portals a moment (duo-apps-session.service restarts them).
+sleep 2
+
+# Clocks: an alarm that will ring has a ring_time (gnome-clocks' own format).
+clocks_alarms() {
+    gsettings get org.gnome.clocks alarms 2>/dev/null | grep -q "'ring_time'"
+}
+# Started through D-Bus (our service file makes that a plain start), so it
+# runs under the bus, not in this hook.
+if [ -e /usr/local/share/dbus-1/services/org.gnome.clocks.service ] &&
+    ! pgrep -u "$(id -u)" -x gnome-clocks >/dev/null && clocks_alarms; then
+    gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
+        --method org.freedesktop.DBus.StartServiceByName org.gnome.clocks 0 >/dev/null 2>&1
+    i=0
+    while [ "$i" -lt 100 ]; do
+        if duoctl get_state 2>/dev/null | grep -q '"app_id": *"org.gnome.clocks"'; then
+            duoctl close_window org.gnome.clocks >/dev/null
+            break
+        fi
+        sleep 0.1
+        i=$((i + 1))
+    done
+fi
+exit 0

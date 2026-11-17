@@ -1,0 +1,23 @@
+#!/bin/sh
+# duo2-waydroid-upgrade.timer (weekly): `waydroid upgrade` fetches the OTA
+# channel (/var/lib/waydroid/waydroid.cfg system_ota / vendor_ota) and
+# downloads newer Android images (~1.3 GB system, ~150 MB vendor; images
+# come out every few months). Only on WiFi (never on mobile data) and only
+# while Android is not running (an upgrade stops a running container);
+# otherwise it waits for the next run (Persistent: also after a boot).
+set -eu
+[ -f /var/lib/waydroid/waydroid.cfg ] || exit 0
+state=$(lxc-info -P /var/lib/waydroid/lxc -n waydroid -sH 2>/dev/null || echo STOPPED)
+if [ "$state" != STOPPED ]; then
+    echo "duo2-waydroid-upgrade: Android is running ($state), not now"
+    exit 0
+fi
+dev=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p')
+case $dev in
+    wlan*) ;;
+    *) echo "duo2-waydroid-upgrade: not on WiFi (${dev:-no route}), not now"; exit 0 ;;
+esac
+before=$(sed -n 's/^system_datetime = //p; s/^vendor_datetime = //p' /var/lib/waydroid/waydroid.cfg | tr '\n' ' ')
+waydroid upgrade
+after=$(sed -n 's/^system_datetime = //p; s/^vendor_datetime = //p' /var/lib/waydroid/waydroid.cfg | tr '\n' ' ')
+echo "duo2-waydroid-upgrade: image dates (system vendor) $before-> $after"

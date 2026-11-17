@@ -1,0 +1,122 @@
+#!/usr/bin/python3 -I
+"""duo-wallpaper-bing: fetch the Bing image of the day (a user service, once a
+day, see systemd/duo-wallpaper-bing.timer).
+
+    duo-wallpaper-bing            only while `bing = on` in
+                                  ~/.config/duo-shell/wallpaper.conf
+    duo-wallpaper-bing --force    also within the 6 h freshness window
+
+Stores the picture in ~/.local/share/duo-shell/wallpapers/bing/ (the last 5),
+writes current.json (file, title, copyright, date, market, fetched) and the
+shell, watching that directory, shows it. Offline: the last good picture stays.
+Exit 0 whenever nothing is wrong with the setup (an unreachable Bing is not a
+failure of the service); 1 on a response it cannot trust.
+"""
+
+import json
+import os
+import sys
+import tempfile
+import time
+import urllib.request
+
+here = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, here)
+
+from duoshell import bing, wallpaper  # noqa: E402
+
+TIMEOUT = 20
+
+
+def log(*a):
+    print("duo-wallpaper-bing:", *a, flush=True)
+
+
+def get(url):
+    if not url.startswith("https://%s/" % bing.HOST):
+        raise ValueError("refusing %s" % url)
+    req = urllib.request.Request(url, headers={"User-Agent": bing.USER_AGENT, "Accept": "*/*"})
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+        if not r.geturl().startswith("https://%s/" % bing.HOST):
+            raise ValueError("redirected away from %s" % bing.HOST)
+        data = r.read(bing.MAX_BYTES + 1)
+    return data
+
+
+def write_atomic(path, data):
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".tmp-")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def main(argv):
+    conf = wallpaper.read_conf()
+    if not wallpaper.is_on(conf.get("bing")):
+        log("off: nothing requested")
+        return 0
+    market = conf.get("bing_market", "")
+    if not bing.valid_market(market):
+        market = bing.market_from_locale(os.environ.get("LANG", ""))
+    directory = wallpaper.bing_dir()
+    os.makedirs(directory, mode=0o755, exist_ok=True)
+    path, meta = wallpaper.bing_current(directory)
+    if "--force" not in argv and path and bing.fresh(meta, market, time.time()):
+        log("today's picture is already here")
+        return 0
+    try:
+        info = bing.parse_response(get(bing.request_url(market)).decode("utf-8", "replace"))
+    except (TimeoutError, OSError, ValueError) as e:
+        log("no answer (%s); keeping the last picture" % e)
+        return 0
+    if info is None:
+        log("unexpected answer; keeping the last picture")
+        return 1
+    name = bing.file_name(info["date"], market)
+    target = os.path.join(directory, name)
+    if not os.path.isfile(target):
+        data = None
+        for url in bing.image_urls(info["urlbase"]):
+            try:
+                got = get(url)
+            except (TimeoutError, OSError, ValueError) as e:
+                log("%s: %s" % (url.rsplit("_", 1)[-1], e))
+                continue
+            if bing.is_jpeg(got):
+                data = got
+                break
+            log("%s is not a usable picture" % url.rsplit("_", 1)[-1])
+        if data is None:
+            log("no picture; keeping the last one")
+            return 0
+        write_atomic(target, data)
+        log("stored %s (%d KB)" % (name, len(data) // 1024))
+    meta = {
+        "file": name,
+        "date": info["date"],
+        "market": market,
+        "title": info["title"],
+        "copyright": info["copyright"],
+        "link": info["link"],
+        "fetched": time.time(),
+    }
+    write_atomic(os.path.join(directory, "current.json"), json.dumps(meta, indent=1).encode())
+    for old in bing.to_delete(os.listdir(directory), current=name):
+        try:
+            os.unlink(os.path.join(directory, old))
+        except OSError:
+            pass
+    log("current: %s (%s)" % (info["title"], info["copyright"]))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

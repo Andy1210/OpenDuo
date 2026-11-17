@@ -1,0 +1,62 @@
+#!/bin/bash
+# Lint the system services and their tools (touch, power, telephony, hotspot,
+# sensors, android, maint, battery, camera, video, devmode, firewall, homecrypt, rootfs):
+# Python with ruff (each component's ruff.toml), shell with shellcheck, C/C++
+# with clang-format (touch/.clang-format). Extensionless scripts are found by
+# their #! line, so they are checked too.
+#
+#   scripts/lint-services [--fix] [COMPONENT...]
+#
+# Without --fix it only reports (exit 1 on a finding); with --fix it formats
+# the Python and C/C++ files and applies ruff's safe fixes. The tools come
+# from PATH, or from LINT_BIN (a directory, e.g. a venv's bin with ruff and,
+# from pip, shellcheck-py and clang-format).
+set -u
+R=$(cd "$(dirname "$0")/.." && pwd)
+cd "$R" || exit 2
+fix=0
+[ "${1:-}" = --fix ] && { fix=1; shift; }
+comps=("$@")
+[ ${#comps[@]} -gt 0 ] || comps=(touch power telephony hotspot sensors android maint battery
+    camera video devmode firewall homecrypt rootfs)
+tool() { if [ -n "${LINT_BIN:-}" ] && [ -x "$LINT_BIN/$1" ]; then echo "$LINT_BIN/$1"; else command -v "$1"; fi; }
+RUFF=$(tool ruff) || { echo "lint-services: no ruff (pip install ruff)" >&2; exit 2; }
+SHELLCHECK=$(tool shellcheck) || { echo "lint-services: no shellcheck (pip install shellcheck-py)" >&2; exit 2; }
+CLANG_FORMAT=$(tool clang-format) || { echo "lint-services: no clang-format (pip install clang-format)" >&2; exit 2; }
+
+py=() sh=() cc=()
+while IFS= read -r -d '' f; do
+    [ -f "$f" ] || continue
+    case $f in
+        */tests/fixtures/*) continue ;;   # upstream code, kept byte for byte
+        *.py) py+=("$f"); continue ;;
+        *.sh) sh+=("$f"); continue ;;
+        *.c | *.cpp | *.h) cc+=("$f"); continue ;;
+    esac
+    first=$(head -c 128 "$f" | head -n 1)
+    case $first in
+        '#!'*python*) py+=("$f") ;;
+        '#!'*/sh | '#!'*/sh' '* | '#!'*bash*) sh+=("$f") ;;
+    esac
+done < <(git ls-files -z -- "${comps[@]}" 2>/dev/null)
+
+rc=0
+if [ ${#py[@]} -gt 0 ]; then
+    if [ $fix = 1 ]; then
+        "$RUFF" check --fix --quiet "${py[@]}"
+        "$RUFF" format --quiet "${py[@]}"
+    fi
+    "$RUFF" format --check --quiet "${py[@]}" || rc=1
+    "$RUFF" check --quiet "${py[@]}" || rc=1
+fi
+if [ ${#sh[@]} -gt 0 ]; then
+    "$SHELLCHECK" -x -P SCRIPTDIR -f gcc "${sh[@]}" || rc=1
+fi
+if [ ${#cc[@]} -gt 0 ]; then
+    if [ $fix = 1 ]; then
+        "$CLANG_FORMAT" -i "${cc[@]}"
+    fi
+    "$CLANG_FORMAT" --dry-run -Werror "${cc[@]}" || rc=1
+fi
+echo "lint-services: ${#py[@]} Python, ${#sh[@]} shell, ${#cc[@]} C/C++ files: $([ $rc = 0 ] && echo clean || echo findings)"
+exit $rc

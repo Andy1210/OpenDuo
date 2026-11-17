@@ -1,0 +1,6 @@
+# duo2-os: /dev/rtc is the PMIC's RTC (rtc-pm8xxx), not rtc-efi (rtc0): the WOA
+# UEFI's GetTime fails, so whatever reads /dev/rtc (systemd-timedated,
+# hwclock) only got an I/O error ("timedatectl" failed as a whole). The PMIC
+# RTC counts from 1970 (seconds since the PMIC last lost power); the wall
+# clock is that plus the offset duo2-rtc-time keeps.
+SUBSYSTEM=="rtc", DRIVERS=="rtc-pm8xxx", SYMLINK+="rtc", OPTIONS+="link_priority=10"

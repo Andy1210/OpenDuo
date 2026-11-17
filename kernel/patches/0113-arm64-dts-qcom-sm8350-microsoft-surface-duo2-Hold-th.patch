@@ -1,0 +1,54 @@
+From fe2447e35002bfaf42cce61761986d737123b989 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 09:44:05 +0100
+Subject: [PATCH 113/137] arm64: dts: qcom: sm8350-microsoft-surface-duo2: Hold
+ the panels in reset from boot
+
+The boot loader leaves both panels running from a command-mode pipeline
+with autorefresh. Linux has no hand-over for it: the display clock
+controller's probe stops it early in the boot, in the middle of a frame,
+and the panels then show their corrupted frame memory (DSC slices of
+coloured noise) for several seconds, until the panel driver resets them
+at the first modeset. systemd-boot has cleared the screen by then, so
+there is no picture to keep.
+
+Drive both reset lines low (asserted) from the pin controller's probe,
+before any display driver: the panels stay dark until the panel driver
+brings them up. The state only configures the pins and claims no
+function, so the panels' own pin states still apply, and the panel
+driver takes the lines as they are.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../dts/qcom/sm8350-microsoft-surface-duo2.dts | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+index a87f8c9f0c6e..27af2a53ecc0 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+@@ -1279,6 +1279,24 @@ earpiece: speaker@0,3 {
+ &tlmm {
+ 	gpio-reserved-ranges = <4 4>, <12 4>, <56 4>, <76 4>;
+ 
++	/*
++	 * Both panels are held in reset from here on, until the panel driver
++	 * brings them up. The boot loader leaves a command-mode pipeline
++	 * running (autorefresh) that Linux cannot take over: the display
++	 * clock controller's probe stops it in the middle of a frame, and the
++	 * panels then show corrupted frame memory (coloured noise) for
++	 * seconds, until their first modeset. In reset they stay dark.
++	 * Configuration only, no function: the panels' own states still
++	 * claim the pins.
++	 */
++	pinctrl-0 = <&disp_reset_hold>;
++	pinctrl-names = "default";
++
++	disp_reset_hold: disp-reset-hold-state {
++		pins = "gpio50", "gpio51";
++		output-low;
++	};
++
+ 	/* The camera sensors' XCLR lines (the vendor DT's active states) */
+ 	cam_tele_reset_default: cam-tele-reset-default-state {
+ 		pins = "gpio17";

@@ -1,0 +1,70 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""duo2-diag-dump: save every DIAG packet a DSP sends, for decoding elsewhere.
+
+  duo2-diag-dump OUT SECS [MASK [keep]]
+
+Like duo2-diag-log (a running diag-router, its abstract "\\0diag" socket),
+but it sets the message mask of every SSID to MASK (default 0x1c: high,
+error, fatal), writes each packet as <u32 length><f64 CLOCK_BOOTTIME> packet
+to OUT for SECS seconds and clears the mask again (unless "keep"). The
+modem's messages are hashed: decode OUT with duo2-qsr4-decode and the
+firmware's qdsp6m.qdb on the build machine. For the modem start the router
+as DIAG_QRTR_ONLY=modem; it hands the masks to the modem when the modem
+connects, so start the router and this before restarting the modem.
+"""
+
+import socket
+import struct
+import sys
+import time
+
+OUT, SECS = sys.argv[1], float(sys.argv[2])
+MASK = int(sys.argv[3], 0) if len(sys.argv) > 3 else 0x1C
+
+
+def ssid_ranges(sock):
+    sock.send(struct.pack("<BB", 0x7D, 1))
+    while True:
+        pkt = sock.recv(65536)
+        if pkt[:2] == bytes([0x7D, 1]):
+            break
+    (count,) = struct.unpack_from("<I", pkt, 4)
+    return [struct.unpack_from("<HH", pkt, 8 + 4 * i) for i in range(count)]
+
+
+def set_all(sock, ranges, mask):
+    for first, last in ranges:
+        n = last - first + 1
+        sock.send(struct.pack("<BBHHH%dI" % n, 0x7D, 4, first, last, 0, *([mask] * n)))
+
+
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+sock.connect(b"\0diag".ljust(108, b"\0"))
+sock.settimeout(5)
+ranges = ssid_ranges(sock)
+set_all(sock, ranges, MASK)
+sock.settimeout(0.5)
+t0 = time.monotonic()
+n = 0
+with open(OUT, "wb") as f:
+    try:
+        while time.monotonic() - t0 < SECS:
+            try:
+                pkt = sock.recv(65536)
+            except TimeoutError:
+                continue
+            if not pkt:
+                break
+            f.write(struct.pack("<Id", len(pkt), time.clock_gettime(time.CLOCK_BOOTTIME)) + pkt)
+            n += 1
+            if n % 200 == 0:
+                f.flush()
+    finally:
+        if len(sys.argv) <= 4:
+            try:
+                sock.settimeout(2)
+                set_all(sock, ranges, 0)
+            except OSError:
+                pass
+print("packets", n)

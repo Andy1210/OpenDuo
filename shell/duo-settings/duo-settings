@@ -1,0 +1,20 @@
+#!/usr/bin/python3
+"""Duo Settings (duosettings/): duo2-os's settings app.
+
+duo-settings [PAGE]     open, optionally on a page (wifi, bluetooth,
+                        display, battery, sound, notifications, rotation,
+                        lock, datetime, region, pen, touch, about); a running
+                        window turns to it. The desktop file's actions
+                        open pages this way (Battery: the home screen's
+                        battery card).
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+from duosettings.main import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main())

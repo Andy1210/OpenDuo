@@ -1,0 +1,503 @@
+#!/usr/bin/python3 -I
+"""duo2-updates: Settings > Updates' one door to root (docs/UPDATES.md).
+
+For the GUI user, through sudo (/etc/sudoers.d/duo2-updates lists exactly
+these):
+    duo2-updates status                the state, one JSON line: the settings, the
+                                       last check and what it found, a job that
+                                       runs, a restart pending, the kernel's tries
+    duo2-updates check                 start a check (apt-get update, the plan)
+    duo2-updates install               start the install: a snapshot first
+                                       (duo2-snapshot), only on the charger or with
+                                       the battery at 50 % or more; the user says
+                                       yes in the shell first (duo-wc's confirm)
+    duo2-updates set auto on|off       install automatically at night (WiFi, charger)
+    duo2-updates set notify on|off     the daily check's notification
+    duo2-updates set mobile-data on|off   the daily check also on mobile data
+    duo2-updates set channel stable|testing   testing only in developer mode
+
+For root only (the systemd units run them, never through sudo):
+    duo2-updates run-check [--notify] [--timer]   duo2-updates-check.service
+    duo2-updates run-install [--auto]             duo2-updates-install.service,
+                                                  duo2-updates-auto.service
+
+Every answer is one JSON line. Nothing from the caller reaches a shell or a
+command line: the arguments are checked against the lists above. The work
+runs in systemd units, so closing Settings never stops an install.
+"""
+
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+for _p in (HERE, "/usr/local/lib/duo2-maint"):
+    if os.path.isdir(os.path.join(_p, "duo2maint")):
+        sys.path.insert(0, _p)
+        break
+
+from duo2maint import system  # noqa: E402
+from duo2maint import updates as up  # noqa: E402
+
+CONF = os.environ.get("DUO2_UPDATES_CONF", up.CONF)
+STATE_DIR = "/var/lib/duo2-updates"
+STATE = os.path.join(STATE_DIR, "state.json")
+RUN_DIR = "/run/duo2-updates"
+JOB = os.path.join(RUN_DIR, "job.json")
+LOGDIR = "/var/log/duo2-updates"
+DEVMODE = "/etc/duo-devmode.conf"
+RELEASE_STAMP = "/etc/duo2-release"
+REBOOT_REQUIRED = "/run/reboot-required"
+WC_ADMIN = "/run/duo-wc/admin.sock"
+UNITS = {"check": "duo2-updates-check.service", "install": "duo2-updates-install.service"}
+AUTO_UNIT = "duo2-updates-auto.service"
+TIMER_CHECK_UNIT = "duo2-updates-check-timer.service"
+
+
+def tool(name):
+    for p in (os.path.join(HERE, name), "/usr/local/sbin/" + name):
+        if os.path.exists(p):
+            return p
+    raise RuntimeError("%s is missing" % name)
+
+
+def out(obj):
+    print(json.dumps(obj, sort_keys=True))
+    return 0 if obj.get("ok", True) else 1
+
+
+def fail(code, error):
+    return out({"ok": False, "code": code, "error": error})
+
+
+def read(path, default=""):
+    try:
+        with open(path) as f:
+            return f.read()
+    except OSError:
+        return default
+
+
+def read_json(path):
+    try:
+        data = json.loads(read(path, "null"))
+        return data if isinstance(data, dict) else None
+    except ValueError:
+        return None
+
+
+def write_json(path, data, mode=0o755):
+    os.makedirs(os.path.dirname(path), mode=mode, exist_ok=True)
+    with open(path + ".tmp", "w") as f:
+        json.dump(data, f, indent=1, sort_keys=True)
+    os.chmod(path + ".tmp", 0o644)
+    os.replace(path + ".tmp", path)
+
+
+def conf():
+    return up.parse_conf(read(CONF))
+
+
+def save_conf(cfg):
+    with open(CONF + ".tmp", "w") as f:
+        f.write(up.render_conf(cfg))
+    os.chmod(CONF + ".tmp", 0o644)
+    os.replace(CONF + ".tmp", CONF)
+
+
+def developer_mode():
+    for line in read(DEVMODE).splitlines():
+        k, _, v = line.partition("=")
+        if k.strip() == "developer_mode" and up.yes(v.split("#", 1)[0].strip()):
+            return True
+    return False
+
+
+def installed_os_version():
+    for line in read(RELEASE_STAMP).splitlines():
+        if line.startswith("openduo="):
+            return line.split("=", 1)[1].strip()
+    return ""
+
+
+def power():
+    sup = system.power_supplies()
+    from duo2maint import backup as bk
+
+    return system.battery_percent(sup), bk.on_ac(sup)
+
+
+def on_wifi():
+    return (system.default_route_dev() or "").startswith(("wlan", "wl"))
+
+
+def unit_running(unit):
+    """Doing its work: a Type=oneshot job is "activating" while it runs, which
+    `is-active -q` does not count."""
+    p = subprocess.run(["systemctl", "is-active", unit], capture_output=True, text=True)
+    return up.unit_running(p.stdout)
+
+
+def current_job():
+    """The job record as the page should see it (updates.job_view). The
+    nightly install (duo2-updates-auto.service) is an install job too, the
+    daily check (duo2-updates-check-timer.service) a check."""
+    running = {name: unit_running(unit) for name, unit in UNITS.items()}
+    running["install"] = running["install"] or unit_running(AUTO_UNIT)
+    running["check"] = running["check"] or unit_running(TIMER_CHECK_UNIT)
+    return up.job_view(read_json(JOB), running, time.time())
+
+
+def boot_status():
+    p = subprocess.run([tool("duo2-boot"), "status", "--json"], capture_output=True, text=True)
+    try:
+        return json.loads(p.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return None
+
+
+def kernel_being_tried(boot):
+    return bool(boot) and (boot.get("running") or {}).get("state") == "trying"
+
+
+# -- the user's yes ------------------------------------------------------------------------
+
+
+def confirmed(detail):
+    """Called through sudo by the GUI user (any of its apps could): the user
+    says yes in the shell first (duo-wc's confirm, as for the hotspot)."""
+    if not os.environ.get("SUDO_USER"):
+        return True
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(40)
+            s.connect(WC_ADMIN)
+            req = {
+                "id": 1,
+                "request": "confirm",
+                "action": "helper",
+                "detail": detail,
+                "wait": True,
+            }
+            s.sendall((json.dumps(req) + "\n").encode())
+            buf = b""
+            while b"\n" not in buf:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+        reply = json.loads(buf.split(b"\n")[0] or b"{}")
+    except (OSError, ValueError):
+        return False
+    return (reply.get("ok") or {}).get("yes") is True
+
+
+# -- the commands --------------------------------------------------------------------------
+
+
+def cmd_status():
+    cfg = conf()
+    battery, ac = power()
+    boot = boot_status()
+    job = current_job()
+    return out(
+        {
+            "ok": True,
+            "conf": cfg,
+            "developer_mode": developer_mode(),
+            "installed": installed_os_version(),
+            "last": read_json(STATE),
+            "job": job,
+            "reboot_required": os.path.exists(REBOOT_REQUIRED),
+            "reboot_packages": sorted(set(read(REBOOT_REQUIRED + ".pkgs").split())),
+            "battery": battery,
+            "on_charger": ac,
+            "may_install": up.may_install(battery, ac),
+            "kernel": boot,
+        }
+    )
+
+
+def start(job):
+    unit = UNITS[job]
+    running = current_job()
+    if running and running.get("state") == "running":
+        return fail("busy", "a %s is running" % running.get("job"))
+    # the page shows the job from now on, not only once the unit has started
+    write_json(JOB, up.starting_record(job, time.time()))
+    p = subprocess.run(["systemctl", "start", "--no-block", unit], capture_output=True, text=True)
+    if p.returncode != 0:
+        err = (p.stderr or p.stdout).strip()[-300:]
+        write_json(
+            JOB,
+            dict(
+                up.starting_record(job, time.time()),
+                state="failed",
+                error=err,
+                finished=int(time.time()),
+            ),
+        )
+        return fail("start", err)
+    return out({"ok": True, "job": job})
+
+
+def cmd_install():
+    battery, ac = power()
+    why = up.may_install(battery, ac)
+    if why:
+        return fail("power", why)
+    if kernel_being_tried(boot_status()):
+        return fail("kernel", "the new kernel is still being checked: restart once it is confirmed")
+    if not confirmed("Settings asks to install the system updates (a snapshot is taken first)."):
+        return fail("refused", "not confirmed in the shell")
+    return start("install")
+
+
+def cmd_set(args):
+    if len(args) != 2:
+        return fail("usage", "set KEY VALUE")
+    cfg, err = up.apply_setting(conf(), args[0], args[1], developer_mode())
+    if err:
+        return fail("value", err)
+    if args[0] == "channel":
+        if args[1] == "testing":
+            text = up.testing_sources(read(up.STABLE_SOURCES))
+            with open(up.TESTING_SOURCES + ".tmp", "w") as f:
+                f.write(text)
+            os.chmod(up.TESTING_SOURCES + ".tmp", 0o644)
+            os.replace(up.TESTING_SOURCES + ".tmp", up.TESTING_SOURCES)
+        else:
+            try:
+                os.remove(up.TESTING_SOURCES)
+            except FileNotFoundError:
+                pass
+    save_conf(cfg)
+    return out({"ok": True, "conf": cfg})
+
+
+# -- the jobs (root, from systemd) ---------------------------------------------------------
+
+
+class Job:
+    def __init__(self, name):
+        self.data = {"job": name, "state": "running", "started": int(time.time()), "step": ""}
+        os.makedirs(LOGDIR, mode=0o750, exist_ok=True)
+        self.data["log"] = os.path.join(
+            LOGDIR, "%s-%s.log" % (time.strftime("%Y%m%d-%H%M%S"), name)
+        )
+        self.save()
+
+    def step(self, text):
+        self.data["step"] = text
+        self.save()
+
+    def save(self):
+        write_json(JOB, self.data)
+
+    def finish(self, ok, error=None, **extra):
+        self.data.update(state="done" if ok else "failed", finished=int(time.time()), **extra)
+        if error:
+            self.data["error"] = error
+        self.save()
+
+
+def changes_for(candidate):
+    """OpenDuo's CHANGELOG sections for the openduo-release candidate."""
+    p = subprocess.run(
+        ["apt-cache", "show", "%s=%s" % (up.RELEASE_PACKAGE, candidate)],
+        capture_output=True,
+        text=True,
+        env=system.ENV,
+    )
+    st = up.stanza_for(p.stdout, candidate)
+    md = up.decode_field(up.field_of(st, up.CHANGES_FIELD))
+    sections = up.changelog_sections(md, limit=10)
+    return up.newer_sections(sections, installed_os_version(), up.os_version_of(candidate))
+
+
+def check(job):
+    job.step("plan")
+    p = subprocess.run([tool("duo2-update"), "check", "--json"], capture_output=True, text=True)
+    with open(job.data["log"], "a") as f:
+        f.write(p.stdout + p.stderr)
+    lines = p.stdout.strip().splitlines()
+    try:
+        r = json.loads(lines[-1]) if lines else None
+    except ValueError:
+        r = None
+    if r is None or p.returncode not in (0, 3, 10):
+        raise RuntimeError("the check failed: %s" % (p.stderr.strip() or p.stdout.strip())[-300:])
+    plan = {"install": r["plan"]["install"], "remove": r["plan"]["remove"]}
+    found = up.classify(plan)
+    release = [i for i in found["ours"] if i["name"] == up.RELEASE_PACKAGE]
+    state = {
+        "time": int(time.time()),
+        "ours": found["ours"],
+        "debian": found["debian"],
+        "removed": found["removed"],
+        "refuse": r.get("refuse", []),
+        "notes": r.get("note", []),
+        "hints": r.get("hints", []),
+        "changes": changes_for(release[0]["new"]) if release else [],
+        "count": len(found["ours"]) + len(found["debian"]),
+    }
+    write_json(STATE, state)
+    return state
+
+
+def notify_found(state):
+    from duo2maint import notify
+
+    n = state["count"]
+    if not n:
+        return
+    ours = len(state["ours"])
+    body = (
+        ("%d updates are ready: %d for OpenDuo, %d from Debian." % (n, ours, n - ours))
+        if n > 1
+        else "1 update is ready."
+    )
+    notify.send("System updates", body + " Open Settings > Updates to install them.")
+
+
+def run_check(args):
+    cfg = conf()
+    if "--timer" in args:
+        why = up.may_check(cfg, on_wifi(), False)
+        if why:
+            print("duo2-updates: not now: %s" % why)
+            return 0
+    job = Job("check")
+    try:
+        state = check(job)
+    except RuntimeError as e:
+        job.finish(False, str(e))
+        return 1
+    job.finish(True, count=state["count"])
+    if "--notify" in args and up.yes(cfg["notify"]):
+        notify_found(state)
+    return 0
+
+
+def purge_obsolete_kernels(job):
+    p = subprocess.run([tool("duo2-boot"), "obsolete"], capture_output=True, text=True)
+    old = [
+        line.strip() for line in p.stdout.splitlines() if line.strip().startswith("openduo-kernel-")
+    ]
+    if not old:
+        return []
+    job.step("cleanup")
+    with open(job.data["log"], "a") as f:
+        subprocess.run(
+            ["apt-get", "-y", "-q", "purge"] + old,
+            stdout=f,
+            stderr=subprocess.STDOUT,
+            env=system.ENV,
+        )
+    return old
+
+
+def run_install(args):
+    cfg = conf()
+    auto = "--auto" in args
+    battery, ac = power()
+    if auto:
+        why = up.may_auto(cfg, on_wifi(), ac, time.localtime().tm_hour)
+        if why:
+            print("duo2-updates: no automatic install: %s" % why)
+            return 0
+    job = Job("install")
+    why = up.may_install(battery, ac)
+    if why:
+        job.finish(False, why)
+        return 1
+    if kernel_being_tried(boot_status()):
+        job.finish(False, "the new kernel is still being checked")
+        return 1
+    if auto:
+        try:
+            state = check(job)
+        except RuntimeError as e:
+            job.finish(False, str(e))
+            return 1
+        if not state["count"]:
+            job.finish(True, installed=0)
+            return 0
+    job.step("refresh")
+    inhibit = [
+        "systemd-inhibit",
+        "--what=sleep:shutdown",
+        "--mode=block",
+        "--who=duo2-updates",
+        "--why=Installing system updates",
+    ]
+    with open(job.data["log"], "a") as f:
+        # the output goes to the log as it comes; its headings are the phases
+        # the page shows (updates.install_phase)
+        proc = subprocess.Popen(
+            inhibit + [tool("duo2-update"), "run", "--yes"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            env=system.ENV,
+        )
+        for line in proc.stdout:
+            f.write(line)
+            f.flush()
+            phase = up.install_phase(line)
+            if phase and phase != job.data["step"]:
+                job.step(phase)
+        rc = proc.wait()
+    if rc != 0:
+        job.finish(
+            False,
+            "the install did not finish cleanly (log: %s; way back: duo2-update rollback)"
+            % job.data["log"],
+        )
+        return 1
+    purge_obsolete_kernels(job)
+    job.step("recheck")
+    try:
+        check(job)
+    except RuntimeError:
+        pass
+    job.finish(True, reboot_required=os.path.exists(REBOOT_REQUIRED))
+    if auto and os.path.exists(REBOOT_REQUIRED):
+        from duo2maint import notify
+
+        notify.send("System updates installed", "Restart the phone to finish.")
+    return 0
+
+
+def main(argv):
+    if os.geteuid() != 0:
+        return fail("root", "run as root (sudo)")
+    try:
+        if argv == ["status"]:
+            return cmd_status()
+        if argv == ["check"]:
+            return start("check")
+        if argv == ["install"]:
+            return cmd_install()
+        if len(argv) == 3 and argv[0] == "set":
+            return cmd_set(argv[1:])
+        if argv and argv[0] in ("run-check", "run-install"):
+            if os.environ.get("SUDO_USER"):
+                return fail("root", "%s is for the system's own units" % argv[0])
+            opts = set(argv[1:])
+            allowed = {"run-check": {"--notify", "--timer"}, "run-install": {"--auto"}}[argv[0]]
+            if not opts <= allowed:
+                return fail("usage", "unknown option")
+            return run_check(argv[1:]) if argv[0] == "run-check" else run_install(argv[1:])
+    except RuntimeError as e:
+        return fail("error", str(e))
+    print(__doc__.strip().split("\n\n")[1], file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

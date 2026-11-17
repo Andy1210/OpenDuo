@@ -1,0 +1,23 @@
+# OpenDuo's firewall (firewall/README.md): /etc/duo-firewall/firewall.nft,
+# loaded before the network comes up; stopping it removes the table (the
+# phone is then open as before, apart from the hotspot's and Android's own
+# tables).
+[Unit]
+Description=Firewall (nothing reaches the phone unasked)
+Documentation=file:/etc/duo-firewall/firewall.nft
+DefaultDependencies=no
+Wants=network-pre.target
+Before=network-pre.target shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/duo-firewall/firewall.nft
+ExecReload=/usr/sbin/nft -f /etc/duo-firewall/firewall.nft
+ExecStop=/usr/sbin/nft delete table inet duo_firewall
+ProtectHome=yes
+ProtectSystem=full
+
+[Install]
+WantedBy=sysinit.target

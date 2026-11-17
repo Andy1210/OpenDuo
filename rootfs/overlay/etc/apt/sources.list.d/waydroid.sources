@@ -1,0 +1,9 @@
+# Waydroid's own repository (repo.waydro.id: waydroid 1.6.x, python3-gbinder,
+# libgbinder, libglibutil for trixie arm64). Pinned in
+# /etc/apt/preferences.d/waydroid: only those packages come from it.
+# Key 7CE0331F71E0A238BB1002D70E406D181DCEE19C (the Release file's SignWith).
+Types: deb
+URIs: https://repo.waydro.id/
+Suites: trixie
+Components: main
+Signed-By: /usr/share/keyrings/waydroid.asc

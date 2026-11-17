@@ -1,0 +1,255 @@
+#!/usr/bin/python3 -I
+"""duo2-rtc-time: the wall clock from the PMIC's RTC, without network.
+
+The Surface Duo 2 has two RTCs, and neither keeps the date by itself: rtc-efi
+(rtc0) cannot be read (the WOA UEFI's GetTime fails: I/O error), and the
+PMK8350's RTC (rtc-pm8xxx, rtc1) only counts seconds since the PMIC last lost
+power (from 1970). Linux may not set it either: the stock Android DT has no
+allow-set-time (on Qualcomm phones the HLOS does not write the RTC; the
+modem's time services count on it), and mainline's offset store needs an
+SDAM cell or a UEFI variable (qcom,uefi-rtc-info): which SDAM bytes are free
+on this PMIC is nowhere written down (the PMIC's own sequences and the boot
+chain use SDAMs), and the WOA UEFI keeps no RTCInfo variable (variables
+written at runtime do not even survive a reboot). Android keeps the time the
+same way this does: Qualcomm's time_daemon stores the offset between the RTC
+and the wall clock in a file (/data/vendor/time) and adds it at boot.
+
+  duo2-rtc-time restore   at boot, before systemd-timesyncd: wall clock =
+                          RTC + the saved offset (only forward, only when the
+                          RTC did not restart since the save)
+  duo2-rtc-time save      the offset now, if the clock is good: synchronized
+                          over NTP in this boot (timesyncd's
+                          /run/systemd/timesync/synchronized), or --force
+  duo2-rtc-time status    RTC, offset, what restore would set
+
+The offset lives in /var/lib/duo2/rtc-offset (JSON: offset, the RTC reading
+and the wall clock at the save). Both readings are taken on an edge of the
+RTC's second (the RTC counts whole seconds), so the restored clock is right
+to some milliseconds plus the RTC's drift since the save.
+"""
+
+import argparse
+import json
+import os
+import sys
+import time
+
+STATE = "/var/lib/duo2/rtc-offset"
+SYNCED = "/run/systemd/timesync/synchronized"
+RTC_CLASS = "/sys/class/rtc"
+DRIVER = "rtc-pm8xxx"
+DEVICE_WAIT = 20.0  # s at boot for the RTC driver (a module udev loads)
+MIN_YEAR_SECS = 1767225600  # 2026-01-01: a saved clock before it is not good
+MAX_BACK_SECS = 60  # restore never puts the clock back by more
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+# -- pure ------------------------------------------------------------------------------
+
+
+def plan_restore(state, rtc_now, clock_now):
+    """What restore does: (wall time to set or None, reason). Pure.
+
+    state: the saved {"offset", "rtc", "wall"}; rtc_now: the RTC's seconds
+    now; clock_now: the system clock now."""
+    if not state:
+        return None, "no saved offset (not synchronized over NTP yet)"
+    try:
+        offset = float(state["offset"])
+        rtc_saved = int(state["rtc"])
+        wall_saved = float(state["wall"])
+    except (KeyError, TypeError, ValueError):
+        return None, "saved offset unreadable"
+    if rtc_now < rtc_saved:
+        return None, "the RTC restarted since the save (%d < %d): the offset no longer holds" % (
+            rtc_now,
+            rtc_saved,
+        )
+    wall = rtc_now + offset
+    if wall < wall_saved or wall < MIN_YEAR_SECS:
+        return None, "RTC + offset is before the save: not used"
+    if wall < clock_now - MAX_BACK_SECS:
+        return None, "the clock is ahead already (%.0f s): left alone" % (clock_now - wall)
+    return wall, "RTC %d + offset %.3f" % (rtc_now, offset)
+
+
+def plan_save(rtc_edge, wall_at_edge):
+    """The state to save from an RTC second edge. Pure."""
+    return {
+        "offset": round(wall_at_edge - rtc_edge, 3),
+        "rtc": int(rtc_edge),
+        "wall": round(wall_at_edge, 3),
+    }
+
+
+def drift(old, new):
+    """How far the saved offset moved (s): the RTC's drift since the old
+    save plus the error of the clock restored from it. Pure."""
+    if not old:
+        return None
+    try:
+        return float(new["offset"]) - float(old["offset"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+# -- doing -----------------------------------------------------------------------------
+
+
+def find_rtc(wait=0.0):
+    """The PMIC RTC's sysfs directory (rtc-pm8xxx), waiting up to `wait` s."""
+    end = time.monotonic() + wait
+    while True:
+        try:
+            for name in sorted(os.listdir(RTC_CLASS)):
+                base = os.path.join(RTC_CLASS, name)
+                try:
+                    with open(os.path.join(base, "name")) as f:
+                        if f.read().split()[:1] == [DRIVER]:
+                            return base
+                except OSError:
+                    pass
+        except OSError:
+            pass
+        if time.monotonic() >= end:
+            return None
+        time.sleep(0.2)
+
+
+def rtc_seconds(base):
+    with open(os.path.join(base, "since_epoch")) as f:
+        return int(f.read().strip())
+
+
+def rtc_edge(base, limit=1.5):
+    """(RTC seconds, CLOCK_REALTIME) right after the RTC's next second edge.
+    The RTC is read every 2 ms; the edge is known to that plus one SPMI read."""
+    first = rtc_seconds(base)
+    end = time.monotonic() + limit
+    while time.monotonic() < end:
+        t = time.clock_gettime(time.CLOCK_REALTIME)
+        now = rtc_seconds(base)
+        if now != first:
+            return now, t
+        time.sleep(0.002)
+    raise OSError("the RTC did not tick within %.1f s" % limit)
+
+
+def load_state(path=STATE):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def write_state(state, path=STATE):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+    fd = os.open(os.path.dirname(path), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def fmt(t):
+    return time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(t)) + (".%03d" % int((t % 1) * 1000))
+
+
+def cmd_restore(args):
+    base = find_rtc(DEVICE_WAIT)
+    if not base:
+        log("no %s RTC after %.0f s: clock left as it is" % (DRIVER, DEVICE_WAIT))
+        return 0
+    state = load_state(args.state)
+    try:
+        rtc, clock = rtc_edge(base)
+    except OSError as e:
+        log("reading the RTC: %s: clock left as it is" % e)
+        return 0
+    wall, why = plan_restore(state, rtc, clock)
+    if wall is None:
+        log("not set: %s" % why)
+        return 0
+    # The edge was a moment ago: carry the time since then over.
+    wall += time.clock_gettime(time.CLOCK_REALTIME) - clock
+    if args.dry_run:
+        log("would set the clock to %s (%s; now %s)" % (fmt(wall), why, fmt(clock)))
+        return 0
+    time.clock_settime(time.CLOCK_REALTIME, wall)
+    log("clock set to %s from the RTC (%s; it was %s)" % (fmt(wall), why, fmt(clock)))
+    return 0
+
+
+def cmd_save(args):
+    if not args.force and not os.path.exists(SYNCED):
+        log("not saved: the clock is not synchronized over NTP in this boot")
+        return 0
+    base = find_rtc(0)
+    if not base:
+        log("not saved: no %s RTC" % DRIVER)
+        return 1
+    rtc, wall = rtc_edge(base)
+    old = load_state(args.state)
+    new = plan_save(rtc, wall)
+    d = drift(old, new)
+    if old and old.get("rtc", -1) <= new["rtc"] and d is not None and abs(d) < 0.02:
+        return 0  # unchanged: no write
+    write_state(new, args.state)
+    log(
+        "saved: RTC %d + offset %.3f = %s%s"
+        % (
+            rtc,
+            new["offset"],
+            fmt(wall),
+            "" if d is None else "; moved %+.3f s since the last save" % d,
+        )
+    )
+    return 0
+
+
+def cmd_status(args):
+    base = find_rtc(0)
+    state = load_state(args.state)
+    print("RTC: %s" % (base or "none"))
+    print("saved: %s" % (json.dumps(state) if state else "nothing"))
+    print("synchronized over NTP in this boot: %s" % ("yes" if os.path.exists(SYNCED) else "no"))
+    if base:
+        rtc, clock = rtc_edge(base)
+        wall, why = plan_restore(state, rtc, clock)
+        print("RTC now: %d s" % rtc)
+        if wall is None:
+            print("restore would not set the clock: %s" % why)
+        else:
+            print(
+                "RTC + offset: %s, the clock: %s (%+.3f s)" % (fmt(wall), fmt(clock), clock - wall)
+            )
+    return 0
+
+
+def main(argv):
+    p = argparse.ArgumentParser(prog="duo2-rtc-time", description=__doc__.split("\n\n")[0])
+    p.add_argument("--state", default=STATE)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    r = sub.add_parser("restore")
+    r.add_argument("--dry-run", action="store_true")
+    s = sub.add_parser("save")
+    s.add_argument("--force", action="store_true", help="save even if not synchronized over NTP")
+    sub.add_parser("status")
+    args = p.parse_args(argv)
+    return {"restore": cmd_restore, "save": cmd_save, "status": cmd_status}[args.cmd](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,180 @@
+# OpenDuo release: build every package and publish the signed apt repository
+# (docs/UPDATES.md "Releases and CI").
+#
+# A tag vX.Y.Z (VERSION must say X.Y.Z) goes to testing and stable; a tag with
+# a pre-release part (v0.2.0-rc1) to testing only; a manual run to the suite it
+# names. The repository lives on the gh-pages branch under apt/ (GitHub Pages:
+# Settings > Pages > Deploy from a branch, gh-pages, / (root)), at
+# https://<owner>.github.io/<repository>/apt unless OPENDUO_APT_URL says otherwise.
+#
+# Secrets and variables (Settings > Secrets and variables > Actions); none is
+# created by this workflow:
+#   secret   OPENDUO_SIGNING_KEY   the signing subkey, ASCII-armored (a secret of
+#                                  the `release` environment, not of the repository)
+#                                  (packaging/signing/new-key.sh: ci-signing-subkey.asc)
+#   variable OPENDUO_APT_URL       the repository's URL (optional, see above)
+#   variable OPENDUO_MAINTAINER    the packages' Maintainer field (optional)
+#
+# Builds in containers as on a developer's machine: the kernel from
+# Linux v7.3.4 + kernel/patches, duo-wc and Nibfair (Rust, cross), the free half
+# of the sensors (under qemu), lpac, duo2-touchd (the Android NDK). The camera
+# rebuilds (camera/build-debs.sh, hours under qemu) are not rebuilt here: the
+# repository keeps the ones published before (run it with build_camera: true
+# after a rebuild is due).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "Suite to publish to"
+        type: choice
+        options: [testing, stable]
+        default: testing
+      build_camera:
+        description: "Rebuild the camera packages (libcamera, pipewire) too"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  KERNEL_TAG: "v7.3.4"
+  NDK_VERSION: "r27c"
+  # sha256 of android-ndk-r27c-linux.zip (checked 2026-11-17: the same tree
+  # as the NDK the touch daemon is built with on the build machine)
+  NDK_SHA256: "59c2f6dc96743b5daf5d1626684640b20a6bd2b1d85b13156b90333741bad5cc"
+  JOBS: "4"
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    # The signing key is a secret of this environment only: its protection rules
+    # (a required reviewer; tags v* and main only) decide which runs may sign.
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Suites and version
+        id: v
+        run: |
+          set -eu
+          version=$(tr -d ' \t\r\n' < VERSION)
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+              tag=${GITHUB_REF_NAME}
+              [ "$tag" = "v$version" ] || { echo "tag $tag does not match VERSION $version" >&2; exit 1; }
+              case $version in *-*) suites=testing ;; *) suites="testing stable" ;; esac
+          else
+              suites=${{ inputs.suite }}
+          fi
+          url=${{ vars.OPENDUO_APT_URL }}
+          [ -n "$url" ] || url="https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY#*/}/apt"
+          echo "suites=$suites" >> "$GITHUB_OUTPUT"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "OpenDuo $version -> $suites at $url"
+
+      - name: qemu (arm64 containers)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Unit tests (maint, packaging, Settings)
+        run: |
+          (cd maint && python3 -B -m unittest discover -s tests)
+          (cd packaging && python3 -B -m unittest discover -s tests)
+          (cd shell/duo-settings && python3 -B -m unittest tests.test_updates)
+
+      - name: Kernel (Linux ${{ env.KERNEL_TAG }} + kernel/patches)
+        run: |
+          set -eu
+          docker build -q -t duo2-build build >/dev/null
+          git clone -q --depth 1 --branch "$KERNEL_TAG" \
+              https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git src/linux
+          # the same patches give the same commits (and so the same release string)
+          git -C src/linux -c user.name=OpenDuo -c user.email=noreply@example.org \
+              am -q --committer-date-is-author-date kernel/patches/*.patch
+          JOBS=$(nproc) scripts/build-kernel.sh all
+          cat out/linux/include/config/kernel.release
+
+      - name: duo-wc and Nibfair (Rust, aarch64)
+        run: |
+          JOBS=$(nproc) compositor/duo-wc/build-aarch64.sh
+          JOBS=$(nproc) apps/nibfair/build-aarch64.sh
+
+      - name: Sensors (the free half, under qemu) and lpac
+        run: |
+          scripts/build-sensors.sh
+          telephony/lpac/build.sh
+
+      - name: duo2-touchd (Android NDK ${{ env.NDK_VERSION }})
+        run: |
+          set -eu
+          curl -sSfL -o /tmp/ndk.zip "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip"
+          echo "$NDK_SHA256  /tmp/ndk.zip" | sha256sum -c -
+          unzip -q /tmp/ndk.zip -d /tmp
+          NDK=/tmp/android-ndk-$NDK_VERSION touch/build-touchd.sh
+
+      - name: Camera packages
+        if: inputs.build_camera
+        run: camera/build-debs.sh
+
+      - name: Packages
+        env:
+          OPENDUO_APT_URL: ${{ steps.v.outputs.url }}
+          OPENDUO_MAINTAINER: ${{ vars.OPENDUO_MAINTAINER }}
+        run: packaging/build-packages.sh
+
+      - name: Publish (gh-pages, apt/)
+        env:
+          OPENDUO_SIGNING_KEY: ${{ secrets.OPENDUO_SIGNING_KEY }}
+          SUITES: ${{ steps.v.outputs.suites }}
+        run: |
+          set -eu
+          [ -n "$OPENDUO_SIGNING_KEY" ] || { echo "no OPENDUO_SIGNING_KEY secret" >&2; exit 1; }
+          export GNUPGHOME=$RUNNER_TEMP/gnupg
+          install -d -m 0700 "$GNUPGHOME"
+          printf '%s\n' "$OPENDUO_SIGNING_KEY" | gpg --batch --quiet --import
+          # the signing happens in the builder container (its own gpg-agent)
+          gpgconf --kill gpg-agent
+          git fetch -q origin gh-pages || true
+          if git rev-parse -q --verify origin/gh-pages >/dev/null; then
+              git worktree add -q site origin/gh-pages
+          else
+              git worktree add -q --detach site
+              git -C site checkout -q --orphan gh-pages
+              git -C site rm -rq .
+          fi
+          debs=$(ls out/packages/debs/*.deb)
+          if [ "${{ inputs.build_camera }}" = true ]; then
+              debs="$debs $(find out/camera-debs -name '*.deb' ! -name '*-dbgsym_*')"
+          fi
+          for suite in $SUITES; do
+              # shellcheck disable=SC2086 # the list is split on purpose
+              packaging/repo.sh site/apt add "$suite" $debs
+          done
+          touch site/.nojekyll
+          cd site
+          git add -A
+          git -c user.name="OpenDuo release" -c user.email=noreply@example.org \
+              commit -q -m "apt: $GITHUB_REF_NAME into $SUITES"
+          git push -q origin HEAD:gh-pages
+
+      - name: The packages as release files (tags)
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
+              gh release create "$GITHUB_REF_NAME" --verify-tag --title "OpenDuo ${GITHUB_REF_NAME#v}" \
+                  --notes "Packages for the apt repository; see CHANGELOG.md and docs/UPDATES.md."
+          gh release upload --clobber "$GITHUB_REF_NAME" out/packages/debs/*.deb

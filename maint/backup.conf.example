@@ -1,0 +1,28 @@
+# duo2-backup (/etc/duo2/backup.conf, root only: chmod 600). docs/UPDATES.md "Backups".
+# Nothing of this goes into git: the target and its user are the owner's.
+
+# Where to: user@host:path. With the key limited by rrsync on the target
+# (duo2-backup init prints the line), path is relative to rrsync's directory,
+# usually empty: TARGET=backup@nas.lan:
+TARGET=
+PORT=22
+# yes: the target's authorized_keys line runs rrsync (paths start at its
+# directory); no: a plain ssh login (TARGET's path is an ordinary one)
+RESTRICTED=yes
+# the key and the target's host key (duo2-backup init / trust-host make them)
+KEY=/etc/duo2/backup/id_ed25519
+KNOWN_HOSTS=/etc/duo2/backup/known_hosts
+# the GUI user whose home goes (empty: duo-wc's user)
+USER=
+# Android's data (Waydroid: the apps' data and Android's "SD card", with the
+# owners and modes in a list): yes / no
+INCLUDE_ANDROID=yes
+# the system's configuration (/etc, /var/lib/duo2*, BlueZ pairings, the package
+# lists; WiFi passwords and ssh host keys are in it): yes / no
+INCLUDE_SYSTEM=yes
+# the timer's run happens only on WiFi and while charging (duo2-backup run
+# --now does it anyway)
+ONLY_ON_WIFI=yes
+ONLY_CHARGING=yes
+# KiB/s, 0 = no limit
+BWLIMIT_KIB=0

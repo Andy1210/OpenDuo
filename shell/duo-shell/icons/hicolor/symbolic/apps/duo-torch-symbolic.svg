@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <!-- duo2-os: a flashlight with its light on (the quick menu's Flashlight tile) -->
+  <path fill="#2e3436" fill-rule="evenodd" d="M3.5 5.5H12.5L10 8.5V14C10 14.55 9.55 15 9 15H7C6.45 15 6 14.55 6 14V8.5ZM7.25 10V12H8.75V10Z"/>
+  <path fill="#2e3436" d="M7.25 0.5H8.75V3.5H7.25ZM2.03 0.97L0.97 2.03L2.97 4.03L4.03 2.97ZM13.97 0.97L15.03 2.03L13.03 4.03L11.97 2.97Z"/>
+</svg>

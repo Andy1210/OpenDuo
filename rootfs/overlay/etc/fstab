@@ -1,0 +1,16 @@
+# Surface Duo 2: the GPT names made at bring-up.
+# The root grows to its partition once, on the first boot
+# (duo2-growfs-once.service). Never x-systemd.growfs here: that runs an online
+# resize on EVERY boot, and after a hard reset it hung the boot.
+# inlinecrypt: fscrypt files (the optional home encryption, homecrypt/) go
+# through the UFS inline crypto engine (ICE) instead of the CPU. It changes
+# nothing for unencrypted files, and ICE writes standard AES-256-XTS, so a
+# kernel without ICE still reads the data through blk-crypto-fallback.
+PARTLABEL=linux  /          ext4  defaults,noatime,inlinecrypt  0 1
+# The ESP is mounted only while something uses it (bootctl, logind's boot
+# loader queries, duo2-try), and read-only: Linux marks a FAT dirty for as
+# long as it is mounted read-write and never clears a dirty bit it found, so a
+# hard reset inside a read-write window left "Volume was not properly
+# unmounted" on every later mount. duo2-try and duo2-promote remount it
+# read-write around their writes (/usr/local/sbin/duo2-esp). No fsck at boot.
+PARTLABEL=esp    /boot/efi  vfat  ro,umask=0077,nofail,noauto,x-systemd.automount,x-systemd.idle-timeout=30,x-systemd.device-timeout=10s  0 0

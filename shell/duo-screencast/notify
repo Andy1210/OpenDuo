@@ -1,0 +1,92 @@
+#!/usr/bin/python3 -I
+"""A notification while the screen is shared (xdg-desktop-portal-wlr's
+exec_before / exec_after).
+
+    notify start    a resident notification ("Your screen is shared")
+    notify stop     it goes
+
+The notification's id is kept in $XDG_RUNTIME_DIR/duo-screencast.notify.
+"""
+
+import os
+import sys
+
+import gi
+
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio, GLib  # noqa: E402
+
+DEST = "org.freedesktop.Notifications"
+PATH = "/org/freedesktop/Notifications"
+
+
+def id_file():
+    return os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "duo-screencast.notify")
+
+
+def main(argv):
+    what = argv[1] if len(argv) > 1 else ""
+    bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    if what == "start":
+        hints = {
+            "resident": GLib.Variant("b", True),
+            "urgency": GLib.Variant("y", 1),
+            "category": GLib.Variant("s", "device"),
+        }
+        reply = bus.call_sync(
+            DEST,
+            PATH,
+            DEST,
+            "Notify",
+            GLib.Variant(
+                "(susssasa{sv}i)",
+                (
+                    "Screen sharing",
+                    0,
+                    "video-display-symbolic",
+                    "Your screen is shared",
+                    "An app sees the panel you picked, until it stops sharing.",
+                    [],
+                    hints,
+                    0,
+                ),
+            ),
+            GLib.VariantType("(u)"),
+            Gio.DBusCallFlags.NONE,
+            5000,
+            None,
+        )
+        (nid,) = reply.unpack()
+        with open(id_file(), "w") as f:
+            f.write("%d\n" % nid)
+        return 0
+    if what == "stop":
+        try:
+            with open(id_file()) as f:
+                nid = int(f.read().strip() or 0)
+            os.unlink(id_file())
+        except (OSError, ValueError):
+            return 0
+        if nid:
+            bus.call_sync(
+                DEST,
+                PATH,
+                DEST,
+                "CloseNotification",
+                GLib.Variant("(u)", (nid,)),
+                None,
+                Gio.DBusCallFlags.NONE,
+                5000,
+                None,
+            )
+        return 0
+    print("usage: notify start|stop", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except GLib.Error as e:
+        print("notify: %s" % e.message, file=sys.stderr)
+        sys.exit(1)

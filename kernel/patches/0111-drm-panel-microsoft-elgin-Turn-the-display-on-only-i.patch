@@ -1,0 +1,129 @@
+From ed524e5e176bf95156729388ec95ab15c5f8c43f Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sun, 8 Nov 2026 08:59:05 +0100
+Subject: [PATCH 111/137] drm/panel: microsoft-elgin: Turn the display on only
+ in enable
+
+The vendor splits the panel's power-on into an "on" sequence (the
+settings, the picture parameter set, sleep out and what follows it) and
+a separate "post panel on" command, display on, sent in high-speed mode
+once the host is ready to show a picture. Do the same: the whole wake-up
+moves to prepare, display on alone stays in enable.
+
+Until the first frame has been written, the panel's frame memory holds
+random data from the reset, and display on shows it. With two panels in
+one commit, the first panel's enable used to wait for the second
+panel's 130 ms sleep-out before the first frame was sent: the bridges'
+pre-enables now do the slow part for both panels, and display on comes
+right before the frame on each.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/gpu/drm/panel/panel-microsoft-elgin.c | 70 ++++++++++++-------
+ 1 file changed, 45 insertions(+), 25 deletions(-)
+
+diff --git a/drivers/gpu/drm/panel/panel-microsoft-elgin.c b/drivers/gpu/drm/panel/panel-microsoft-elgin.c
+index cf47030841db..c8dcf7817ae9 100644
+--- a/drivers/gpu/drm/panel/panel-microsoft-elgin.c
++++ b/drivers/gpu/drm/panel/panel-microsoft-elgin.c
+@@ -125,11 +125,48 @@ static int elgin_init(struct elgin *ctx)
+ 	return dsi_ctx.accum_err;
+ }
+ 
++/*
++ * The rest of the vendor's "on" sequence: the picture parameter set, the
++ * tear signal, sleep out and the settings that follow it. The panel stays
++ * dark (display off); its frame memory holds whatever the reset left there.
++ */
++static int elgin_wake(struct elgin *ctx)
++{
++	struct mipi_dsi_device *dsi = ctx->dsi;
++	struct mipi_dsi_multi_context dsi_ctx = { .dsi = dsi };
++	struct drm_dsc_picture_parameter_set pps;
++
++	drm_dsc_pps_payload_pack(&pps, dsi->dsc);
++	mipi_dsi_picture_parameter_set_multi(&dsi_ctx, &pps);
++
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x74, 0x05, 0x00, 0x34);
++	mipi_dsi_dcs_set_tear_on_multi(&dsi_ctx, MIPI_DSI_DCS_TEAR_MODE_VBLANK);
++	mipi_dsi_dcs_set_tear_scanline_multi(&dsi_ctx, 0);
++
++	mipi_dsi_dcs_exit_sleep_mode_multi(&dsi_ctx);
++	mipi_dsi_msleep(&dsi_ctx, 130);
++
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xe5, 0x00, 0x20);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb0, 0x08);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xe1, 0x00, 0x04, 0x4c);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb0, 0x10);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xe1, 0x00, 0x00, 0x18);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb0, 0x70);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xec, 0x01);
++
++	return dsi_ctx.accum_err;
++}
++
+ static int elgin_prepare(struct drm_panel *panel)
+ {
+ 	struct elgin *ctx = to_elgin(panel);
+ 	int ret;
+ 
++	if (!ctx->dsi->dsc) {
++		dev_err(panel->dev, "DSC not attached to DSI\n");
++		return -ENODEV;
++	}
++
+ 	ret = regulator_bulk_enable(ARRAY_SIZE(elgin_supplies), ctx->supplies);
+ 	if (ret < 0)
+ 		return ret;
+@@ -139,6 +176,8 @@ static int elgin_prepare(struct drm_panel *panel)
+ 	elgin_reset(ctx);
+ 
+ 	ret = elgin_init(ctx);
++	if (!ret)
++		ret = elgin_wake(ctx);
+ 	if (ret < 0) {
+ 		dev_err(panel->dev, "init sequence failed: %d\n", ret);
+ 		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+@@ -149,36 +188,17 @@ static int elgin_prepare(struct drm_panel *panel)
+ 	return 0;
+ }
+ 
+-/* PPS, then the rest of the vendor sequence: sleep out and display on. */
++/*
++ * Display on: the vendor's "post panel on" command, sent once the panel is
++ * awake. Until then the panel shows nothing; after it, its frame memory,
++ * which holds random data from the reset until the first frame has been
++ * written.
++ */
+ static int elgin_enable(struct drm_panel *panel)
+ {
+ 	struct elgin *ctx = to_elgin(panel);
+ 	struct mipi_dsi_device *dsi = ctx->dsi;
+ 	struct mipi_dsi_multi_context dsi_ctx = { .dsi = dsi };
+-	struct drm_dsc_picture_parameter_set pps;
+-
+-	if (!dsi->dsc) {
+-		dev_err(&dsi->dev, "DSC not attached to DSI\n");
+-		return -ENODEV;
+-	}
+-
+-	drm_dsc_pps_payload_pack(&pps, dsi->dsc);
+-	mipi_dsi_picture_parameter_set_multi(&dsi_ctx, &pps);
+-
+-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x74, 0x05, 0x00, 0x34);
+-	mipi_dsi_dcs_set_tear_on_multi(&dsi_ctx, MIPI_DSI_DCS_TEAR_MODE_VBLANK);
+-	mipi_dsi_dcs_set_tear_scanline_multi(&dsi_ctx, 0);
+-
+-	mipi_dsi_dcs_exit_sleep_mode_multi(&dsi_ctx);
+-	mipi_dsi_msleep(&dsi_ctx, 130);
+-
+-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xe5, 0x00, 0x20);
+-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb0, 0x08);
+-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xe1, 0x00, 0x04, 0x4c);
+-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb0, 0x10);
+-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xe1, 0x00, 0x00, 0x18);
+-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb0, 0x70);
+-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xec, 0x01);
+ 
+ 	/* the vendor sends display on in high-speed mode */
+ 	dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;

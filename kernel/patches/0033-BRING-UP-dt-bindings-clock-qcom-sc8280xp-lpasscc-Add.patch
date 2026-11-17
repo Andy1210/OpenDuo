@@ -1,0 +1,31 @@
+From ab5566d1570cfc202348d551e7f2ba7dbaa7099e Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Sat, 7 Nov 2026 04:10:04 +0100
+Subject: [PATCH 033/137] BRING-UP: dt-bindings: clock: qcom,sc8280xp-lpasscc:
+ Add the SM8350 LPASS audio CSR
+
+SM8350 has the SoundWire clock gating controls of the LPASS audio CSR at
+the same place as SC8280XP (0x32a9000, WSA at 0xb0 bit 1: the stock
+lahaina "qcom,swrm-hctl-reg"), and nothing else there is used in the
+ADSP mode: take the SC8280XP compatible as fallback.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../devicetree/bindings/clock/qcom,sc8280xp-lpasscc.yaml      | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/Documentation/devicetree/bindings/clock/qcom,sc8280xp-lpasscc.yaml b/Documentation/devicetree/bindings/clock/qcom,sc8280xp-lpasscc.yaml
+index f235b4e24cc7..d466b76bb26a 100644
+--- a/Documentation/devicetree/bindings/clock/qcom,sc8280xp-lpasscc.yaml
++++ b/Documentation/devicetree/bindings/clock/qcom,sc8280xp-lpasscc.yaml
+@@ -23,7 +23,9 @@ properties:
+           - qcom,sc8280xp-lpassaudiocc
+           - qcom,sc8280xp-lpasscc
+       - items:
+-          - const: qcom,x1e80100-lpassaudiocc
++          - enum:
++              - qcom,sm8350-lpassaudiocc
++              - qcom,x1e80100-lpassaudiocc
+           - const: qcom,sc8280xp-lpassaudiocc
+       - items:
+           - const: qcom,x1e80100-lpasscc
