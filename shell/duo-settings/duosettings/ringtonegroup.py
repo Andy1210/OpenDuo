@@ -24,9 +24,7 @@ class RingtoneGroup:
         self.labels = None
         self.player = None
         g = page.group(_("Ringtone"), _("What calls ring with, in the sound modes with sound."))
-        self.row = keep_value_readable(
-            Adw.ComboRow(use_markup=False, model=Gtk.StringList.new([]))
-        )
+        self.row = keep_value_readable(Adw.ComboRow(use_markup=False, model=Gtk.StringList.new([])))
         self.row.set_title(_("Ringtone"))
         self.row._quiet = False
         self.row.connect("notify::selected", self._selected)

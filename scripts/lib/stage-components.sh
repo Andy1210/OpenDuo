@@ -31,6 +31,7 @@ OUT=$(cd "$OUT" && pwd)
 shift
 IMAGE_COMPONENTS="duo-wc duo-shell duo-apps duo-settings duo-screencast battery power telephony plymouth
 android maint hotspot firewall homecrypt devmode sensors"
+# shellcheck disable=SC2086  # the list is split into words on purpose
 [ $# -gt 0 ] || set -- $IMAGE_COMPONENTS
 mkdir -p "$OUT"
 

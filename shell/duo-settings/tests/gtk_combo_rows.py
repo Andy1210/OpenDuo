@@ -142,7 +142,10 @@ def main():
             spin(150)
     for f in failures:
         print("FAIL", f)
-    print("combo rows: %d looked at, %s" % (rows, "ok" if not failures else "%d failures" % len(failures)))
+    print(
+        "combo rows: %d looked at, %s"
+        % (rows, "ok" if not failures else "%d failures" % len(failures))
+    )
     return 1 if failures or not rows else 0
 
 
