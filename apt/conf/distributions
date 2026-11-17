@@ -1,0 +1,18 @@
+Origin: OpenDuo
+Label: OpenDuo
+Suite: stable
+Codename: stable
+Architectures: arm64
+Components: main
+Description: OpenDuo for the Surface Duo 2 (stable)
+SignWith: BD74373EFEADC539E6371D7DECA8EB90AA9239CD
+
+Origin: OpenDuo
+Label: OpenDuo
+Suite: testing
+Codename: testing
+Architectures: arm64
+Components: main
+Description: OpenDuo for the Surface Duo 2 (testing)
+SignWith: BD74373EFEADC539E6371D7DECA8EB90AA9239CD
+

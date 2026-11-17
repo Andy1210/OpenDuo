@@ -1,0 +1,30 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Origin: OpenDuo
+Label: OpenDuo
+Suite: testing
+Codename: testing
+Date: Tue, 17 Nov 2026 19:31:10 UTC
+Architectures: arm64
+Components: main
+Description: OpenDuo for the Surface Duo 2 (testing)
+MD5Sum:
+ e77068f16072bc3f173a7f2598e91f2f 59682 main/binary-arm64/Packages
+ 65e05c3dc01cb9f220e0f2189d07634f 15468 main/binary-arm64/Packages.gz
+ c5fbfdcef94db42fee8a87ca03fbc2f4 137 main/binary-arm64/Release
+SHA1:
+ 2936ed9b4ade87ea6d12da2cafe422f50f01539d 59682 main/binary-arm64/Packages
+ b81f6974dca0867bc2d3ca1f139e9cb56d46d86d 15468 main/binary-arm64/Packages.gz
+ 58391dc5931d533406c0324b2f62f8bc93244530 137 main/binary-arm64/Release
+SHA256:
+ 7ea12f591873aada05b0f42dcf92b998007293abeafb2e4b6b7b250a2ec53980 59682 main/binary-arm64/Packages
+ 12c45fbb5833669d3105fa37f667f6e9943f884da6647dd2b5071684dc03a046 15468 main/binary-arm64/Packages.gz
+ 70dd4ec1bd83ad0463c3e8c632a16ce0fe097aab949181e003f30aaeaa74f7af 137 main/binary-arm64/Release
+-----BEGIN PGP SIGNATURE-----
+
+iHUEARYKAB0WIQSeNjl2q6Hv5/RBOM4TAroR/TGPIwUCavyrfgAKCRATAroR/TGP
+IwWLAQD3EZYjakWY9cLaiZayvT2J4X3IzGb+LpxKB3zKld0DYgEAoE2mz/qVpHR2
+Lbym391YuNEha5gJfU6+70ZRnLwkhgo=
+=CFGm
+-----END PGP SIGNATURE-----
