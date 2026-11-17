@@ -1,7 +1,7 @@
 From 57c280b81e72e460aba26d5765f9603091511c02 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Fri, 6 Nov 2026 00:08:09 +0100
-Subject: [PATCH 008/137] BRING-UP: arm64: dts: qcom:
+Subject: [PATCH 008/147] BRING-UP: arm64: dts: qcom:
  sm8350-microsoft-surface-duo2: Run variant H at USB 2.0 only
 
 The USB console gadget must not depend on the QMP combo PHY, which

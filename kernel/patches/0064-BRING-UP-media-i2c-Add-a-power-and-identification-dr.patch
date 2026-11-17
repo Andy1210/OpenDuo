@@ -1,7 +1,7 @@
 From 5fe18e600dcc5235a57fbab4b94e09d4e73ace08 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 00:03:58 +0100
-Subject: [PATCH 064/137] BRING-UP: media: i2c: Add a power and identification
+Subject: [PATCH 064/147] BRING-UP: media: i2c: Add a power and identification
  driver for the IMX481 / IMX563
 
 The Surface Duo 2's four camera modules carry a Sony IMX481 (tele,

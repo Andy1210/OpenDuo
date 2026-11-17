@@ -1,9 +1,11 @@
 """The Hotspot page under GTK 4 + libadwaita (tests/run-gtk.sh
 tests/gtk_hotspot_page.py): built from a made-up state (two devices, beside
 the WiFi connection), laid out at one panel's size (538 x 757), its text
-checked, the password shown and forgotten again, and the helper's words for
-the switches; pictures to $OUT (the page, the password shown, its lower
-half). The helper is a stand-in: nothing runs."""
+checked, the password shown and forgotten again, "Your own password" (Save
+only for a password the helper takes, Enter saves, the password on the
+helper's stdin), and the helper's words for the switches; pictures to $OUT
+(the page, the password shown, the own-password dialog, its lower half).
+The helper is a stand-in: nothing runs."""
 
 import json
 import os
@@ -77,6 +79,13 @@ def main():
         GLib.idle_add(lambda: done(True, json.dumps(reply)) and False)
 
     hotspotpage.run_async = fake_run
+    stdin_calls = []
+
+    def fake_run_with_input(argv, text, done=None):
+        stdin_calls.append((argv[3:], text))
+        GLib.idle_add(lambda: done(0, json.dumps({"ok": True})) and False)
+
+    hotspotpage.run_with_input = fake_run_with_input
     hotspot.read_state = lambda path=None: json.loads(json.dumps(STATE))
     hotspotpage.hs.read_state = hotspot.read_state
 
@@ -145,6 +154,40 @@ def main():
     page.hidden()
     if page.password is not None or PASSWORD in (page.pw_row.get_subtitle() or ""):
         failures.append("the password is kept after the page closed")
+    # Your own password: the dialog, Save only for a password the helper
+    # takes, the password on the helper's stdin after the grant's empty line
+    d = page.own_password()
+    spin(600)
+    if not d.get_mapped():
+        failures.append("Your own password: no dialog")
+    if d.get_response_enabled("ok"):
+        failures.append("Your own password: Save before a password")
+    entry = d.get_extra_child().get_first_child()
+    for text, ok, hint in (
+        ("short", False, "8 to 63 characters"),
+        ("pässwörd12", False, "no accents"),
+        ("x" * 64, False, "At most 63"),
+        ("my own pass 1", True, "have to join again"),
+    ):
+        entry.set_text(text)
+        spin(50)
+        if d.get_response_enabled("ok") != ok or hint not in d.get_body():
+            failures.append(
+                "Your own password %r: Save %s, %r"
+                % (text, d.get_response_enabled("ok"), d.get_body())
+            )
+    spin(600)
+    render(d, os.path.join(OUT, "hotspot-own-password.png"))
+    closed = []
+    d.connect("closed", lambda _d: closed.append(1))
+    entry.emit("entry-activated")  # Enter: as the Save button
+    spin(300)
+    if not closed:
+        failures.append("Your own password: the dialog stays after Enter")
+    if stdin_calls != [(["password", "--set"], "\nmy own pass 1\n")]:
+        failures.append("Your own password: the helper got %r" % stdin_calls)
+    if entry.get_text():
+        failures.append("Your own password: the entry keeps the password")
     # the switches' words
     calls.clear()
     page.switch.set_active(False)

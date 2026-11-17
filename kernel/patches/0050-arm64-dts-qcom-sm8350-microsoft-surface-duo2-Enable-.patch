@@ -1,7 +1,7 @@
 From 711fa546947aa19a79f12643f034bdaa4e30e6d4 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 17:37:57 +0100
-Subject: [PATCH 050/137] arm64: dts: qcom: sm8350-microsoft-surface-duo2:
+Subject: [PATCH 050/147] arm64: dts: qcom: sm8350-microsoft-surface-duo2:
  Enable the video codec
 
 Enable the IRIS2 video codec. It loads the device's own firmware image,

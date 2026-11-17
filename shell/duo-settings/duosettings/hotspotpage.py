@@ -19,6 +19,7 @@ from .main import (
     ask,
     combo_row,
     inform,
+    respond,
     run_async,
     run_with_input,
     select_quietly,
@@ -59,6 +60,7 @@ class HotspotPage(Page):
         self.password = None
         self.shown_password = False
         self.hide_timer = 0
+        self.pw_dialog = None
 
         g = self.group(
             None,
@@ -433,36 +435,63 @@ class HotspotPage(Page):
         )
 
     def own_password(self):
-        entry = Gtk.PasswordEntry(show_peek_icon=True)
-        entry.set_activates_default(True)
+        """A password of the user's own: Save only for one the helper takes
+        (the dialog says what is wrong), then the helper with the password on
+        stdin, after an empty line for the grant this app does not have (the
+        shell asks the user)."""
+        entry = Adw.PasswordEntryRow(title=_("New password"))
+        box = Gtk.ListBox()
+        box.add_css_class("boxed-list")
+        box.append(entry)
+        rule = _("8 to 63 characters: letters, digits and the usual signs (no accents).")
+        hints = {
+            "chars": _("Only letters, digits and the usual signs (no accents)."),
+            "short": rule,
+            "long": _("At most 63 characters."),
+        }
+        d = Adw.AlertDialog.new(_("Your own password"), rule)
+        d.add_response("cancel", _("Cancel"))
+        d.add_response("ok", _("Save"))
+        d.set_response_appearance("ok", Adw.ResponseAppearance.SUGGESTED)
+        d.set_default_response("ok")
+        d.set_close_response("cancel")
+        d.set_response_enabled("ok", False)
+        d.set_extra_child(box)
 
-        def ok():
+        def changed(_e):
+            problem = hs.password_problem(entry.get_text())
+            d.set_response_enabled("ok", problem is None)
+            d.set_body(
+                _("Devices that know the old one have to join again.")
+                if problem is None
+                else hints[problem]
+            )
+
+        entry.connect("changed", changed)
+        entry.connect(
+            "entry-activated", lambda _e: d.get_response_enabled("ok") and respond(d, "ok")
+        )
+
+        def response(_d, r):
             pw = entry.get_text()
             entry.set_text("")
-            if not hs.valid_password(pw):
-                inform(
-                    self.window,
-                    _("Password"),
-                    _("8 to 63 characters: letters, digits and the usual signs (no accents)."),
-                )
-                return
+            if r == "ok" and hs.valid_password(pw):
+                self.save_password(pw)
 
-            def done(code, out):
-                self.forget_password()
-                reply = hs.parse(out)
-                if reply.get("ok"):
-                    self.toast(_("Password changed"))
-                else:
-                    inform(self.window, _("Hotspot"), error_text(reply))
+        d.connect("response", response)
+        d.present(self.window)
+        entry.grab_focus()
+        self.pw_dialog = d  # (tests/gtk_hotspot_page.py)
+        return d
 
-            # Line 1: no grant (an app has none: the shell asks); line 2: the password.
-            run_with_input(["sudo", "-n", hs.HELPER, "password", "--set"], "\n" + pw + "\n", done)
+    def save_password(self, pw):
+        def done(_code, out):
+            self.forget_password()
+            reply = hs.parse(out)
+            if reply.get("ok"):
+                self.toast(_("Password changed"))
+            else:
+                inform(self.window, _("Hotspot"), error_text(reply))
 
-        ask(
-            self.window,
-            _("Your own password"),
-            _("At least 8 characters. Devices that know the old one have to join again."),
-            _("Save"),
-            ok,
-            extra=entry,
-        )
+        # Line 1: no grant (an app has none: the shell asks); line 2: the password.
+        run_with_input(["sudo", "-n", hs.HELPER, "password", "--set"], "\n" + pw + "\n", done)

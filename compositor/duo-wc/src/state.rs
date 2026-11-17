@@ -142,6 +142,13 @@ pub struct WindowData {
     pub android_full: RefCell<bool>,
     /// The size its task was last filled to inside Android.
     pub android_filled: RefCell<Option<(i32, i32)>>,
+    /// The box (logical px, from the window's corner) its task is known to
+    /// lie inside while not filled ([`crate::android::needs_refit`]); None
+    /// just after a fill or a restore.
+    pub android_fitted: RefCell<Option<(i32, i32)>>,
+    /// The box a refit has been asked for and not run yet (so the same
+    /// change asks once).
+    pub android_fit_want: RefCell<Option<(i32, i32)>>,
     /// A Waydroid window's app id, kept from its first commit (it is
     /// remembered when the window goes, for the one Waydroid makes again).
     pub android_app: RefCell<Option<String>>,
@@ -158,18 +165,21 @@ pub struct WindowData {
     /// The launcher's hint (`expect_window`) put it on its panel when it
     /// opened, and no activation has come since ([`crate::front`]).
     pub launched: RefCell<bool>,
+    /// The launcher's hint that placed it: given back if it goes at once
+    /// ([`crate::front::gives_hint_back`]: Waydroid's first window).
+    pub hint: RefCell<Option<LaunchHint>>,
 }
 
 impl WindowData {
     /// A new window's data: placed by `placement` (its own placement while
-    /// a pose moved it: `saved`), its task-list entry, whether a launcher's
-    /// hint put it there.
+    /// a pose moved it: `saved`), its task-list entry, the launcher's hint
+    /// that put it there.
     pub fn new(
         id: u64,
         placement: Placement,
         saved: Option<Placement>,
         foreign: ForeignToplevelHandle,
-        launched: bool,
+        hint: Option<LaunchHint>,
     ) -> Self {
         WindowData {
             id,
@@ -185,11 +195,14 @@ impl WindowData {
             content: RefCell::new(None),
             android_full: RefCell::new(false),
             android_filled: RefCell::new(None),
+            android_fitted: RefCell::new(None),
+            android_fit_want: RefCell::new(None),
             android_app: RefCell::new(None),
             android_rank: RefCell::new(0),
             fit: RefCell::new(None),
             fit_from: RefCell::new(None),
-            launched: RefCell::new(launched),
+            launched: RefCell::new(hint.is_some()),
+            hint: RefCell::new(hint),
         }
     }
 }
@@ -2300,8 +2313,8 @@ impl DuoWc {
     /// Where a new window goes: the active output if it is empty, else the first
     /// empty output left to right, else the active output; among the outputs the
     /// pose uses, and of those the lit ones if any is lit.
-    /// True with it when the launcher's hint chose it.
-    pub(crate) fn output_for_new_window(&mut self) -> Option<(Output, bool)> {
+    /// With it the launcher's hint when that chose it.
+    pub(crate) fn output_for_new_window(&mut self) -> Option<(Output, Option<LaunchHint>)> {
         if let Some(mut hint) = self.launch_hint.take() {
             // Laptop mode: never on the keyboard panel.
             hint.output = self.laptop_hint_output(&hint.output);
@@ -2315,19 +2328,19 @@ impl DuoWc {
                     if self.is_lit(&hint.output) {
                         self.active_output = Some(hint.output.clone());
                     }
-                    return Some((output, true));
+                    return Some((output, Some(hint)));
                 }
             }
         }
         // Working on an external display: new windows open there.
         if let Some(active) = self.active_output().filter(|o| crate::extout::is_external(&o.name())) {
             if self.is_lit(&active.name()) {
-                return Some((active, false));
+                return Some((active, None));
             }
         }
         // Laptop mode: on its desk panel.
         if let Some(desk) = self.laptop_desk().and_then(|name| self.output_by_name(&name)) {
-            return Some((desk, false));
+            return Some((desk, None));
         }
         let usable: Vec<Output> =
             self.layout_order().into_iter().filter(|o| self.pose.in_use(&o.name())).collect();
@@ -2335,9 +2348,9 @@ impl DuoWc {
         let pool = if lit.is_empty() { usable } else { lit };
         let active = self.active_output().filter(|o| pool.contains(o)).or_else(|| pool.first().cloned())?;
         if self.topmost_on(&active).is_none() {
-            return Some((active, false));
+            return Some((active, None));
         }
-        pool.iter().find(|o| self.topmost_on(o).is_none()).cloned().or(Some(active)).map(|o| (o, false))
+        pool.iter().find(|o| self.topmost_on(o).is_none()).cloned().or(Some(active)).map(|o| (o, None))
     }
 
     /// Put a window where its placement says, sized to it.
@@ -2439,8 +2452,11 @@ impl DuoWc {
         self.x11_configure(window, Some(size), Some((fullscreen, maximized)));
         if self.android_kind(window) == crate::waydroid::AndroidKind::Task {
             // Spanning or full screen: the task fills its display inside
-            // Android; back on a panel it gets its medium bounds.
+            // Android; back on a panel it gets its medium bounds. Not
+            // filled, it is kept inside the part of the display it shows
+            // (a turn, back from a span: crate::android::needs_refit).
             self.android_fill_for(window, placement == Placement::Span, size.w, size.h);
+            self.android_keep_inside(window, (rect.size.w, rect.size.h), (size.w, size.h));
         }
     }
 
@@ -3303,6 +3319,9 @@ impl DuoWc {
     /// overview's and the carry's bookkeeping.
     pub fn window_gone(&mut self, window: &Window, what: &str) {
         info!(id = window_data(window).id, what, "toplevel gone");
+        // A window that went at once was not the one launched: the
+        // launcher's hint is for the next (crate::front).
+        self.give_hint_back(window);
         // Waydroid makes its windows again after a resize of its
         // display: what this one was is kept for its successor.
         self.android_window_gone(window);
@@ -3321,6 +3340,27 @@ impl DuoWc {
         // Its partner fills the panel again.
         let replace = self.forget_split_of(id);
         self.after_destroyed(what, replace);
+    }
+
+    /// A window the launcher's hint placed is gone: if it went at once (a
+    /// splash, Waydroid's first toplevel), the hint waits for the next one
+    /// again, for the rest of its time (crate::front::gives_hint_back).
+    fn give_hint_back(&mut self, window: &Window) {
+        let data = window_data(window);
+        let Some(hint) = data.hint.borrow_mut().take() else {
+            return;
+        };
+        let lived = data.mapped_at.elapsed();
+        let fresh = Instant::now() < hint.until;
+        if crate::front::gives_hint_back(lived, fresh, self.launch_hint.is_some()) {
+            info!(
+                id = data.id,
+                output = hint.output,
+                lived_ms = lived.as_millis() as u64,
+                "a window that went at once gives the launcher's hint back"
+            );
+            self.launch_hint = Some(hint);
+        }
     }
 
     fn find_toplevel(&self, surface: &ToplevelSurface) -> Option<Window> {

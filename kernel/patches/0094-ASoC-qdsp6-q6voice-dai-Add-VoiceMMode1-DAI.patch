@@ -1,7 +1,7 @@
 From 9f1107732890ed768587d069b7a85fe2b7f64873 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Otto=20Pfl=C3=BCger?= <otto.pflueger@abscue.de>
 Date: Thu, 20 Apr 2023 18:45:03 +0200
-Subject: [PATCH 094/137] ASoC: qdsp6: q6voice-dai: Add VoiceMMode1 DAI
+Subject: [PATCH 094/147] ASoC: qdsp6: q6voice-dai: Add VoiceMMode1 DAI
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit

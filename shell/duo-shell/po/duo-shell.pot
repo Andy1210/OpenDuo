@@ -6,209 +6,309 @@ msgstr ""
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 
-#: duoshell/bar.py:76 duoshell/quickmenu.py:131
+#: duoshell/androidstart.py:52
+msgid "Starting Android apps…"
+msgstr ""
+
+#. Translators: an Android app (Waydroid) named like a host app.
+#: duoshell/apps.py:49
+#, python-format
+msgid "%s (Android)"
+msgstr ""
+
+#: duoshell/bar.py:75 duoshell/bar.py:76
+msgid "Location in use"
+msgstr ""
+
+#: duoshell/bar.py:80 duoshell/bar.py:81 duoshell/quickmenu.py:276
+msgid "Do not disturb"
+msgstr ""
+
+#: duoshell/bar.py:89 duoshell/quickmenu.py:239
 msgid "Keyboard"
 msgstr ""
 
-#: duoshell/bar.py:78 duoshell/dock.py:125
+#: duoshell/bar.py:93 duoshell/dock.py:130 duoshell/taskbar.py:52 duoshell/taskbar.py:53
 msgid "Apps"
 msgstr ""
 
-#: duoshell/bar.py:80 duoshell/dock.py:116 duoshell/quickmenu.py:133
+#: duoshell/bar.py:95 duoshell/dock.py:120 duoshell/quickmenu.py:242
 msgid "Windows"
 msgstr ""
 
-#: duoshell/bar.py:155 duoshell/quickmenu.py:139 duoshell/quickmenu.py:345
+#: duoshell/bar.py:132 duoshell/home.py:492
+msgid "Opens the alarms"
+msgstr ""
+
+#: duoshell/bar.py:184 duoshell/quickmenu.py:259 duoshell/quickmenu.py:608 duoshell/quickmenu.py:619
 msgid "Airplane mode"
 msgstr ""
 
-#: duoshell/bar.py:155 duoshell/quickmenu.py:343
+#: duoshell/bar.py:185 duoshell/quickmenu.py:603
 msgid "SIM locked"
 msgstr ""
 
-#: duoshell/bar.py:156
+#: duoshell/bar.py:186
 msgid "Searching"
 msgstr ""
 
-#: duoshell/bar.py:156
+#: duoshell/bar.py:187
 msgid "Mobile network off"
 msgstr ""
 
-#: duoshell/bar.py:163
+#: duoshell/bar.py:198
 msgid "WiFi connected"
 msgstr ""
 
 #. Translators: WiFi network name and signal strength in dBm.
-#: duoshell/bar.py:166
+#: duoshell/bar.py:201
 #, python-format
 msgid "%(ssid)s, %(rssi)d dBm"
 msgstr ""
 
-#: duoshell/bar.py:168 duoshell/quickmenu.py:308
+#: duoshell/bar.py:203 duoshell/quickmenu.py:503
 msgid "No WiFi device"
 msgstr ""
 
-#: duoshell/bar.py:170
+#: duoshell/bar.py:205
 msgid "WiFi not connected"
 msgstr ""
 
-#: duoshell/bar.py:176
+#: duoshell/bar.py:211
 msgid "No Bluetooth adapter"
 msgstr ""
 
-#: duoshell/bar.py:179
+#: duoshell/bar.py:214
 msgid "Bluetooth on"
 msgstr ""
 
-#: duoshell/bar.py:182
+#: duoshell/bar.py:217
 msgid "Bluetooth off"
 msgstr ""
 
 #. Translators: battery level in the status bar.
-#: duoshell/bar.py:190 duoshell/home.py:414
+#: duoshell/bar.py:225 duoshell/home.py:571
 #, python-format
 msgid "%d%%"
 msgstr ""
 
-#: duoshell/bar.py:192 duoshell/home.py:416
+#: duoshell/bar.py:227 duoshell/home.py:573
 msgid "Charging"
 msgstr ""
 
-#: duoshell/bar.py:192
+#: duoshell/bar.py:227
 msgid "On battery"
 msgstr ""
 
-#: duoshell/confirm.py:55 duoshell/quickmenu.py:192
-msgid "Cancel"
-msgstr ""
-
 #. Translators: %s is an app's name or a window's title.
-#: duoshell/confirm.py:75
+#: duoshell/confirm.py:79
 #, python-format
 msgid "Force close %s?"
 msgstr ""
 
 #. Translators: %s is an app's name or a window's title.
-#: duoshell/confirm.py:75
+#: duoshell/confirm.py:79
 msgid "this app"
 msgstr ""
 
-#: duoshell/confirm.py:76 duoshell/confirm.py:42
+#: duoshell/confirm.py:80 duoshell/confirm.py:44
 msgid "It does not answer. Anything it has not saved is lost."
 msgstr ""
 
-#: duoshell/confirm.py:77 duoshell/confirm.py:58
+#: duoshell/confirm.py:81 duoshell/confirm.py:62
 msgid "Force close"
 msgstr ""
 
-#: duoshell/confirm.py:87
+#: duoshell/confirm.py:86 duoshell/confirm.py:58 duoshell/confirm.py:147 duoshell/quickmenu.py:364
+msgid "Cancel"
+msgstr ""
+
+#: duoshell/confirm.py:101
 msgid "Remove software?"
 msgstr ""
 
-#. Translators: %s names the asking program and the packages.
-#: duoshell/confirm.py:89
+#: duoshell/confirm.py:104
 #, python-format
 msgid "An app asks to uninstall: %s"
 msgstr ""
 
-#: duoshell/confirm.py:90
+#: duoshell/confirm.py:106
 msgid "An app asks to uninstall software."
 msgstr ""
 
-#: duoshell/confirm.py:91
+#: duoshell/confirm.py:108
 msgid "Remove"
 msgstr ""
 
-#: duoshell/confirm.py:93
+#: duoshell/confirm.py:111
+msgid "Change the eSIM?"
+msgstr ""
+
+#: duoshell/confirm.py:112
+msgid "An app asks to change the eSIM."
+msgstr ""
+
+#: duoshell/confirm.py:113 duoshell/simpin.py:89
+msgid "Delete"
+msgstr ""
+
+#: duoshell/confirm.py:113
+msgid "Continue"
+msgstr ""
+
+#: duoshell/confirm.py:118
+msgid "Allow this?"
+msgstr ""
+
+#: duoshell/confirm.py:119
+msgid "An app asks for a system action."
+msgstr ""
+
+#: duoshell/confirm.py:120 duoshell/location.py:277
+msgid "Allow"
+msgstr ""
+
+#: duoshell/confirm.py:123
 msgid "Restart the display?"
 msgstr ""
 
-#: duoshell/confirm.py:94
+#: duoshell/confirm.py:125
 msgid "Duo Settings asks for it. Every open app closes; the screen is dark for a few seconds."
 msgstr ""
 
-#: duoshell/confirm.py:96 duoshell/quickmenu.py:167 duoshell/quickmenu.py:477
+#: duoshell/confirm.py:130 duoshell/quickmenu.py:339 duoshell/quickmenu.py:857
 msgid "Restart"
 msgstr ""
 
-#: duoshell/confirm.py:100
+#: duoshell/confirm.py:134
 msgid "Yes"
 msgstr ""
 
-#: duoshell/dock.py:201
-msgid "Cannot pin this app"
-msgstr ""
-
-#: duoshell/dock.py:204
-msgid "Pinned"
-msgstr ""
-
-#: duoshell/dock.py:204
-msgid "Unpinned"
-msgstr ""
-
-#: duoshell/home.py:72
-msgid "Done"
-msgstr ""
-
-#: duoshell/home.py:122
-msgid "About this picture"
-msgstr ""
-
-#: duoshell/home.py:210
-msgid "Learn more"
-msgstr ""
-
-#: duoshell/home.py:276
-msgid "Drop here for a new page"
-msgstr ""
-
-#: duoshell/home.py:317
-msgid "Remove from home screen"
-msgstr ""
-
-#: duoshell/home.py:409 duoshell/home.py:406
-msgid "Weather"
-msgstr ""
-
-#: duoshell/home.py:410
-msgid "Add a place"
-msgstr ""
-
-#: duoshell/home.py:416
-msgid "Battery"
-msgstr ""
-
-#: duoshell/launcher.py:160 duoshell/launcher.py:161
+#: duoshell/deskmenu.py:72 duoshell/deskmenu.py:73 duoshell/launcher.py:165 duoshell/launcher.py:166
 msgid "Search apps"
 msgstr ""
 
-#: duoshell/launcher.py:176 duoshell/launcher.py:177 duoshell/quickmenu.py:115 duoshell/quickmenu.py:233 duoshell/quickmenu.py:116
-msgid "Close"
-msgstr ""
-
-#: duoshell/launcher.py:203 duoshell/launcher.py:256
+#: duoshell/deskmenu.py:86 duoshell/launcher.py:210 duoshell/launcher.py:263
 msgid "No apps found"
 msgstr ""
 
-#: duoshell/launcher.py:316
+#: duoshell/deskmenu.py:94 duoshell/home.py:241 duoshell/quickmenu.py:337
+msgid "Settings"
+msgstr ""
+
+#: duoshell/deskmenu.py:97 duoshell/home.py:243
+msgid "Leave laptop mode"
+msgstr ""
+
+#: duoshell/displayprompt.py:46
+msgid "A display is connected"
+msgstr ""
+
+#: duoshell/displayprompt.py:51 duoshell/displayprompt.py:94
+msgid "How should it be used?"
+msgstr ""
+
+#: duoshell/displayprompt.py:58 duoshell/quickmenu.py:596
+msgid "Desktop"
+msgstr ""
+
+#: duoshell/displayprompt.py:59 duoshell/quickmenu.py:596
+msgid "Mirror"
+msgstr ""
+
+#: duoshell/displayprompt.py:62
+msgid "Remember my choice"
+msgstr ""
+
+#. Translators: %s is the display's own name (a TV's model).
+#: duoshell/displayprompt.py:92
+#, python-format
+msgid "%s: how should it be used?"
+msgstr ""
+
+#: duoshell/dock.py:206 duoshell/taskbar.py:195
+msgid "Cannot pin this app"
+msgstr ""
+
+#: duoshell/dock.py:209 duoshell/taskbar.py:198
+msgid "Pinned"
+msgstr ""
+
+#: duoshell/dock.py:209 duoshell/taskbar.py:198
+msgid "Unpinned"
+msgstr ""
+
+#: duoshell/home.py:76
+msgid "Done"
+msgstr ""
+
+#: duoshell/home.py:126
+msgid "About this picture"
+msgstr ""
+
+#: duoshell/home.py:242
+msgid "Wallpaper"
+msgstr ""
+
+#: duoshell/home.py:330
+msgid "Learn more"
+msgstr ""
+
+#: duoshell/home.py:402
+msgid "Drop here for a new page"
+msgstr ""
+
+#: duoshell/home.py:443
+msgid "Remove from home screen"
+msgstr ""
+
+#: duoshell/home.py:566 duoshell/home.py:563
+msgid "Weather"
+msgstr ""
+
+#: duoshell/home.py:567
+msgid "Add a place"
+msgstr ""
+
+#: duoshell/home.py:573
+msgid "Battery"
+msgstr ""
+
+#: duoshell/launcher.py:181 duoshell/launcher.py:182 duoshell/quickmenu.py:221 duoshell/quickmenu.py:405 duoshell/quickmenu.py:222
+msgid "Close"
+msgstr ""
+
+#: duoshell/launcher.py:326
 msgid "Show as a grid"
 msgstr ""
 
-#: duoshell/launcher.py:316
+#: duoshell/launcher.py:326
 msgid "Show as a list"
 msgstr ""
 
-#: duoshell/launcher.py:508
+#: duoshell/launcher.py:534
 msgid "Add to home screen"
 msgstr ""
 
-#: duoshell/launcher.py:511
+#: duoshell/launcher.py:542
 msgid "Unpin from the dock"
 msgstr ""
 
-#: duoshell/launcher.py:511
+#: duoshell/launcher.py:542
 msgid "Pin to the dock"
+msgstr ""
+
+#: duoshell/location.py:271
+#, python-format
+msgid "Allow %s to use your location?"
+msgstr ""
+
+#: duoshell/location.py:272
+msgid "It can then find out where the phone is, from the mobile network and, outdoors, from satellites. You can change this in Settings, Privacy."
+msgstr ""
+
+#: duoshell/location.py:279
+msgid "Don't allow"
 msgstr ""
 
 #: duoshell/notifications.py:86
@@ -216,214 +316,339 @@ msgid "Notification"
 msgstr ""
 
 #. Translators: an overview card whose window was asked to close.
-#: duoshell/overviewlabels.py:79
+#: duoshell/overviewlabels.py:83
 msgid "Closing…"
 msgstr ""
 
 #. Translators: an overview card whose app does not answer.
-#: duoshell/overviewlabels.py:82
+#: duoshell/overviewlabels.py:86
 msgid "Not responding"
 msgstr ""
 
-#: duoshell/quickmenu.py:128
+#: duoshell/quickmenu.py:233
 msgid "WiFi"
 msgstr ""
 
-#: duoshell/quickmenu.py:129
+#: duoshell/quickmenu.py:234
 msgid "Bluetooth"
 msgstr ""
 
-#: duoshell/quickmenu.py:130
+#: duoshell/quickmenu.py:236
 msgid "Auto-rotate"
 msgstr ""
 
-#: duoshell/quickmenu.py:132
+#: duoshell/quickmenu.py:241
 msgid "Hinge gap"
 msgstr ""
 
-#: duoshell/quickmenu.py:135
+#: duoshell/quickmenu.py:244
 msgid "Panels"
 msgstr ""
 
-#: duoshell/quickmenu.py:137
+#: duoshell/quickmenu.py:246
+msgid "Laptop mode"
+msgstr ""
+
+#: duoshell/quickmenu.py:249
+msgid "Display"
+msgstr ""
+
+#: duoshell/quickmenu.py:252
 msgid "Mobile data"
 msgstr ""
 
-#: duoshell/quickmenu.py:154
+#: duoshell/quickmenu.py:254
+msgid "Hotspot"
+msgstr ""
+
+#: duoshell/quickmenu.py:264
+msgid "Location"
+msgstr ""
+
+#: duoshell/quickmenu.py:270
+msgid "Sound"
+msgstr ""
+
+#: duoshell/quickmenu.py:280
+msgid "Flashlight"
+msgstr ""
+
+#: duoshell/quickmenu.py:316
 msgid "Brightness"
 msgstr ""
 
-#: duoshell/quickmenu.py:165
-msgid "Settings"
+#: duoshell/quickmenu.py:322
+msgid "Auto"
 msgstr ""
 
-#: duoshell/quickmenu.py:166
+#: duoshell/quickmenu.py:324 duoshell/quickmenu.py:326
+msgid "Automatic brightness"
+msgstr ""
+
+#: duoshell/quickmenu.py:338
 msgid "Screen off"
 msgstr ""
 
-#: duoshell/quickmenu.py:168 duoshell/quickmenu.py:480
+#: duoshell/quickmenu.py:340 duoshell/quickmenu.py:868
 msgid "Power off"
 msgstr ""
 
-#: duoshell/quickmenu.py:209
+#: duoshell/quickmenu.py:381
 msgid "Notifications"
 msgstr ""
 
-#: duoshell/quickmenu.py:211
+#: duoshell/quickmenu.py:383
 msgid "Clear all"
 msgstr ""
 
-#: duoshell/quickmenu.py:219
+#: duoshell/quickmenu.py:391
 msgid "No notifications"
 msgstr ""
 
-#: duoshell/quickmenu.py:314
+#: duoshell/quickmenu.py:505
+msgid "Off (hotspot on)"
+msgstr ""
+
+#: duoshell/quickmenu.py:511
 msgid "Not connected"
 msgstr ""
 
-#: duoshell/quickmenu.py:318
+#: duoshell/quickmenu.py:515
 msgid "No adapter"
 msgstr ""
 
-#: duoshell/quickmenu.py:327
+#: duoshell/quickmenu.py:527
 msgid "Sensors only log"
 msgstr ""
 
-#: duoshell/quickmenu.py:329
+#: duoshell/quickmenu.py:529
 msgid "Locked"
 msgstr ""
 
-#: duoshell/quickmenu.py:334
+#: duoshell/quickmenu.py:535
+msgid "No geoclue"
+msgstr ""
+
+#: duoshell/quickmenu.py:538
+msgid "In use"
+msgstr ""
+
+#: duoshell/quickmenu.py:546
+msgid "No feedbackd"
+msgstr ""
+
+#: duoshell/quickmenu.py:549
+msgid "Sound and vibration"
+msgstr ""
+
+#: duoshell/quickmenu.py:550
+msgid "Sound only"
+msgstr ""
+
+#: duoshell/quickmenu.py:551
+msgid "Vibration only"
+msgstr ""
+
+#: duoshell/quickmenu.py:552
+msgid "Silent"
+msgstr ""
+
+#: duoshell/quickmenu.py:574
 msgid "Shown"
 msgstr ""
 
-#: duoshell/quickmenu.py:334
+#: duoshell/quickmenu.py:574
 msgid "Hidden"
 msgstr ""
 
-#: duoshell/quickmenu.py:339
+#: duoshell/quickmenu.py:579
 msgid "Overview"
 msgstr ""
 
-#: duoshell/quickmenu.py:343
-msgid "No SIM"
-msgstr ""
-
-#: duoshell/quickmenu.py:343 duoshell/quickmenu.py:337 duoshell/quickmenu.py:350 duoshell/quickmenu.py:310 duoshell/quickmenu.py:320
-msgid "Off"
-msgstr ""
-
-#: duoshell/quickmenu.py:343 duoshell/quickmenu.py:325 duoshell/quickmenu.py:337 duoshell/quickmenu.py:350 duoshell/quickmenu.py:320
+#: duoshell/quickmenu.py:583 duoshell/quickmenu.py:605 duoshell/quickmenu.py:621 duoshell/quickmenu.py:660 duoshell/quickmenu.py:525 duoshell/quickmenu.py:577 duoshell/quickmenu.py:633 duoshell/quickmenu.py:519 duoshell/quickmenu.py:565 duoshell/quickmenu.py:538
 msgid "On"
 msgstr ""
 
-#: duoshell/quickmenu.py:344 duoshell/quickmenu.py:312
+#: duoshell/quickmenu.py:584 duoshell/quickmenu.py:604 duoshell/quickmenu.py:620 duoshell/quickmenu.py:661 duoshell/quickmenu.py:577 duoshell/quickmenu.py:633 duoshell/quickmenu.py:519 duoshell/quickmenu.py:541 duoshell/quickmenu.py:565 duoshell/quickmenu.py:507
+msgid "Off"
+msgstr ""
+
+#: duoshell/quickmenu.py:585
+msgid "Needs both panels"
+msgstr ""
+
+#: duoshell/quickmenu.py:586 duoshell/quickmenu.py:560
+msgid "Not available"
+msgstr ""
+
+#: duoshell/quickmenu.py:602
+msgid "No SIM"
+msgstr ""
+
+#: duoshell/quickmenu.py:606 duoshell/quickmenu.py:509
 msgid "Connected"
 msgstr ""
 
-#: duoshell/quickmenu.py:344
+#: duoshell/quickmenu.py:607
 msgid "Waiting for the network"
 msgstr ""
 
-#: duoshell/quickmenu.py:354
+#: duoshell/quickmenu.py:618
+msgid "Not installed"
+msgstr ""
+
+#: duoshell/quickmenu.py:622
+msgid "No mobile data"
+msgstr ""
+
+#: duoshell/quickmenu.py:638
 msgid "Both"
 msgstr ""
 
-#: duoshell/quickmenu.py:354
+#: duoshell/quickmenu.py:638
 msgid "Left only"
 msgstr ""
 
-#: duoshell/quickmenu.py:354
+#: duoshell/quickmenu.py:638
 msgid "Right only"
 msgstr ""
 
-#: duoshell/quickmenu.py:355 duoshell/quickmenu.py:331
+#: duoshell/quickmenu.py:639 duoshell/quickmenu.py:531
 msgid "No duo-posed"
 msgstr ""
 
-#: duoshell/quickmenu.py:476
+#: duoshell/quickmenu.py:658
+msgid "No flashlight"
+msgstr ""
+
+#: duoshell/quickmenu.py:659
+msgid "No access"
+msgstr ""
+
+#: duoshell/quickmenu.py:737
+msgid "Starting…"
+msgstr ""
+
+#: duoshell/quickmenu.py:743
+#, python-format
+msgid "Not started: %s"
+msgstr ""
+
+#: duoshell/quickmenu.py:856
 msgid "Restart the phone now?"
 msgstr ""
 
-#: duoshell/quickmenu.py:479
+#: duoshell/quickmenu.py:860
+msgid "The hotspot cannot run beside this WiFi connection. Switch WiFi off for it? (An ssh session over WiFi drops.)"
+msgstr ""
+
+#: duoshell/quickmenu.py:865
+msgid "Switch WiFi off"
+msgstr ""
+
+#: duoshell/quickmenu.py:867
 msgid "Power off the phone now?"
 msgstr ""
 
-#: duoshell/simpin.py:74
-msgid "Delete"
+#: duoshell/simpin.py:236 duoshell/simpin.py:107
+msgid "Emergency call"
 msgstr ""
 
-#: duoshell/simpin.py:79
-msgid "OK"
+#: duoshell/simpin.py:237
+msgid "Only emergency numbers while the SIM is locked."
 msgstr ""
 
-#: duoshell/simpin.py:89
+#: duoshell/simpin.py:243
+msgid "Not an emergency number."
+msgstr ""
+
+#: duoshell/simpin.py:244
+msgid "The call could not be placed."
+msgstr ""
+
+#: duoshell/simpin.py:249
+msgid "Back"
+msgstr ""
+
+#: duoshell/simpin.py:251
+msgid "Call"
+msgstr ""
+
+#: duoshell/simpin.py:262 duoshell/simpin.py:112
 msgid "Not now"
 msgstr ""
 
-#: duoshell/simpin.py:165
+#: duoshell/simpin.py:264 duoshell/simpin.py:94
+msgid "OK"
+msgstr ""
+
+#: duoshell/simpin.py:269
 msgid "SIM PIN"
 msgstr ""
 
-#: duoshell/simpin.py:166
+#: duoshell/simpin.py:271
 msgid "The SIM is locked. Enter its PIN to use calls, SMS and mobile data."
 msgstr ""
 
-#: duoshell/simpin.py:168
+#: duoshell/simpin.py:274
 msgid "SIM blocked"
 msgstr ""
 
-#: duoshell/simpin.py:169
+#: duoshell/simpin.py:276
 msgid "Too many wrong PINs. Enter the PUK (8 digits, from the card the SIM came on); then choose a new PIN."
 msgstr ""
 
-#: duoshell/simpin.py:172 duoshell/simpin.py:175
+#: duoshell/simpin.py:282 duoshell/simpin.py:285
 msgid "New PIN"
 msgstr ""
 
-#: duoshell/simpin.py:173
+#: duoshell/simpin.py:283
 msgid "Choose a new PIN for the SIM (4 to 8 digits)."
 msgstr ""
 
-#: duoshell/simpin.py:176
+#: duoshell/simpin.py:286
 msgid "The new PIN again."
 msgstr ""
 
-#: duoshell/simpin.py:180
+#: duoshell/simpin.py:290
 msgid "Last attempt: after a wrong PIN the SIM needs its PUK"
 msgstr ""
 
 #. Translators: attempts left to enter the SIM's PIN or PUK.
-#: duoshell/simpin.py:183
+#: duoshell/simpin.py:293
 msgid "1 attempt left"
 msgstr ""
 
 #. Translators: attempts left to enter the SIM's PIN or PUK.
-#: duoshell/simpin.py:183
+#: duoshell/simpin.py:293
 #, python-format
 msgid "%d attempts left"
 msgstr ""
 
-#: duoshell/simpin.py:192
+#: duoshell/simpin.py:302
 msgid "Checking…"
 msgstr ""
 
-#: duoshell/simpin.py:194
+#: duoshell/simpin.py:304
 msgid "Wrong PUK."
 msgstr ""
 
-#: duoshell/simpin.py:194
+#: duoshell/simpin.py:304
 msgid "Wrong PIN."
 msgstr ""
 
-#: duoshell/simpin.py:196
+#: duoshell/simpin.py:306
 msgid "A PIN is 4 to 8 digits."
 msgstr ""
 
-#: duoshell/simpin.py:198
+#: duoshell/simpin.py:308
 msgid "A PUK is 8 digits."
 msgstr ""
 
-#: duoshell/simpin.py:200
+#: duoshell/simpin.py:310
 msgid "The two PINs differ. Choose the new PIN again."
+msgstr ""
+
+#: duoshell/taskbar.py:90
+msgid "Quick settings"
 msgstr ""

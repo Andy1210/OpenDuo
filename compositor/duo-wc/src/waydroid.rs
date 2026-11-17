@@ -4,7 +4,8 @@
 //! window kept with the Android window being typed in, full screen (a
 //! double tap on the caption bar), and the one Android display: a window
 //! Waydroid makes again keeps its place, every Waydroid window gets the
-//! lead's size, a spanning task fills the display.
+//! lead's size, a spanning task fills the display, a task that is not filled
+//! is kept inside its window (after a turn, back from a span).
 
 use std::collections::HashMap;
 use std::sync::mpsc::Sender;
@@ -57,6 +58,7 @@ pub struct Carry {
     fullscreen: bool,
     android_full: bool,
     android_filled: Option<(i32, i32)>,
+    android_fitted: Option<(i32, i32)>,
     minimized: bool,
     /// Its size and bigness for the display's size while it is away.
     sizing: Sizing,
@@ -91,6 +93,10 @@ pub struct Android {
     /// The apps that open in full screen (the user left them there):
     /// [`full_apps_path`].
     full_apps: Vec<String>,
+    /// A refit asked for (tasks kept inside their windows, crate::android):
+    /// when first and last; its timer runs while set.
+    refit_first: Option<Instant>,
+    refit_last: Option<Instant>,
 }
 
 impl Android {
@@ -309,6 +315,16 @@ impl DuoWc {
             None => {
                 self.android.rank += 1;
                 *data.android_rank.borrow_mut() = self.android.rank;
+                if kind == AndroidKind::Task {
+                    // Android placed the new task on the display; the fit
+                    // below keeps it inside its window's part of a bigger
+                    // one. Either way it is inside that part now.
+                    let own = self.android_own_rect(window).map(|r| (r.size.w, r.size.h));
+                    if let Some(own) = own {
+                        let shared = self.android_display_size().unwrap_or(own);
+                        *data.android_fitted.borrow_mut() = Some(android::fit_box(own, shared));
+                    }
+                }
             }
         }
         // Everyone at the display's size (this one may lead it now).
@@ -358,11 +374,14 @@ impl DuoWc {
         *data.fullscreen.borrow_mut() = carry.fullscreen;
         *data.android_full.borrow_mut() = carry.android_full;
         *data.android_filled.borrow_mut() = carry.android_filled;
+        *data.android_fitted.borrow_mut() = carry.android_fitted;
         *data.minimized.borrow_mut() = carry.minimized;
         *data.android_rank.borrow_mut() = carry.sizing.rank;
-        // The same window: no grow-in, no launcher's word.
+        // The same window: no grow-in, no launcher's word (a hint it took
+        // as a new toplevel was spent on the window it replaces).
         *data.opened.borrow_mut() = true;
         *data.launched.borrow_mut() = false;
+        *data.hint.borrow_mut() = None;
         if let Some(mut split) = carry.split {
             let partner = split.partner(carry.id).and_then(|p| self.window_by_id(p));
             let fits = partner.as_ref().is_some_and(|p| {
@@ -417,6 +436,7 @@ impl DuoWc {
             fullscreen: *data.fullscreen.borrow(),
             android_full: *data.android_full.borrow(),
             android_filled: *data.android_filled.borrow(),
+            android_fitted: *data.android_fitted.borrow(),
             minimized: *data.minimized.borrow(),
             sizing,
             split: self.splits.iter().find(|s| s.has(id)).cloned(),
@@ -702,6 +722,10 @@ impl DuoWc {
         let data = window_data(window);
         if !android::wants_fill(span, *data.android_full.borrow()) {
             if data.android_filled.borrow_mut().take().is_some() {
+                // The bounds from before the fill come back, measured in
+                // the place and orientation of that time: fitted again
+                // (android_keep_inside, after this in place()).
+                *data.android_fitted.borrow_mut() = None;
                 if let Some(package) = android_package(window) {
                     self.android_helper(&["restore", &package]);
                 }
@@ -712,11 +736,123 @@ impl DuoWc {
             return;
         }
         *data.android_filled.borrow_mut() = Some((w, h));
+        *data.android_fitted.borrow_mut() = None;
+        *data.android_fit_want.borrow_mut() = None;
         let Some(package) = android_package(window) else {
             return;
         };
         let (pw, ph) = android::display_px(w as f64, h as f64, self.scale);
         self.android_helper(&["fill", &package, &pw.to_string(), &ph.to_string()]);
+    }
+
+    /// An Android task's window was placed (crate::state::place): `own`,
+    /// the size its own place gives it, `display`, the size it was
+    /// configured to (the Android display's). Not filled, its task has to
+    /// lie inside the part of the display the window shows; when that part
+    /// shrank since the task was last known inside it (a turn, a half), or
+    /// the task is just back from a fill with its old bounds, a refit is
+    /// asked for. It runs once the changes have settled
+    /// (crate::android::refit_wait), in [`Self::android_refit`].
+    pub fn android_keep_inside(&mut self, window: &Window, own: (i32, i32), display: (i32, i32)) {
+        let data = window_data(window);
+        let span = *data.placement.borrow() == Placement::Span;
+        let filled =
+            android::wants_fill(span, *data.android_full.borrow()) || data.android_filled.borrow().is_some();
+        let want = android::fit_box(own, display);
+        if filled || !android::needs_refit(*data.android_fitted.borrow(), want) {
+            *data.android_fit_want.borrow_mut() = None;
+            return;
+        }
+        if *data.android_fit_want.borrow() == Some(want) {
+            // Asked for already (place_all runs often).
+            return;
+        }
+        *data.android_fit_want.borrow_mut() = Some(want);
+        debug!(
+            id = data.id,
+            ?want,
+            inside = ?*data.android_fitted.borrow(),
+            "an Android task may lie outside its window: a refit once the changes settle"
+        );
+        self.android_refit_soon();
+    }
+
+    /// Ask for a refit: it waits until no change has asked for one for
+    /// `REFIT_QUIET_MS`, at most `REFIT_MAX_MS` after the first.
+    fn android_refit_soon(&mut self) {
+        let now = Instant::now();
+        self.android.refit_last = Some(now);
+        if self.android.refit_first.is_some() {
+            // Its timer runs; it looks at refit_last when it fires.
+            return;
+        }
+        self.android.refit_first = Some(now);
+        let timer = Timer::from_duration(Duration::from_millis(android::REFIT_QUIET_MS));
+        let inserted = self.loop_handle.insert_source(timer, |_, _, state: &mut DuoWc| {
+            let (Some(first), Some(last)) = (state.android.refit_first, state.android.refit_last) else {
+                return TimeoutAction::Drop;
+            };
+            let now = Instant::now();
+            match android::refit_wait(
+                now.saturating_duration_since(first),
+                now.saturating_duration_since(last),
+            ) {
+                Some(more) => TimeoutAction::ToDuration(more),
+                None => {
+                    state.android.refit_first = None;
+                    state.android.refit_last = None;
+                    state.android_refit();
+                    TimeoutAction::Drop
+                }
+            }
+        });
+        if let Err(err) = inserted {
+            tracing::warn!(?err, "could not start the Android refit timer: refitting now");
+            self.android.refit_first = None;
+            self.android.refit_last = None;
+            self.android_refit();
+        }
+    }
+
+    /// The refit: every Android task that is not filled and may lie outside
+    /// the part of the display its window shows now is moved into it
+    /// (shrunk only where it must: `duo2-android-task fit`), queued after
+    /// any `restore` before it. Worked out from the windows as they are now
+    /// (a window Waydroid is making again is not there yet: its successor
+    /// asks again when it is placed).
+    fn android_refit(&mut self) {
+        let display = self.android_display_size();
+        let tasks: Vec<Window> =
+            self.space.elements().filter(|w| self.android_kind(w) == AndroidKind::Task).cloned().collect();
+        for window in tasks {
+            let data = window_data(&window);
+            *data.android_fit_want.borrow_mut() = None;
+            let span = *data.placement.borrow() == Placement::Span;
+            if android::wants_fill(span, *data.android_full.borrow())
+                || data.android_filled.borrow().is_some()
+            {
+                continue;
+            }
+            let Some(own) = self.android_own_rect(&window).map(|r| (r.size.w, r.size.h)) else {
+                continue;
+            };
+            let want = android::fit_box(own, display.unwrap_or(own));
+            if !android::needs_refit(*data.android_fitted.borrow(), want) {
+                continue;
+            }
+            let Some(package) = android_package(&window) else {
+                continue;
+            };
+            let (pw, ph) = android::display_px(want.0 as f64, want.1 as f64, self.scale);
+            info!(
+                id = data.id,
+                ?want,
+                was = ?*data.android_fitted.borrow(),
+                "an Android task is kept inside its window: fitted again"
+            );
+            *data.android_fitted.borrow_mut() = Some(want);
+            self.android_helper(&["fit", &package, &pw.to_string(), &ph.to_string()]);
+        }
     }
 
     /// Whether the root helper may be run (`sudo -n -l HELPER`: the

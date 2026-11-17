@@ -1,7 +1,7 @@
 From 5db1de66aacf15381e97b0bf25bd70af86e18bd6 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 08:45:19 +0100
-Subject: [PATCH 039/137] drm/msm/a6xx: Bound the GMU waits on a pending fault
+Subject: [PATCH 039/147] drm/msm/a6xx: Bound the GMU waits on a pending fault
  devcoredump
 
 a6xx_gmu_set_oob() and a6xx_hfi_wait_for_msg_interrupt() wait without

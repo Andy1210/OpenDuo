@@ -19,6 +19,29 @@
 //! [`front_panels`]) the panels such a window is in front on, and the
 //! shell closes its app grid and quick menu there (they are layer surfaces
 //! above the windows: the new window opened under them).
+//!
+//! **A window that goes at once gives the hint back** ([`gives_hint_back`]).
+//! The hint is the next toplevel's, whatever it is. Starting Android apps
+//! cold, Waydroid makes a toplevel that is gone again 5 ms later, ~3 s
+//! after the tap (2026-11-17: `new toplevel id=13`, `toplevel gone id=13`
+//! 5 ms later): it took the hint, and the app's own window, ~16 s later,
+//! opened by the open rule (the owner had tapped again by then, and that
+//! tap's hint placed it). Now a toplevel the hint placed that goes within
+//! [`HINT_TRANSIENT`] leaves the hint for the next one, until the time the
+//! launcher asked for is over.
+
+use std::time::Duration;
+
+/// A toplevel the launcher's hint placed that is gone within this long was
+/// not the window launched (Waydroid's first one lived 5 ms).
+pub const HINT_TRANSIENT: Duration = Duration::from_millis(1000);
+
+/// Whether the hint that placed a window that has gone is the launcher's
+/// again: the window `lived` that long, `fresh`: the hint's time is not
+/// over, `newer`: another launch has asked since (its hint stays).
+pub fn gives_hint_back(lived: Duration, fresh: bool, newer: bool) -> bool {
+    lived < HINT_TRANSIENT && fresh && !newer
+}
 
 /// Where an activated window goes, if it moves. `current`: its panel (None:
 /// it spans, it stays so); `launched_here`: the launcher's hint put it on
@@ -92,6 +115,19 @@ mod tests {
     #[test]
     fn a_spanning_window_stays_spanning() {
         assert_eq!(activation_panel(None, false, Some("DSI-1"), Some("DSI-2"), BOTH), None);
+    }
+
+    #[test]
+    fn a_window_gone_at_once_gives_the_hint_back() {
+        let ms = Duration::from_millis;
+        // Waydroid's first toplevel: 5 ms.
+        assert!(gives_hint_back(ms(5), true, false));
+        // A window that stayed was the one launched.
+        assert!(!gives_hint_back(HINT_TRANSIENT, true, false));
+        assert!(!gives_hint_back(ms(20_000), true, false));
+        // The hint's time is over, or a newer launch has its own.
+        assert!(!gives_hint_back(ms(5), false, false));
+        assert!(!gives_hint_back(ms(5), true, true));
     }
 
     #[test]

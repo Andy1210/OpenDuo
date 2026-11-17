@@ -115,3 +115,25 @@ class DebounceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SensorRecheck(unittest.TestCase):
+    def test_a_call_asks_again_once_when_the_answer_was_no(self):
+        self.assertTrue(m.sensor_recheck(True, has_sensor=False, asked=False))
+        self.assertFalse(m.sensor_recheck(True, has_sensor=False, asked=True))
+
+    def test_not_when_the_sensor_is_known_or_no_call_wants_it(self):
+        self.assertFalse(m.sensor_recheck(True, has_sensor=True, asked=False))
+        self.assertFalse(m.sensor_recheck(False, has_sensor=False, asked=False))
+
+
+class Describe(unittest.TestCase):
+    def test_the_inputs_of_the_decision(self):
+        self.assertEqual(
+            m.describe([m.CALL_ACTIVE], False, True), "calls 4, route earpiece, sensor yes"
+        )
+        self.assertEqual(
+            m.describe([m.CALL_RINGING_IN, m.CALL_ACTIVE], None, False),
+            "calls 3,4, route unknown, sensor no",
+        )
+        self.assertEqual(m.describe([], True, True), "calls none, route loudspeaker, sensor yes")

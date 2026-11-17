@@ -1,7 +1,7 @@
 From 52ad00ce8ed985b33b032af3653a9754e1cf0b39 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 20:39:11 +0100
-Subject: [PATCH 128/137] net: qrtr: Report request and indication wakeups as
+Subject: [PATCH 128/147] net: qrtr: Report request and indication wakeups as
  wakeup sources of their own
 
 A wakeup-source endpoint (the modem's) wakes the system for two kinds of

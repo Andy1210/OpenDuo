@@ -8,7 +8,7 @@ import shutil
 from gi.repository import Adw, Gio, GLib, Gtk
 
 from . import ringtone
-from .main import _, run_async, select_quietly
+from .main import _, keep_value_readable, run_async, select_quietly
 
 
 def _schema(name):
@@ -24,7 +24,9 @@ class RingtoneGroup:
         self.labels = None
         self.player = None
         g = page.group(_("Ringtone"), _("What calls ring with, in the sound modes with sound."))
-        self.row = Adw.ComboRow(use_markup=False, model=Gtk.StringList.new([]))
+        self.row = keep_value_readable(
+            Adw.ComboRow(use_markup=False, model=Gtk.StringList.new([]))
+        )
         self.row.set_title(_("Ringtone"))
         self.row._quiet = False
         self.row.connect("notify::selected", self._selected)

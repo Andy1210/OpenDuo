@@ -1,7 +1,7 @@
 From 8ccb915c62caa20e8ce997e26d16fda754b0aa68 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 08:47:12 +0100
-Subject: [PATCH 042/137] BRING-UP: drm/msm/a6xx: Log the OOB latency, add a
+Subject: [PATCH 042/147] BRING-UP: drm/msm/a6xx: Log the OOB latency, add a
  timeout knob and a GMU dump
 
 A diagnostic for the A660 "Timeout waiting for GMU OOB set GPU_SET:

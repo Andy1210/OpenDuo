@@ -35,6 +35,22 @@ def _mac(v):
     return None
 
 
+def _chaddr(lease):
+    """A lease's hardware address. systemd 257 gives the DHCP message's
+    whole chaddr field (16 bytes) with "HardwareAddressLength" beside it:
+    the first 6 bytes are an Ethernet / WiFi address."""
+    hw = lease.get("HardwareAddress")
+    n = lease.get("HardwareAddressLength")
+    if (
+        isinstance(hw, list)
+        and n == 6
+        and len(hw) >= 6
+        and lease.get("HardwareAddressType", 1) == 1
+    ):
+        return _mac(hw[:6])
+    return _mac(hw)
+
+
 def parse_leases(networkctl_json):
     """`networkctl --json=short status IFACE` -> [{"ip", "mac", "name"}]
     (systemd 255-257 give the DHCP server's leases with "Address", the
@@ -52,7 +68,7 @@ def parse_leases(networkctl_json):
                     ip = _ip(lease.get("Address"))
                     if not ip:
                         continue
-                    mac = _mac(lease.get("HardwareAddress"))
+                    mac = _chaddr(lease)
                     if mac is None:
                         cid = lease.get("ClientId")
                         # client id type 1 (Ethernet) + the 6 bytes
@@ -113,6 +129,17 @@ def clients(stations, leases_by_iface, now):
         )
     out.sort(key=lambda c: (c["since"] is None, c["since"] or 0))
     return out
+
+
+def same_clients(a, b):
+    """The same devices (how, name, address), whatever their "since" says:
+    it is computed from hostapd's connected time and may move by a second
+    between two reads."""
+
+    def key(cl):
+        return [(c.get("via"), c.get("name"), c.get("ip")) for c in cl or []]
+
+    return key(a) == key(b)
 
 
 def write_json(path, data, mode=0o644):

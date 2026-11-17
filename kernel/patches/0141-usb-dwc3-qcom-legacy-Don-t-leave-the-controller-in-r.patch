@@ -1,0 +1,72 @@
+From 3d34dd8cc2d4f82cebc0976115a64655f260a2ae Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Tue, 17 Nov 2026 12:28:36 +0100
+Subject: [PATCH 141/147] usb: dwc3: qcom-legacy: Don't leave the controller in
+ reset after remove
+
+dwc3_qcom_remove() and the error path of dwc3_qcom_probe() assert the
+USB30 block reset and leave it asserted. The driver core then releases
+the power domain, and on the next probe it powers the domain on again
+before dwc3_qcom_probe() gets to its own assert/deassert pulse. A GDSC
+does not come up while its block is held in reset, so every later bind
+fails:
+
+  usb30_prim_gdsc status stuck at 'off'
+  WARNING: drivers/clk/qcom/gdsc.c:192 at gdsc_toggle_logic+0x1b8/0x1c0
+   ...
+   gdsc_enable+0x60/0x270
+   genpd_power_on+0xd4/0x238
+   __genpd_dev_pm_attach+0x1c0/0x2a4
+   platform_probe+0x48/0x9c
+
+Seen on SM8350 (Surface Duo 2) with an unbind and bind of the glue
+through sysfs: the controller stayed gone until a reboot. The same GDSC
+powers off and on without trouble across s2idle, where the reset is
+never asserted.
+
+The flattened dwc3-qcom driver does not touch the reset on remove
+either. Leave it deasserted: probe resets the block itself before using
+it.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/usb/dwc3/dwc3-qcom-legacy.c | 7 ++-----
+ 1 file changed, 2 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/usb/dwc3/dwc3-qcom-legacy.c b/drivers/usb/dwc3/dwc3-qcom-legacy.c
+index d3fad0fcfdac..1ce6d3bbeaa2 100644
+--- a/drivers/usb/dwc3/dwc3-qcom-legacy.c
++++ b/drivers/usb/dwc3/dwc3-qcom-legacy.c
+@@ -763,13 +763,13 @@ static int dwc3_qcom_probe(struct platform_device *pdev)
+ 	ret = reset_control_deassert(qcom->resets);
+ 	if (ret) {
+ 		dev_err(&pdev->dev, "failed to deassert resets, err=%d\n", ret);
+-		goto reset_assert;
++		return ret;
+ 	}
+ 
+ 	ret = dwc3_qcom_clk_init(qcom, of_clk_get_parent_count(np));
+ 	if (ret) {
+ 		dev_err_probe(dev, ret, "failed to get clocks\n");
+-		goto reset_assert;
++		return ret;
+ 	}
+ 
+ 	qcom->qscratch_base = devm_platform_ioremap_resource(pdev, 0);
+@@ -835,8 +835,6 @@ static int dwc3_qcom_probe(struct platform_device *pdev)
+ 		clk_disable_unprepare(qcom->clks[i]);
+ 		clk_put(qcom->clks[i]);
+ 	}
+-reset_assert:
+-	reset_control_assert(qcom->resets);
+ 
+ 	return ret;
+ }
+@@ -857,7 +855,6 @@ static void dwc3_qcom_remove(struct platform_device *pdev)
+ 	qcom->num_clocks = 0;
+ 
+ 	dwc3_qcom_interconnect_exit(qcom);
+-	reset_control_assert(qcom->resets);
+ 
+ 	pm_runtime_allow(dev);
+ 	pm_runtime_disable(dev);

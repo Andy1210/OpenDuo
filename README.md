@@ -73,11 +73,11 @@ but has not been tried with real hardware. **No**: not available.
 | Pen | Partial | Tested with a Surface Slim Pen 2: pressure, tilt, eraser, palm rejection, the top button over Bluetooth, pen firmware update from Settings. Open: the pen's Bluetooth link can drop when the pen comes near the screen, and hover has gaps. Charging the pen in the cover does not work yet |
 | Hinge and postures | Works | Hinge angle and posture from the sensor DSP (book, tent, folded back, closed); opening the phone wakes it |
 | Rotation | Works | Per panel, automatic from the accelerometers |
-| Other sensors | Partial | Accelerometers, gyroscopes, magnetometers and ambient light (automatic brightness) work. Proximity: switching the screen off at the ear during a call does not work yet (tried in a real call) |
+| Other sensors | Works | Accelerometers, gyroscopes, magnetometers, ambient light (automatic brightness) and proximity (the screen goes off at the ear during a call) |
 | GPU | Works | Adreno 660 with Mesa freedreno (OpenGL 4.6, OpenGL ES 3.2) and turnip (Vulkan) |
-| Hardware video decoding | Partial | H.264 and HEVC in mpv, GStreamer and Pipeline (YouTube). The decoder can get stuck after a while until the next restart (being investigated). VP9 in hardware crashes the video firmware, so it is decoded in software; the chip has no AV1; browsers decode in software |
+| Hardware video decoding | Partial | H.264 and HEVC in mpv, GStreamer and Pipeline (YouTube). VP9 in hardware crashes the video firmware, so it is decoded in software; the chip has no AV1; browsers decode in software |
 | WiFi | Works | 2.4 and 5 GHz, Wi-Fi 6, the factory MAC address, the regulatory country from the mobile network. Off while asleep; wake-on-WLAN is built but off and not tested |
-| Bluetooth | Partial | The controller works with its factory address; the pen pairs; headphones play music (A2DP), but the sound does not switch to them by itself when they connect yet. Keyboards are not tested |
+| Bluetooth | Partial | The controller works with its factory address; the pen pairs; headphones play music (A2DP), and the sound moves to them when they connect and back to the speakers when they go. Keyboards are not tested |
 | Mobile data | Works | LTE and 5G (NSA); 5G only while a screen is on and WiFi is not connected, to save power |
 | Calls | Works | Incoming and outgoing over 2G fallback (CSFB), so the network must still have 2G; earpiece, speakerphone, mute, DTMF, ringtones, do not disturb; a call wakes the phone |
 | VoLTE | In progress | The modem talks to our IMS data service, but IMS does not register yet |
@@ -92,9 +92,9 @@ but has not been tried with real hardware. **No**: not available.
 | Charging and battery | Works | USB-C charging, battery level and health, a clean shutdown at 3 % |
 | Charge limit | In progress | Microsoft's "Long Life" charge hold is exposed; where the firmware stops charging is not measured yet |
 | Sleep | Works | Sleeps by itself when both panels are dark; wakes on the power key, opening the phone, a call, an SMS, an alarm or the charger. Measured standby on battery with LTE: about 2.3 % per hour |
-| USB | Partial | Charging works. USB data (networking, tethering, serial console) does not connect to a computer in the current build (being investigated). No host mode (OTG) and no USB 3 |
+| USB | Works (device mode) | Charging, and device mode to a computer: networking, USB tethering and the serial console, also after the cable is unplugged and plugged in again. No host mode (OTG) and no USB 3 |
 | External display | No | The compositor side (a desktop mode or mirroring, chosen on connect) is built; DisplayPort over USB-C is not enabled in the kernel yet |
-| Hotspot | Partial | The WiFi hotspot works next to the phone's own WiFi connection (a phone connected and browsed); Settings does not list the connected devices yet. USB tethering waits for USB data (above) |
+| Hotspot | Works | The WiFi hotspot works next to the phone's own WiFi connection (a phone connected and browsed); Settings lists the connected devices. USB tethering works too |
 | Fingerprint | No | The sensor belongs to the secure world; no realistic path for now |
 | NFC | No | Not started |
 
@@ -141,8 +141,8 @@ but has not been tried with real hardware. **No**: not available.
 
 Known limits: apps that need Google's Play Integrity (banking and the like)
 do not run in Waydroid, and there is no hardware video decoding inside
-Android. An Android app on one panel can come up in the two-panel layout and
-not fit, and Angelfish plays no sound yet; both are being fixed.
+Android. In Angelfish, a video that starts by itself (YouTube) starts muted,
+as browsers do without a tap: unmute it from the player.
 
 ## Documentation
 

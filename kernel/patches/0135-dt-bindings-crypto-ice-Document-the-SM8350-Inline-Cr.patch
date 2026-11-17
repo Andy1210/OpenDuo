@@ -1,7 +1,7 @@
 From 780c17b7ca02aba612bf506ac8b1eaaf3c51c993 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Mon, 16 Nov 2026 20:11:01 +0100
-Subject: [PATCH 135/137] dt-bindings: crypto: ice: Document the SM8350 Inline
+Subject: [PATCH 135/147] dt-bindings: crypto: ice: Document the SM8350 Inline
  Crypto Engine
 
 Add the compatible for SM8350's UFS Inline Crypto Engine. It has a core

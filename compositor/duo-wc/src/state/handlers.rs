@@ -264,7 +264,7 @@ impl XdgShellHandler for DuoWc {
         // xdg-foreign's set_parent_of, come after get_toplevel): it is put
         // on its parent's panel before its first configure
         // (settle_dialog, from ensure_initial_configure).
-        let Some((output, launched)) = self.output_for_new_window() else {
+        let Some((output, hint)) = self.output_for_new_window() else {
             warn!("a toplevel arrived before any output; it will not be shown");
             return;
         };
@@ -275,7 +275,7 @@ impl XdgShellHandler for DuoWc {
         let loc = self.placement_rect(&placement, false).map(|r| r.loc).unwrap_or_default();
         info!(id, output = output.name(), ?placement, "new toplevel");
         let foreign = self.foreign_toplevels.new_toplevel::<DuoWc>(String::new(), String::new());
-        window.user_data().insert_if_missing(|| WindowData::new(id, placement, saved, foreign, launched));
+        window.user_data().insert_if_missing(|| WindowData::new(id, placement, saved, foreign, hint));
         // Mapped on its output at once, so the surface enters that output (and
         // learns its scale) before it draws its first buffer; the size and the
         // maximized state go out in the first configure.

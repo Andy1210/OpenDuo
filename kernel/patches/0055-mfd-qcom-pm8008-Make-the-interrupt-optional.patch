@@ -1,7 +1,7 @@
 From a45885f7fdaf4c6499fc00b681f1e3cb8d4af018 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 05:53:50 +0100
-Subject: [PATCH 055/137] mfd: qcom-pm8008: Make the interrupt optional
+Subject: [PATCH 055/147] mfd: qcom-pm8008: Make the interrupt optional
 
 On the Microsoft Surface Duo 2 the two PM8008 camera PMICs have no
 interrupt line wired (the vendor device tree describes none), and the

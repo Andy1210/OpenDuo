@@ -63,6 +63,17 @@
 //! - **Spanning fills the task.** A spanning (or full-screen) task is sized
 //!   to the whole display inside Android ([`wants_fill`]), so the app covers
 //!   both panels; back on one panel it gets its medium bounds again.
+//! - **A task that is not filled is kept inside its window** ([`fit_box`],
+//!   [`needs_refit`]). Android never moves a freeform task when its display
+//!   changes: after a turn a portrait task ran past the bottom of the
+//!   landscape panel, and the medium bounds a task gets back after a span
+//!   (or a full screen) were measured in the place and orientation of that
+//!   time. So whenever the part of the display a window shows shrinks in
+//!   either direction (a turn, a half, a lead of a half's size), or its task
+//!   came back from a fill, the task is fitted into it again
+//!   (`duo2-android-task fit`, after the `restore`), once the changes have
+//!   settled ([`refit_wait`]: a turn reconfigures one panel after the other,
+//!   and Waydroid then makes its windows again).
 
 use std::time::{Duration, Instant};
 
@@ -245,6 +256,49 @@ pub fn wants_fill(span: bool, full: bool) -> bool {
 /// lead's), which is bigger. Then it is moved into its part.
 pub fn needs_fit(display: (i32, i32), own: (i32, i32)) -> bool {
     display.0 > own.0 || display.1 > own.1
+}
+
+/// The part of the Android display a window that is not filled shows its
+/// task in (logical px, from the window's corner): its own place, cut to the
+/// display where that is smaller (another window leads it at a half's
+/// size: the window shows the whole display then, and no more).
+pub fn fit_box(own: (i32, i32), display: (i32, i32)) -> (i32, i32) {
+    (own.0.min(display.0), own.1.min(display.1))
+}
+
+/// Whether a task that is not filled has to be fitted into `now` (its
+/// [`fit_box`] at present) again. It is known to lie inside `inside` (the
+/// box it was last fitted to, or the one Android placed it in), and so
+/// inside every box that holds that one: only a box narrower or lower in
+/// either direction needs a fit. None (just back from a fill with the
+/// bounds it had before, from another place or orientation): not known,
+/// fitted.
+pub fn needs_refit(inside: Option<(i32, i32)>, now: (i32, i32)) -> bool {
+    match inside {
+        None => true,
+        Some(was) => now.0 < was.0 || now.1 < was.1,
+    }
+}
+
+/// How long a refit waits after the last change that asked for it (ms): a
+/// turn reconfigures one panel after the other, and Waydroid then makes its
+/// windows again (up to 1.1 s): one fit per task for the lot.
+pub const REFIT_QUIET_MS: u64 = 800;
+
+/// The longest a refit waits after the first change that asked for it (ms):
+/// changes that keep coming (a storm of turns) do not hold it off for ever.
+pub const REFIT_MAX_MS: u64 = 3000;
+
+/// When the refit runs: None now, else after that much longer.
+/// `since_first` / `since_last`: the time since the first / the last change
+/// that asked for it.
+pub fn refit_wait(since_first: Duration, since_last: Duration) -> Option<Duration> {
+    let quiet = Duration::from_millis(REFIT_QUIET_MS);
+    let max = Duration::from_millis(REFIT_MAX_MS);
+    if since_last >= quiet || since_first >= max {
+        return None;
+    }
+    Some((quiet - since_last).min(max - since_first))
 }
 
 /// Whether `name` is an Android package name (letters, digits, `_`,
@@ -484,6 +538,42 @@ mod tests {
         assert!(!needs_fit(panel, panel));
         assert!(needs_fit((538, 800), panel));
         assert!(wants_fill(true, false) && wants_fill(false, true) && !wants_fill(false, false));
+    }
+
+    #[test]
+    fn a_task_is_fitted_again_when_its_part_of_the_display_shrinks() {
+        let portrait = (538, 709);
+        let landscape = (757, 490);
+        let span = (1102, 709);
+        // On its own panel, at the display's size, or behind a spanning
+        // lead: its own place. A lead of a half's size: that half.
+        assert_eq!(fit_box(portrait, portrait), portrait);
+        assert_eq!(fit_box(portrait, span), portrait);
+        assert_eq!(fit_box(portrait, (269, 709)), (269, 709));
+        // A turn: lower (portrait to landscape) or narrower (back), each a
+        // fit; the same place again, or a bigger one, none.
+        assert!(needs_refit(Some(portrait), landscape));
+        assert!(needs_refit(Some(landscape), portrait));
+        assert!(!needs_refit(Some(portrait), portrait));
+        assert!(!needs_refit(Some((269, 709)), portrait));
+        // Into a half: narrower.
+        assert!(needs_refit(Some(portrait), (269, 709)));
+        // Back from a span (the bounds from before it): always.
+        assert!(needs_refit(None, portrait));
+    }
+
+    #[test]
+    fn a_refit_waits_for_the_changes_to_settle() {
+        let ms = Duration::from_millis;
+        // The last change just now: the whole quiet time.
+        assert_eq!(refit_wait(ms(0), ms(0)), Some(ms(REFIT_QUIET_MS)));
+        // A change 300 ms after the first: quiet counted from it.
+        assert_eq!(refit_wait(ms(500), ms(200)), Some(ms(REFIT_QUIET_MS - 200)));
+        // Quiet long enough: now.
+        assert_eq!(refit_wait(ms(2000), ms(REFIT_QUIET_MS)), None);
+        // Changes that keep coming: at most REFIT_MAX_MS after the first.
+        assert_eq!(refit_wait(ms(REFIT_MAX_MS - 100), ms(50)), Some(ms(100)));
+        assert_eq!(refit_wait(ms(REFIT_MAX_MS), ms(10)), None);
     }
 
     #[test]

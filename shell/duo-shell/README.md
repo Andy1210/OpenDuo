@@ -55,7 +55,20 @@ layouts Hungarian + English, completion on).
   next open, 2026-11-09). Tapping an app (or Enter in the search
   field: the first match) tells duo-wc `expect_window <this panel>` and starts
   the app with GTK's launch context (an xdg-activation token made on this
-  panel goes with it); the grid closes. The close button and Escape close it.
+  panel goes with it); the grid closes. **Starting Android apps**
+  (`androidstartmodel.py` pure, `androidstart.py`; 2026-11-17): an Android
+  app (`waydroid.<package>.desktop`, or Waydroid's own entry) launched from
+  the grid, the home screen, the dock or a desk while the Waydroid session
+  is not on the session bus (`id.waydro.Session`, watched) waits for
+  Android to boot: its window came ~19 s after the tap, with nothing on the
+  screen meanwhile, and the owner tapped again. Now a pill "Starting
+  Android apps..." (spinner, overlay layer, above the dock, touches pass
+  through) shows on that panel until the app's window has been in duo-wc's
+  window list for 0.5 s (Waydroid's first toplevel of a start is gone 5 ms
+  after it came), at most 30 s, and goes when the screen goes dark; and the
+  hint asks duo-wc to wait 40 s (`timeout_ms`) instead of its 10 s, also
+  for another Android app launched while the notice shows. Not tested on
+  the phone yet. The close button and Escape close it.
   A window that comes to the front on its panel by itself (a new window,
   an app's activation: duo-wc's `window_front` event, 2026-11-12) closes the
   grid and the quick menu there: as layer surfaces they covered it (Text
@@ -169,7 +182,15 @@ layouts Hungarian + English, completion on).
   the apps agent), **Screen off**, **Restart** and **Power off** (the last
   two ask first, in a red bar with Cancel); and the **notifications**,
   newest first. Opened by a swipe down from the top edge, a drag down on
-  the bar or a tap on its status icons; it slides down. Closed by the arrow
+  the bar or a tap on its status icons; it slides down. A **long press** on
+  a tile (GTK's long-press time, as in the app grid; also on a greyed tile)
+  closes the menu and opens Duo Settings on that tile's page
+  (`quickpages.py`: WiFi, Mobile data -> SIM card, Hotspot, Bluetooth,
+  Location -> Privacy, Sound, Do not disturb -> Notifications, Auto-rotate
+  and Panels -> Rotation & poses, Keyboard, Hinge gap -> Display, Laptop
+  mode, Display -> External display; Airplane mode, Flashlight and Windows
+  have none: a long press there is a tap), with `duo-settings PAGE` and the
+  launch context of the Settings button. Closed by the arrow
   at the top, the handle at the bottom (both also by dragging up), a swipe
   up from the bottom edge, Back, or the screen going off; it slides up.
   **Without a touch** (tests, screenshots; 2026-11-13, `shellbus.py`): the
@@ -696,6 +717,8 @@ for `pen_input = all`.
 | `duo-shell` | entry script (loads libgtk4-layer-shell, runs `duoshell.main`) |
 | `duoshell/main.py` | the `Shell`: monitors, bars, grids, timers, duo-wc events |
 | `duoshell/bar.py`, `duoshell/launcher.py` | the status bar, the app grid |
+| `duoshell/quickpages.py` | which Settings page a quick-menu tile's long press opens, the command line, the click that ends a long press (pure, `tests/test_quickpages.py`: every page exists in Duo Settings, every key is a tile) |
+| `duoshell/audioroute.py`, `duoshell/audioroutemodel.py` | a Bluetooth or USB output that connects becomes the output (`pactl subscribe`, then `pactl set-default-sink`; not during a call, then after it); WirePlumber falls back to the speaker when it goes (pure rules, `tests/test_audioroutemodel.py`) |
 | `duoshell/quickmenu.py`, `duoshell/system.py` | the quick menu; WiFi / backlight / duo-posed readers and the helper call (pure parsers) |
 | `duoshell/torchmodel.py`, `icons/` | the Flashlight tile: the flash LED found, read, switched; what the tile says (pure, `tests/test_torchmodel.py`); the shell's own symbolic icons (a hicolor tree: an icon straight in a search path is not recoloured) |
 | `duoshell/shellbus.py`, `org.duo2os.Shell.conf` | the administrator's remote on the system bus: the quick menu opened / closed without a touch, root only (the decision pure, `tests/test_shellbus.py`); its bus policy |
@@ -743,7 +766,7 @@ for `pen_input = all`.
 | `po/duo-shell.pot`, `po/update-pot.py` | translation template and its generator |
 | `90_duo2-os.gschema.override` | GNOME defaults: on-screen keyboard on, dark |
 | `tests/` | unit tests (`python3 -m unittest discover -s tests`) |
-| `tests/run-gtk.sh`, `tests/gtk.Dockerfile`, `tests/gtk_quick_tiles.py` | the quick menu's tiles under GTK 4 + the shell's CSS (Debian trixie, broadway, in a container): every tile with each of its status lines, English and a Hungarian sample, at 538 px; no line cut short or over two lines, tiles >= 48 px, pictures to `/tmp/duo-shell-gtk` |
+| `tests/run-gtk.sh`, `tests/gtk.Dockerfile`, `tests/gtk_quick_tiles.py` | the quick menu's tiles under GTK 4 + the shell's CSS (Debian trixie, broadway, in a container): every tile with each of its status lines, English and a Hungarian sample, at 538 px; no line cut short or over two lines, tiles >= 48 px; the long press (the tile under it and its page, a greyed tile too, none without a page, the click that ends it swallowed); pictures to `/tmp/duo-shell-gtk` |
 
 ## Install and run
 

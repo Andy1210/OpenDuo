@@ -1,0 +1,62 @@
+From eac609e0ab3765ebde447c22bfd8052ca8fa4047 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Tue, 17 Nov 2026 13:41:23 +0100
+Subject: [PATCH 143/147] BRING-UP: arm64: dts: qcom:
+ sm8350-microsoft-surface-duo2: Follow the flattened USB node
+
+The SM8350 USB controller is one node now (glue and core): the
+high-speed-only overrides of the bring-up variants (maximum speed, the
+USB2 PHY alone) move from the removed usb_1_dwc3 child to usb_1, next to
+qcom,select-utmi-as-pipe-clk. No change in what the variants describe.
+
+The DTBs already on the ESP (the rescue entry's variant I among them)
+keep the legacy layout; the kernel still has dwc3-qcom-legacy for them.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup-j.dts  | 3 ---
+ .../boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup.dts    | 3 ---
+ .../boot/dts/qcom/sm8350-microsoft-surface-duo2-keepfb3.dts    | 2 +-
+ 3 files changed, 1 insertion(+), 7 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup-j.dts b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup-j.dts
+index f711dffbb74e..102fb6fefcb9 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup-j.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup-j.dts
+@@ -27,9 +27,6 @@ &usb_1 {
+ 	 * and the gadget never attaches.
+ 	 */
+ 	qcom,select-utmi-as-pipe-clk;
+-};
+-
+-&usb_1_dwc3 {
+ 	maximum-speed = "high-speed";
+ 	phys = <&usb_1_hsphy>;
+ 	phy-names = "usb2-phy";
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup.dts b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup.dts
+index 0be9a71b582d..c4880cbf2c60 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup.dts
+@@ -43,9 +43,6 @@ &vreg_l13c_3p0 {
+ &usb_1 {
+ 	/* high speed only: PIPE clocked from UTMI (see the -j variant) */
+ 	qcom,select-utmi-as-pipe-clk;
+-};
+-
+-&usb_1_dwc3 {
+ 	maximum-speed = "high-speed";
+ 	phys = <&usb_1_hsphy>;
+ 	phy-names = "usb2-phy";
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-keepfb3.dts b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-keepfb3.dts
+index 68d467d713d4..02506d163917 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-keepfb3.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-keepfb3.dts
+@@ -40,7 +40,7 @@ &vreg_l13c_3p0 {
+  * USB 2.0 only for bring-up: the console gadget must not depend on the QMP
+  * combo PHY (USB3/DP, needs the plug orientation).
+  */
+-&usb_1_dwc3 {
++&usb_1 {
+ 	maximum-speed = "high-speed";
+ 	phys = <&usb_1_hsphy>;
+ 	phy-names = "usb2-phy";

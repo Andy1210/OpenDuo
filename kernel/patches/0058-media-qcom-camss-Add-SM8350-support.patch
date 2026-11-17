@@ -1,7 +1,7 @@
 From c4b54bade964c9858c2bad1897d639c34694a849 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 05:58:13 +0100
-Subject: [PATCH 058/137] media: qcom: camss: Add SM8350 support
+Subject: [PATCH 058/147] media: qcom: camss: Add SM8350 support
 
 SM8350 has Titan 580. The vendor camera driver runs its CSID580 with
 the CSID480 data and its VFE580 with the VFE480 tables (only the RDI1

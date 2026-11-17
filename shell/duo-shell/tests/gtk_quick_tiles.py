@@ -5,8 +5,10 @@ in English (the shell's strings) and in a Hungarian sample (the shell has no
 Hungarian catalogue yet: these are the likely translations, the long ones on
 purpose). Checked: no line is cut short (ellipsized), none takes more than
 two lines, every tile is at least 48 px tall and the grid fits the panel.
-Pictures to $OUT: each language with every tile at its longest status.
-Exit code 0 when everything holds.
+Also the long press (quickmenu.hold_opens_pages): the tile under it and its
+Settings page, a greyed tile too, none for a tile without a page, and the
+click that ends it swallowed. Pictures to $OUT: each language with every
+tile at its longest status. Exit code 0 when everything holds.
 """
 
 import os
@@ -27,6 +29,25 @@ from gi.repository import Gdk, GLib, Graphene, Gsk, Gtk, Pango  # noqa: E402
 
 OUT = os.environ.get("OUT", "/tmp")
 WIDTH = 538
+
+# The tiles' keys (quickpages.TILE_PAGES), in the order of EN below.
+KEYS = [
+    "wifi",
+    "data",
+    "hotspot",
+    "bluetooth",
+    "airplane",
+    "location",
+    "sound",
+    "dnd",
+    "torch",
+    "rotate",
+    "keyboard",
+    "gap",
+    "panels",
+    "laptop",
+    "windows",
+]
 
 # (icon, English title, its status lines), in the quick menu's order.
 EN = [
@@ -201,6 +222,39 @@ def label_problems(label, what):
     return out
 
 
+def long_press(quickmenu, grid, tiles, taps):
+    """The grid's long press (quickmenu.hold_opens_pages), fired at a tile's
+    centre as GTK would after its long-press time: a tile with a page hands
+    over its page (a greyed one too), a tile without one stays a tap, and
+    the click that ends a long press is no tap."""
+    out = []
+    held = []
+    hold = quickmenu.hold_opens_pages(grid, lambda tile, page: held.append((tile.key, page)))
+    by_key = {t.key: t for t in tiles}
+    by_key["data"].set_sensitive(False)  # Mobile data without a SIM
+    spin(200)
+    for key, want in (("hotspot", "hotspot"), ("data", "sim"), ("torch", None), ("wifi", "wifi")):
+        tile = by_key[key]
+        ok, centre = tile.compute_point(
+            grid, Graphene.Point().init(tile.get_width() / 2, tile.get_height() / 2)
+        )
+        held.clear()
+        hold.emit("pressed", centre.x, centre.y)
+        got = held[0] if held else None
+        if got != ((key, want) if want else None):
+            out.append("long press on %s: %r" % (key, got))
+    by_key["data"].set_sensitive(True)
+    # the click at the end of the long press on WiFi: swallowed; the next is a tap
+    taps.clear()
+    by_key["wifi"].emit("clicked")
+    by_key["wifi"].emit("clicked")
+    if taps != ["WiFi"]:
+        out.append("the clicks after a long press: %r" % taps)
+    taps.clear()
+    print("long press: %s" % ("ok" if not out else "%d failures" % len(out)))
+    return out
+
+
 def main():
     from duoshell import quickmenu, torchmodel
 
@@ -226,12 +280,18 @@ def main():
     win.set_default_size(WIDTH, 700)
     content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
     content.add_css_class("content")
-    tiles = [quickmenu.Tile(icon, title, lambda: None) for icon, title, _subs in EN]
+    taps = []
+    tiles = [
+        quickmenu.Tile(icon, title, lambda t=title: taps.append(t), key)
+        for (icon, title, _subs), key in zip(EN, KEYS)
+    ]
     grid = quickmenu.tile_grid(tiles)
     content.append(grid)
     win.set_child(content)
     win.present()
     spin(600)
+
+    failures.extend(long_press(quickmenu, grid, tiles, taps))
 
     for lang, table in (("en", [(t, s) for _i, t, s in EN]), ("hu", HU)):
         longest = 0

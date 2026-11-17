@@ -53,6 +53,9 @@ AIRPLANE = "/var/lib/duo2/airplane"
 WAYDROID_NFT = "/etc/duo2/waydroid/firewall.nft"
 AP_START_TIMEOUT = 15.0
 LEASE_REFRESH = (3, 12, 40)  # s after a device joins: its DHCP lease and name
+# The stations and leases read again this often while the access point runs:
+# a device that left without an event, a name its DHCP lease brought later.
+STATIONS_POLL_S = 30
 NETLINK_GROUPS = 0x1 | 0x10 | 0x40 | 0x100 | 0x400 | (1 << 23) | (1 << 24)
 
 
@@ -558,6 +561,7 @@ class Hotspot:
             w["watches"]["events"] = GLib.io_add_watch(
                 w["events"].fileno(), GLib.PRIORITY_DEFAULT, GLib.IO_IN, self._hostapd_event
             )
+        w["watches"]["poll"] = GLib.timeout_add_seconds(STATIONS_POLL_S, self._stations_poll)
         out = getattr(w["proc"], "stdout", None)
         if out is not None:
             os.set_blocking(out.fileno(), False)
@@ -594,7 +598,14 @@ class Hotspot:
             return False
         changed = False
         while True:
-            msg = w["events"].recv_event()
+            try:
+                msg = w["events"].recv_event()
+            except OSError as e:
+                # A broken socket would wake this watch for ever: drop it
+                # (the periodic read, _stations_poll, still follows the devices).
+                log("duo2-hotspot: hostapd's events: %s" % e)
+                w["watches"].pop("events", None)  # this source ends with False
+                return False
             if msg is None:
                 break
             name, _mac = wifi.parse_event(msg)
@@ -623,7 +634,16 @@ class Hotspot:
         self.refresh_stations()
         return False
 
-    def refresh_stations(self):
+    def _stations_poll(self):
+        if self.wifi is None:
+            return False
+        self.refresh_stations(only_changes=True)
+        return True
+
+    def refresh_stations(self, only_changes=False):
+        """The devices again (hostapd's stations, the DHCP leases); with
+        only_changes, the state file is written only when the list is
+        another (the periodic read)."""
         stations = []
         w = self.wifi
         if w is not None and w["requests"] is not None:
@@ -636,7 +656,10 @@ class Hotspot:
             "usb": self.leases(USB_IFACE) if self.usb is not None else [],
         }
         before = len([c for c in self.clients if c["via"] == "wifi"])
-        self.clients = state.clients(stations, leases, self.sys.now())
+        clients = state.clients(stations, leases, self.sys.now())
+        if only_changes and state.same_clients(clients, self.clients):
+            return
+        self.clients = clients
         now = len([c for c in self.clients if c["via"] == "wifi"])
         if now != before:
             log("duo2-hotspot: %d device(s) on the WiFi hotspot" % now)

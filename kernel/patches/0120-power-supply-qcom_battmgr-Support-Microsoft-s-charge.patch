@@ -1,7 +1,7 @@
 From 8e114e2ba5b070095c22580c79af00a14817ac54 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 22:34:16 +0100
-Subject: [PATCH 120/137] power: supply: qcom_battmgr: Support Microsoft's
+Subject: [PATCH 120/147] power: supply: qcom_battmgr: Support Microsoft's
  charge hold on the Surface Duo 2
 
 The Surface Duo 2's battery manager firmware does not answer

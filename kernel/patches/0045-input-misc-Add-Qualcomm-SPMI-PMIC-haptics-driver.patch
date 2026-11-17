@@ -1,7 +1,7 @@
 From 7d9340aad02e8e4db494310ed897bdf3fb23e7df Mon Sep 17 00:00:00 2001
 From: Fenglin Wu <fenglin.wu@oss.qualcomm.com>
 Date: Tue, 3 Nov 2026 20:51:18 -0800
-Subject: [PATCH 045/137] input: misc: Add Qualcomm SPMI PMIC haptics driver
+Subject: [PATCH 045/147] input: misc: Add Qualcomm SPMI PMIC haptics driver
 
 Add an initial driver for the Qualcomm PMIH0108 PMIC haptics module,
 named as HAP530_HV. This module supports several play modes, including

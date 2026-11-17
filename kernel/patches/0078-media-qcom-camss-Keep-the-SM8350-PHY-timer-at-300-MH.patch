@@ -1,7 +1,7 @@
 From d081de2146cbfecb546ea876d664c0c1706156e3 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 01:35:22 +0100
-Subject: [PATCH 078/137] media: qcom: camss: Keep the SM8350 PHY timer at 300
+Subject: [PATCH 078/147] media: qcom: camss: Keep the SM8350 PHY timer at 300
  MHz up to 2.5 Gb/s
 
 The CSIPHY wants its timer clock above a quarter of the link frequency,

@@ -1,7 +1,7 @@
 From 84a25090201ce4348200789fa0fcb5655eb0157b Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 12:48:00 +0100
-Subject: [PATCH 124/137] drm/msm/dpu: Clear a CTL's interface paths before a
+Subject: [PATCH 124/147] drm/msm/dpu: Clear a CTL's interface paths before a
  display sets it up
 
 On DPU 5.0 and later, ->setup_intf_cfg() adds the interface, DSC and 3D

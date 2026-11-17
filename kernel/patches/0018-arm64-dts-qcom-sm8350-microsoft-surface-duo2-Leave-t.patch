@@ -1,7 +1,7 @@
 From 6cc72f650e5719ea368a4a123daeda2813b80848 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Fri, 6 Nov 2026 15:43:48 +0100
-Subject: [PATCH 018/137] arm64: dts: qcom: sm8350-microsoft-surface-duo2:
+Subject: [PATCH 018/147] arm64: dts: qcom: sm8350-microsoft-surface-duo2:
  Leave the gauge buses to the ADSP
 
 The fuel gauges of the two battery packs sit on QUP SE10 and SE11, and

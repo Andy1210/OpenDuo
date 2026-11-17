@@ -1,7 +1,7 @@
 From 486860148f3fea272a84e846bd372fea0f3e3d4d Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Fri, 6 Nov 2026 09:56:24 +0100
-Subject: [PATCH 011/137] BRING-UP: arm64: dts: qcom:
+Subject: [PATCH 011/147] BRING-UP: arm64: dts: qcom:
  sm8350-microsoft-surface-duo2: Add bring-up variant I
 
 Variant I is the main Surface Duo 2 DTS with only what the first boots

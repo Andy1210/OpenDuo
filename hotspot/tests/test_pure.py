@@ -13,7 +13,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
-from duo2hotspot import conf, gadget, netplan, state, wifi  # noqa: E402
+from duo2hotspot import conf, ctrl, gadget, netplan, state, wifi  # noqa: E402
 
 
 def data(name):
@@ -460,6 +460,53 @@ class State(unittest.TestCase):
         )
         self.assertEqual(state.parse_leases(None), [])
 
+    def test_leases_systemd_257(self):
+        # systemd 257 (the phone's): the DHCP message's whole 16-byte chaddr
+        # with its length beside it, and a client id that is not the MAC
+        # (a DUID-style id: type 255), so only the chaddr can match the station
+        chaddr = [2, 170, 0, 0, 0, 9] + [0] * 10
+        j = {
+            "Interfaces": [
+                {
+                    "Name": "ap0",
+                    "DHCPServer": {
+                        "PoolOffset": 10,
+                        "PoolSize": 40,
+                        "Leases": [
+                            {
+                                "ClientId": [255, 1, 2, 3, 4, 0, 1, 0, 1],
+                                "Address": [10, 15, 43, 12],
+                                "Hostname": "made-up-phone",
+                                "HardwareAddressType": 1,
+                                "HardwareAddressLength": 6,
+                                "HardwareAddress": chaddr,
+                                "ExpirationUSec": 123,
+                            }
+                        ],
+                    },
+                }
+            ]
+        }
+        self.assertEqual(
+            state.parse_leases(j),
+            [{"ip": "10.15.43.12", "mac": "02:aa:00:00:00:09", "name": "made-up-phone"}],
+        )
+        cl = state.clients(
+            [{"mac": "02:aa:00:00:00:09", "authorized": True, "connected_time": 30}],
+            {"wifi": state.parse_leases(j)},
+            1000,
+        )
+        self.assertEqual(cl[0]["name"], "made-up-phone")
+        self.assertEqual(cl[0]["ip"], "10.15.43.12")
+
+    def test_same_clients_ignores_since(self):
+        a = [{"via": "wifi", "name": "x", "ip": "10.15.43.12", "since": 970}]
+        b = [{"via": "wifi", "name": "x", "ip": "10.15.43.12", "since": 971}]
+        self.assertTrue(state.same_clients(a, b))
+        self.assertFalse(state.same_clients(a, [dict(b[0], ip=None)]))
+        self.assertFalse(state.same_clients(a, []))
+        self.assertTrue(state.same_clients([], None))
+
     def test_clients_carry_no_address(self):
         stations = [
             {"mac": "02:aa:00:00:00:09", "authorized": True, "connected_time": 30},
@@ -486,6 +533,53 @@ class State(unittest.TestCase):
             self.assertEqual(state.read_json(p), {"a": 1})
             self.assertEqual(os.stat(p).st_mode & 0o777, 0o600)
             self.assertEqual(state.read_json(os.path.join(d, "none")), {})
+
+
+class CtrlEvents(unittest.TestCase):
+    """hostapd's attached control socket, with a real UNIX datagram socket
+    standing in for hostapd."""
+
+    def test_recv_event_never_waits(self):
+        import socket
+        import time
+
+        d = tempfile.mkdtemp()
+        try:
+            server_path = os.path.join(d, "ap0")
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            server.bind(server_path)
+            c = ctrl.Ctrl(server_path, d, timeout=2.0)
+            self.assertIsNone(c.recv_event())
+            server.sendto(b"<3>AP-STA-CONNECTED 02:aa:00:00:00:09", c.local)
+            server.sendto(b"<3>EAPOL-4WAY-HS-COMPLETED 02:aa:00:00:00:09", c.local)
+            t0 = time.monotonic()
+            got = []
+            while True:
+                msg = c.recv_event()
+                if msg is None:
+                    break
+                got.append(wifi.parse_event(msg)[0])
+            # the socket's 2 s timeout must not apply: the daemon's main
+            # loop reads until nothing waits (it used to raise TimeoutError)
+            self.assertLess(time.monotonic() - t0, 0.5)
+            self.assertEqual(got, ["AP-STA-CONNECTED", "EAPOL-4WAY-HS-COMPLETED"])
+            # a request still waits for its answer
+            server.settimeout(2)
+
+            def answer():
+                data, addr = server.recvfrom(100)
+                server.sendto(b"OK\n" if data == b"PING" else b"FAIL\n", addr)
+
+            import threading
+
+            t = threading.Thread(target=answer)
+            t.start()
+            self.assertEqual(c.request("PING"), "OK\n")
+            t.join()
+            c.close()
+            server.close()
+        finally:
+            shutil.rmtree(d)
 
 
 class UsbGadget(unittest.TestCase):

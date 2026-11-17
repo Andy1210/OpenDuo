@@ -1,7 +1,7 @@
 From 8d1b4618f0f0883f921cc2c10eeb7136c6a4de6c Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 00:50:40 +0100
-Subject: [PATCH 068/137] media: qcom: camss: Add the TPG 1.0.2 of SM8350
+Subject: [PATCH 068/147] media: qcom: camss: Add the TPG 1.0.2 of SM8350
 
 Titan 580 (SM8350) has its two test pattern generators as separate TPG
 1.0.2 blocks (0xac97000, 0xac98000) in front of the CSI receivers. When

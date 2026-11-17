@@ -190,10 +190,7 @@ class Dock(Gtk.Window):
             return
         if info is None:
             return
-        try:
-            wc.request("expect_window", output=self.connector())
-        except (OSError, RuntimeError, ValueError) as e:
-            print("duo-shell: expect_window: %s" % e, flush=True)
+        self.shell.expect_window(self.connector(), item.desktop_id)
         try:
             info.launch([], self.get_display().get_app_launch_context())
             print(

@@ -199,8 +199,8 @@ const TABLE: &[(&str, &str, &str)] = &[
     ),
     (
         "pot.hint.smooth",
-        "Hover beside the clay to smooth it",
-        "Lebegtesd az agyag mellett: simítja",
+        "Smooth it: touch lightly, or hover beside the clay",
+        "Simítsd: érintsd finoman, vagy lebegtesd mellette",
     ),
     (
         "pot.hint.eraser",

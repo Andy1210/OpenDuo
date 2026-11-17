@@ -1,7 +1,7 @@
 From 3125e372eb5317b57a3e75a62de1eb5dc587bf63 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 01:27:44 +0100
-Subject: [PATCH 077/137] BRING-UP: arm64: dts: qcom:
+Subject: [PATCH 077/147] BRING-UP: arm64: dts: qcom:
  sm8350-microsoft-surface-duo2: Add all four cameras' endpoints
 
 Tele IMX481 on CSIPHY0 (768 MHz), wide IMX563 on CSIPHY2 (1248 MHz),

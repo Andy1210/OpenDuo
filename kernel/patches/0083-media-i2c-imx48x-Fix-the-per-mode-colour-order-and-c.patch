@@ -1,7 +1,7 @@
 From 0d8535c05abf0b248a1478bacf1f4e12accae3ac Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 07:46:08 +0100
-Subject: [PATCH 083/137] media: i2c: imx48x: Fix the per-mode colour order and
+Subject: [PATCH 083/147] media: i2c: imx48x: Fix the per-mode colour order and
  crop, limit the IMX563's gain
 
 The colour filter order was chosen by binning alone, GBRG for every

@@ -1,7 +1,7 @@
 From f31f0fcf142ad541d3e56a2e288c6014ba52d51e Mon Sep 17 00:00:00 2001
 From: Richard Acayan <mailingradian@gmail.com>
 Date: Mon, 11 Sep 2023 21:48:47 -0400
-Subject: [PATCH 095/137] ASoC: qdsp6: q6cvp: add commands in cvd 2.3
+Subject: [PATCH 095/147] ASoC: qdsp6: q6cvp: add commands in cvd 2.3
 
 The CVD 2.3 revision expects a different initialization sequence.
 Implement the commands to make this possible.

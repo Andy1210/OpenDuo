@@ -1,7 +1,7 @@
 From 3aa750e196dddd526e316699d4938da29ad8c362 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 00:45:41 +0100
-Subject: [PATCH 025/137] BRING-UP: soc: qcom: smp2p-sleepstate: Tell remote
+Subject: [PATCH 025/147] BRING-UP: soc: qcom: smp2p-sleepstate: Tell remote
  processors whether the APSS is awake
 
 Qualcomm's sensor DSP (SLPI) reads an outgoing SMP2P entry,

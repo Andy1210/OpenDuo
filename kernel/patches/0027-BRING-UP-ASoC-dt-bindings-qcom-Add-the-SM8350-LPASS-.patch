@@ -1,7 +1,7 @@
 From fbb625d5a164d841615ab6ed9af383fe82b1a562 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 03:00:00 +0100
-Subject: [PATCH 027/137] BRING-UP: ASoC: dt-bindings: qcom: Add the SM8350
+Subject: [PATCH 027/147] BRING-UP: ASoC: dt-bindings: qcom: Add the SM8350
  LPASS WSA/VA macros and sound card
 
 SM8350 (lahaina) has the SM8250 LPASS codec macro layout and runs the

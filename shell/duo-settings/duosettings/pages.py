@@ -13,6 +13,7 @@ from .main import (
     ask,
     combo_row,
     inform,
+    respond,
     run_async,
     run_with_input,
     select_quietly,
@@ -207,7 +208,7 @@ class WifiPage(Page):
 
         entry.connect("changed", changed)
         entry.connect(
-            "entry-activated", lambda _e: d.get_response_enabled("ok") and d.response("ok")
+            "entry-activated", lambda _e: d.get_response_enabled("ok") and respond(d, "ok")
         )
 
         def response(_d, r):

@@ -1,0 +1,45 @@
+From 0b83870f3fb8202a69e55601d5b29394f84f1a32 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Tue, 17 Nov 2026 13:42:50 +0100
+Subject: [PATCH 145/147] arm64: dts: qcom: sm8350-microsoft-surface-duo2: Take
+ the USB role from UCSI
+
+The USB-C port is run by the ADSP, which reports attach, detach and the
+data role over UCSI (pmic_glink). The connector's high-speed endpoint is
+already linked to the controller; make the controller dual-role with a
+role switch, as on the SM8350 HDK, so that UCSI drives it: device mode
+when a host is attached, nothing when the cable is pulled, host mode
+for a device.
+
+As a fixed peripheral the controller kept its VBUS override set and
+never saw a cable go away. On a Surface Duo 2 a host that was unplugged
+and plugged in again no longer saw the phone at all; only a reboot with
+the cable in brought USB device mode back.
+
+Host mode relies on the ADSP to source VBUS, as on the HDK; there is no
+VBUS regulator to describe.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts | 8 ++------
+ 1 file changed, 2 insertions(+), 6 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+index e5f183fbf13b..ac4af52c6963 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2.dts
+@@ -1745,12 +1745,8 @@ &ufs_mem_phy {
+ };
+ 
+ &usb_1 {
+-	/*
+-	 * Bring-up: fixed peripheral, so the USB console/network gadget does not
+-	 * wait for the ADSP's UCSI to hand out a role. Once pmic_glink is proven,
+-	 * this becomes dr_mode = "otg" + usb-role-switch.
+-	 */
+-	dr_mode = "peripheral";
++	dr_mode = "otg";
++	usb-role-switch;
+ 
+ 	status = "okay";
+ };

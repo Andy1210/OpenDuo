@@ -1,7 +1,7 @@
 From 010473adf7b3db7b654120526c34d0c556e2bb05 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 12:48:42 +0100
-Subject: [PATCH 125/137] drm/msm/dpu: Keep the command-mode ctl start count in
+Subject: [PATCH 125/147] drm/msm/dpu: Keep the command-mode ctl start count in
  step
 
 pending_ctlstart_cnt counts the CTL starts of a command-mode encoder that

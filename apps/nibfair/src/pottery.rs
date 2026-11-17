@@ -15,6 +15,9 @@
 use crate::tween::{lerp, smoothstep};
 
 pub const ROWS: usize = 96;
+/// Below this pressure (0..1) the tip polishes as it goes. Writing on the
+/// Duo 2 is around 0.3-0.5, so a light scrape counts.
+pub const POLISH_PRESSURE: f32 = 0.5;
 /// The pot's height in radius units.
 pub const HEIGHT: f32 = 2.4;
 pub const ROW_H: f32 = HEIGHT / ROWS as f32;
@@ -109,7 +112,8 @@ impl Wheel {
         let len = reach(t.tilt) / ROW_H;
         let p = t.pressure.clamp(0.0, 1.0);
         let rate = CUT_RATE * (0.15 + 0.85 * p) * dt;
-        let rougher = 1.5 * p + 0.6 * (t.speed / 1.5).min(1.0);
+        // A hard or fast cut roughs the surface; a light one hardly does.
+        let rougher = 1.5 * p * p + 0.4 * (t.speed / 1.5).min(1.0);
         let mut moved = 0.0;
         for j in self.rows_around(t.row, len + 1.0) {
             let h = (j as f32 - t.row) * ROW_H;
@@ -130,9 +134,9 @@ impl Wheel {
                 self.rough[j] = (self.rough[j] + amt * rougher * 3.0).min(1.0);
                 moved += amt;
             }
-            // A light touch polishes what it passes over.
-            if p < 0.25 && (self.r[j] - edge).abs() < 0.04 {
-                self.rough[j] *= 1.0 - (1.6 * dt * w).min(1.0);
+            // A light or medium touch polishes what it passes over.
+            if p < POLISH_PRESSURE && (self.r[j] - edge).abs() < 0.08 {
+                self.rough[j] *= 1.0 - (2.5 * dt * w).min(1.0);
             }
         }
         moved
@@ -428,6 +432,32 @@ mod tests {
             w.carve(&tool(50.0, 0.0, 1.0, 0.0), 1.0 / 60.0);
         }
         assert!(w.r.iter().all(|r| *r >= MIN_R - 1e-6));
+    }
+
+    #[test]
+    fn a_light_scrape_polishes() {
+        let mut w = Wheel::new();
+        for r in w.rough.iter_mut() {
+            *r = 0.6;
+        }
+        let before = w.roughness_at(48.0);
+        let edge = w.radius_at(48.0);
+        let t = Tool {
+            row: 48.0,
+            dist: edge - 0.01,
+            side: 1.0,
+            pressure: 0.35,
+            tilt: 0.0,
+            eraser: false,
+            speed: 0.2,
+        };
+        for _ in 0..60 {
+            w.carve(&t, 1.0 / 60.0);
+        }
+        assert!(
+            w.roughness_at(48.0) < before * 0.5,
+            "a light scrape smooths"
+        );
     }
 
     #[test]

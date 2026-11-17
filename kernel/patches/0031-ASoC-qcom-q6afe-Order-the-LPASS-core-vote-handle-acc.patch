@@ -1,7 +1,7 @@
 From 7b9d57efb830a1a7f170bd0399b5dc8042d4fc64 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 03:55:27 +0100
-Subject: [PATCH 031/137] ASoC: qcom: q6afe: Order the LPASS core vote handle,
+Subject: [PATCH 031/147] ASoC: qcom: q6afe: Order the LPASS core vote handle,
  accept the devote
 
 Since commit f3c7bee984aa ("ASoC: qcom: qdsp6: q6afe: fix clk vote

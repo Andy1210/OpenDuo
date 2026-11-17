@@ -18,7 +18,7 @@ from gi.repository import Gdk, Gio, GLib, Gtk, Pango
 from gi.repository import Gtk4LayerShell as LayerShell
 
 from . import apps as applist
-from . import launchermodel, penscroll, wc
+from . import launchermodel, penscroll
 from .i18n import _
 
 # The A-Z index keeps this far from the panel's right edge: a touch that
@@ -559,10 +559,7 @@ class AppGrid(Gtk.Window):
     def launch(self, app):
         output = self.connector()
         if output:
-            try:
-                wc.request("expect_window", output=output)
-            except (OSError, RuntimeError, ValueError) as e:
-                print("duo-shell: expect_window: %s" % e, flush=True)
+            self.shell.expect_window(output, app.app_id)
         context = self.get_display().get_app_launch_context()
         try:
             app.info.launch([], context)

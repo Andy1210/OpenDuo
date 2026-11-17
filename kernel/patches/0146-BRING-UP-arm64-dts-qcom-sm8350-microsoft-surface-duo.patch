@@ -1,0 +1,53 @@
+From a20de8f36062a4b04688855140e31916bfa4cdc9 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Tue, 17 Nov 2026 13:43:07 +0100
+Subject: [PATCH 146/147] BRING-UP: arm64: dts: qcom:
+ sm8350-microsoft-surface-duo2: Let variant J take the USB role from UCSI
+
+Variant J cut both graph links of the pmic_glink connector, so UCSI
+found no role switch and the controller stayed a device with the VBUS
+override set, whatever the cable did. Keep the high-speed link to the
+controller: UCSI then reports attach and detach as role changes, and
+the glue sets and clears the override. The SuperSpeed link to the QMP
+PHY stays cut (high speed only, no USB3 PHY in this variant).
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../sm8350-microsoft-surface-duo2-bringup-j.dts     | 13 +++----------
+ 1 file changed, 3 insertions(+), 10 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup-j.dts b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup-j.dts
+index 102fb6fefcb9..3d25ca470c0a 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup-j.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-microsoft-surface-duo2-bringup-j.dts
+@@ -8,8 +8,9 @@
+  *  - the display / DSI PHY rails always on (dropped again: the panel, DSI
+  *    and PHY drivers hold them now, and always on they stayed powered
+  *    with both panels off, in system sleep too)
+- *  - USB 2.0 only, fixed peripheral; the pmic_glink connector stays (battery,
+- *    charger, UCSI) but without the graph links to dwc3 / QMP for now
++ *  - USB 2.0 only; the pmic_glink connector stays (battery, charger,
++ *    UCSI) with its high-speed link to dwc3 (UCSI switches the USB role),
++ *    without the SuperSpeed link to the QMP PHY
+  *  - usb_2 off (usb30_sec_gdsc stuck off)
+  * PCIe0 / WiFi are back on. Not for upstream.
+  */
+@@ -32,18 +33,10 @@ &usb_1 {
+ 	phy-names = "usb2-phy";
+ };
+ 
+-&usb_1_dwc3_hs {
+-	/delete-property/ remote-endpoint;
+-};
+-
+ &usb_1_qmpphy_out {
+ 	/delete-property/ remote-endpoint;
+ };
+ 
+-&pmic_glink_hs_in {
+-	/delete-property/ remote-endpoint;
+-};
+-
+ &pmic_glink_ss_in {
+ 	/delete-property/ remote-endpoint;
+ };

@@ -1,7 +1,7 @@
 From 84fea62749edee2a9bc8311eb09956bc39cd751e Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 09:36:04 +0100
-Subject: [PATCH 110/137] BRING-UP: ASoC: qdsp6: q6voice: Trace the voice
+Subject: [PATCH 110/147] BRING-UP: ASoC: qdsp6: q6voice: Trace the voice
  services' messages
 
 trace (module parameter, off by default): every command sent to the voice

@@ -1,7 +1,7 @@
 From db4bef8eb47f04701bf8db4a8e8d3fc693d111a5 Mon Sep 17 00:00:00 2001
 From: Vincent Knecht <vincent.knecht@mailoo.org>
 Date: Wed, 6 Oct 2021 18:21:21 +0200
-Subject: [PATCH 093/137] ASoC: qdsp6: q6voice-dai: Add controls for voice rx
+Subject: [PATCH 093/147] ASoC: qdsp6: q6voice-dai: Add controls for voice rx
  and tx ports
 
 Add ALSA controls for voice RX and TX ports.

@@ -1,7 +1,7 @@
 From 1f431df951a05ffca7dde5d2e94abcbfb703dcbb Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Fri, 6 Nov 2026 15:01:28 +0100
-Subject: [PATCH 017/137] arm64: dts: qcom: sm8350-microsoft-surface-duo2:
+Subject: [PATCH 017/147] arm64: dts: qcom: sm8350-microsoft-surface-duo2:
  Enable the PMIC RTC
 
 The PMK8350 RTC and its alarm wake the phone from suspend (the stock

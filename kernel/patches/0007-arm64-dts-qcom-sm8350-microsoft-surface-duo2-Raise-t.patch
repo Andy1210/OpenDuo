@@ -1,7 +1,7 @@
 From bb186e57bcf909e59f3947d25f581463e65b51c2 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Fri, 6 Nov 2026 00:05:25 +0100
-Subject: [PATCH 007/137] arm64: dts: qcom: sm8350-microsoft-surface-duo2:
+Subject: [PATCH 007/147] arm64: dts: qcom: sm8350-microsoft-surface-duo2:
  Raise the S11B maximum to the stock 1.012 V
 
 Same trap as S2E: a max below the bootloader's voltage makes the core pull

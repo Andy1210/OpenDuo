@@ -1,7 +1,7 @@
 From 0e7d819683194d98e764ae0e90befc4c528ac13f Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 11:15:40 +0100
-Subject: [PATCH 115/137] dt-bindings: remoteproc: qcom,glink-edge: Add
+Subject: [PATCH 115/147] dt-bindings: remoteproc: qcom,glink-edge: Add
  wakeup-source
 
 A GLINK edge's remote processor may say things the system has to wake

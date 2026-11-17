@@ -45,6 +45,22 @@ def call_wants_sensor(call_states, speaker):
     return any(s in HOLD_STATES for s in call_states) and speaker is not True
 
 
+def sensor_recheck(call_wants, has_sensor, asked):
+    """Whether to ask iio-sensor-proxy again whether it has a proximity
+    sensor: a call wants one, the last answer said there is none, and this
+    call has not asked yet. The proxy tells only the clients holding a claim
+    when its sensors appear, so an answer read while it was still starting
+    (it comes up a minute after the shell) is never corrected by itself."""
+    return bool(call_wants and not has_sensor and not asked)
+
+
+def describe(call_states, speaker, has_sensor):
+    """One log line for what the sensor decision is made from."""
+    states = ",".join(str(s) for s in sorted(call_states)) or "none"
+    route = {True: "loudspeaker", False: "earpiece", None: "unknown"}[speaker]
+    return "calls %s, route %s, sensor %s" % (states, route, "yes" if has_sensor else "no")
+
+
 def call_panels(windows, candidates):
     """The panels the call is on: those of the Calls windows that are not
     minimized (a span covers every candidate), else every candidate.

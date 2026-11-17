@@ -6,7 +6,7 @@
 kernel-compatible SPDX identifier, that one applies. Patches by other
 authors (class 3 below) keep their authors' terms.
 
-OpenDuo's kernel is Linux **v7.3.4** (stable) plus the 137 patches in this
+OpenDuo's kernel is Linux **v7.3.4** (stable) plus the 147 patches in this
 directory, in order. They are exported from the `duo2` branch of the kernel
 tree:
 
@@ -16,14 +16,20 @@ git -C <linux v7.3.4 checkout> am kernel/patches/*.patch      # to apply them
 ```
 
 `duo2` is `duo2-clean` plus the SM8350 Inline Crypto Engine (`0135`, `0136`,
-2026-11-16, promoted as `7.3.4-duo2-g9787c2186`) and one vendor-driver
-fix (`0137`, 2026-11-17, not yet built into a promoted kernel). `duo2-clean` is the
+2026-11-16, promoted as `7.3.4-duo2-g9787c2186`), one vendor-driver fix
+(`0137`), and two sets of fixes tried on the phone on 2026-11-17: the video
+decoder's error handling (`0138`-`0140`: a crashed video firmware is restarted
+instead of leaving the decoder stuck until the next boot) and USB device mode
+across unplug and replug (`0141`-`0147`: the controller follows the USB role
+that UCSI reports and starts afresh on every attach). `0137`-`0147` are first
+built together in `7.3.4-duo2-g332f1f219`. `duo2-clean` is the
 bring-up series of the kernel promoted on 2026-11-15 (`7.3.4-duo2-g3ba7db140`)
 with the same code: its commit messages rewritten in upstream style and
 checkpatch's style findings fixed (whitespace, alignment, comments; the vendor
 HID-over-SPI driver formatted with the kernel's `.clang-format`).
 `git diff 3ba7db140 duo2-clean` holds only those changes; the third-party
-patches (class 3) are byte for byte as taken. `0135` and `0136` still carry
+patches (class 3) are byte for byte as taken (`0138` is a cherry-pick from
+linux-next). `0135` and `0136` still carry
 `Co-Authored-By:` (the others: `Assisted-by: Claude:claude-opus-5-5`): to be
 changed before they are sent, not in the tree (the release string names the
 commit).
@@ -32,9 +38,9 @@ commit).
 
 | Class | Meaning | Patches |
 | --- | --- | --- |
-| 1 | Upstreamable driver, binding or DT change (as it is, or after the work in the notes) | 82 |
-| 2 | `BRING-UP:` device-local workaround, diagnostic or vendor code; not for upstream as it is (every such subject starts with `BRING-UP:`) | 33 |
-| 3 | Backport or cherry-pick of someone else's posted or out-of-tree work | 21 |
+| 1 | Upstreamable driver, binding or DT change (as it is, or after the work in the notes) | 89 |
+| 2 | `BRING-UP:` device-local workaround, diagnostic or vendor code; not for upstream as it is (every such subject starts with `BRING-UP:`) | 36 |
+| 3 | Backport or cherry-pick of someone else's posted or out-of-tree work | 22 |
 
 The **Upstream** column says what to do with it:
 
@@ -64,10 +70,14 @@ The smallest, clearest fixes to upstream code, each standing alone:
 12. `0131`, `0132` wifi: ath11k regulatory fixes
 13. `0134` leds: flash: leds-qcom-flash torch resolution
 14. `0127` drm/msm/dsi/phy: Unprepare the interface clock across system sleep
+15. `0139`, `0140` media: iris: the HFI Gen1 error-state fixes
+16. `0141`, `0144` usb: dwc3: the qcom glue fixes (reset after remove, the VBUS override)
 
 Then the RFCs that change behaviour for other boards too: `0020` and `0117`
-(PCI: qcom), `0112` (drm/msm command-mode enable), and the qrtr wakeup set
-(`0115`, `0123`, `0128`). The GPU recovery fixes `0039`-`0041` follow
+(PCI: qcom), `0112` (drm/msm command-mode enable), the qrtr wakeup set
+(`0115`, `0123`, `0128`), `0142` (the flattened SM8350 USB nodes, which the
+HDK, MTP and Xperia boards share) and `0147` (dwc3-qcom powers a controller
+behind a role switch down while nothing is attached). The GPU recovery fixes `0039`-`0041` follow
 `0038` (Nico Angelo Dela Cruz's posted fix they build on).
 
 ## Where the backports come from
@@ -77,10 +87,12 @@ Then the RFCs that change behaviour for other boards too: `0020` and `0117`
 | 0012 | The OnePlus 9 Pro port (author bluelightsaber; no Signed-off-by), after Dmitry Baryshkov's "wifi: ath11k: enable support for WCN6851" (lkml, June 2026): replace it with that series once merged |
 | 0038 | Nico Angelo Dela Cruz, freedreno, 2026-11-02, 1/4 of "drm/msm: fix GPU recovery deadlocks, add a8xx crash dumps" (https://lore.kernel.org/all/20261101175553.53746-2-nicoangelodelacruz@gmail.com/), backported to v7.3 |
 | 0045 | Fenglin Wu, linux-input, "input: misc: Add Qualcomm SPMI PMIC haptics driver" RESEND v7 2/2 (https://patchwork.kernel.org/project/linux-input/patch/20261103-qcom-spmi-haptics-v7-2-418de67ef84a@oss.qualcomm.com/), as posted |
+| 0138 | Hungyu Lin, "media: iris: cancel sys error work on driver removal", in linux-next as 4524809316482b64ff092afb7e7b0525ce137c75 (Bryan O'Donoghue's tree), cherry-picked as it is |
 | 0086-0103 | The out-of-tree q6voice series as collected in sc7280-mainline/linux PR #35 (postmarketOS): Stephan Gerhold's msm8916-mainline commits (`0086`-`0093`, cherry-pick ids in the messages), Otto Pflüger's VoiceMMode1 (`0094`, msm8953-mainline), Richard Acayan's CVD 2.3 and API updates (`0095`-`0101`), Bhushan Shah's (`0102`) and Val Packett's (`0103`) |
 
 Unapplied work in progress lives in `kernel/drafts/` (GPU, video codec, pen
-charger).
+charger). The video drafts `0006` and `0009` are applied now, as `0138` and
+`0139`.
 
 ## Before sending anything
 
@@ -280,3 +292,13 @@ What is left, and why:
 | 0135 | 1 | dt-bindings: crypto: ice | Document the SM8350 Inline Crypto Engine | series | with 0136 |
 | 0136 | 1 | arm64: dts: qcom: sm8350 | Add the UFS Inline Crypto Engine | series | with 0135; on the Surface Duo 2: ICE v3.2.0, raw keys (the HWKM is not usable), AES-256-XTS for fscrypt with -o inlinecrypt; what it writes reads back through blk-crypto-fallback (standard XTS) |
 | 0137 | 2 | HID: spi-hid | Do not return from perf_mode_store with the lock held | no | Microsoft's vendor HID-over-SPI driver (fixes 0022's sysfs store: a non-number left input_lock held with IRQs off) |
+| 0138 | 3 | media: iris | cancel sys error work on driver removal (Hungyu Lin) | track | in linux-next (4524809316482b64ff092afb7e7b0525ce137c75); drop once it reaches the stable tree the series is based on |
+| 0139 | 1 | media: iris | Give buffers back as QUEUED when start_streaming() fails in the error state | first | the vb2 done-list warning after an undecodable stream (10-bit, interlaced) on the Gen1 decoder |
+| 0140 | 1 | media: iris | Treat a watchdog interrupt on HFI Gen1 as a system error | first | a crashed firmware is rebooted as on Gen2; before, the decoder stayed dead and runtime PM failed every autosuspend until the next boot |
+| 0141 | 1 | usb: dwc3: qcom-legacy | Don't leave the controller in reset after remove | first | an unbind left the GDSC unable to power on again |
+| 0142 | 1 | arm64: dts: qcom: sm8350 | Flatten the USB controller nodes | series | touches the HDK, MTP and Xperia boards too (test on one of them); with 0145 |
+| 0143 | 2 | arm64: dts: qcom: sm8350-microsoft-surface-duo2 | Follow the flattened USB node | no | bring-up DTB variant / USB console workaround |
+| 0144 | 1 | usb: dwc3: qcom | Keep the VBUS override clear unless the role is device | first |  |
+| 0145 | 1 | arm64: dts: qcom: sm8350-microsoft-surface-duo2 | Take the USB role from UCSI | series | board DT series; needs 0142 (and 0144, 0147 for replugs to work) |
+| 0146 | 2 | arm64: dts: qcom: sm8350-microsoft-surface-duo2 | Let variant J take the USB role from UCSI | no | bring-up DTB variant / USB console workaround |
+| 0147 | 1 | usb: dwc3: qcom | Power the controller down while the role switch reports no partner | first | after 0144; RFC to linux-usb (changes runtime PM for every dwc3-qcom behind a role switch) |

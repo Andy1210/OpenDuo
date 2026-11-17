@@ -1,7 +1,7 @@
 From 4734e6ff070535d518264b9facd78ebe49aa614b Mon Sep 17 00:00:00 2001
 From: bluelightsaber <bluelightsaber@users.noreply.github.com>
 Date: Fri, 9 Oct 2026 14:44:17 +0200
-Subject: [PATCH 012/137] wifi: ath11k: add WCN6855 hw1.1 (WCN6851 / QCA6490
+Subject: [PATCH 012/147] wifi: ath11k: add WCN6855 hw1.1 (WCN6851 / QCA6490
  v1) support
 
 Follows Dmitry Baryshkov s "wifi: ath11k: enable support for WCN6851" (lkml, June 2026): copy of the

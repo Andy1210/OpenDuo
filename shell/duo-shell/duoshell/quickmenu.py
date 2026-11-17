@@ -28,6 +28,11 @@ window's text field keeps the focus). Top to bottom:
 - the notifications, newest first: swipe one sideways to dismiss it, tap it
   for its default action; "Clear all".
 
+A long press on a tile with a Settings page (quickpages.py: WiFi, Bluetooth,
+Hotspot, Mobile data -> SIM card ...) closes the menu and opens Duo Settings
+on that page, also on a greyed tile (Mobile data without a SIM); a short
+press is the tile's toggle.
+
 Opened by a swipe down from the top edge (duo-wc's gesture, also over a
 fullscreen app), dragging down on the status bar or tapping its status
 icons, or by root's OpenQuickMenu on the system bus (shellbus.py: tests and
@@ -48,6 +53,7 @@ from . import (
     laptopmodel,
     mobilemodel,
     penscroll,
+    quickpages,
     system,
     timefmt,
     torchmodel,
@@ -75,6 +81,41 @@ def tile_grid(tiles, columns=COLUMNS):
     return grid
 
 
+def tile_at(grid, x, y):
+    """The tile under (x, y) in the grid's coordinates, greyed ones too."""
+    w = grid.pick(x, y, Gtk.PickFlags.INSENSITIVE)
+    while w is not None and w is not grid:
+        if isinstance(w, Tile):
+            return w
+        w = w.get_parent()
+    return None
+
+
+def hold_opens_pages(grid, on_hold):
+    """A long press on a tile with a Settings page: on_hold(tile, page).
+    The gesture sits on the grid, not on each tile: a greyed (insensitive)
+    tile gets no events of its own, and Mobile data without a SIM should
+    still lead to the SIM page. It claims the touch when it fires, which
+    cancels the tile's click; on a tile without a page it steps aside and
+    the press is a tap. GTK's long-press time, as the app grid's."""
+    hold = Gtk.GestureLongPress()
+    hold.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+
+    def pressed(gesture, x, y):
+        tile = tile_at(grid, x, y)
+        page = quickpages.page_for(tile.key) if tile is not None else None
+        if page is None:
+            gesture.set_state(Gtk.EventSequenceState.DENIED)
+            return
+        gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+        tile.held_at = GLib.get_monotonic_time() / 1e6
+        on_hold(tile, page)
+
+    hold.connect("pressed", pressed)
+    grid.add_controller(hold)
+    return hold
+
+
 def _wrapping(label):
     """A tile's line: wraps (between words, inside a word only when one
     word does not fit) to at most two lines, then ellipsizes."""
@@ -85,8 +126,10 @@ def _wrapping(label):
 
 
 class Tile(Gtk.Button):
-    def __init__(self, icon, title, callback):
+    def __init__(self, icon, title, callback, key=None):
         super().__init__()
+        self.key = key  # quickpages.TILE_PAGES
+        self.held_at = None
         self.add_css_class("tile")
         self.set_can_focus(False)
         self.set_focus_on_click(False)
@@ -116,7 +159,14 @@ class Tile(Gtk.Button):
         box.append(text)
         self.set_child(box)
         self.update_property([Gtk.AccessibleProperty.LABEL], [title])
-        self.connect("clicked", lambda _b: callback())
+        self.connect("clicked", lambda _b: self._clicked(callback))
+
+    def _clicked(self, callback):
+        # the end of a long press that opened Settings is no tap
+        held, self.held_at = self.held_at, None
+        if quickpages.swallow_click(held, GLib.get_monotonic_time() / 1e6):
+            return
+        callback()
 
     def show(self, on, sub, icon=None):
         if on:
@@ -180,67 +230,79 @@ class QuickMenu(Gtk.Window):
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         content.add_css_class("content")
 
-        self.wifi = Tile("network-wireless-symbolic", _("WiFi"), self.toggle_wifi)
-        self.bt = Tile("bluetooth-active-symbolic", _("Bluetooth"), self.toggle_bt)
-        self.rotate = Tile("rotation-allowed-symbolic", _("Auto-rotate"), self.toggle_rotate)
-        self.keyboard = Tile("input-keyboard-symbolic", _("Keyboard"), self.toggle_keyboard)
-        self.gap = Tile("view-dual-symbolic", _("Hinge gap"), self.toggle_gap)
-        self.windows = Tile("focus-windows-symbolic", _("Windows"), self.open_overview)
+        self.wifi = Tile("network-wireless-symbolic", _("WiFi"), self.toggle_wifi, "wifi")
+        self.bt = Tile("bluetooth-active-symbolic", _("Bluetooth"), self.toggle_bt, "bluetooth")
+        self.rotate = Tile(
+            "rotation-allowed-symbolic", _("Auto-rotate"), self.toggle_rotate, "rotate"
+        )
+        self.keyboard = Tile(
+            "input-keyboard-symbolic", _("Keyboard"), self.toggle_keyboard, "keyboard"
+        )
+        self.gap = Tile("view-dual-symbolic", _("Hinge gap"), self.toggle_gap, "gap")
+        self.windows = Tile("focus-windows-symbolic", _("Windows"), self.open_overview, "windows")
         # Which panels are used: both (the sensors decide), or one only.
-        self.panels = Tile("video-display-symbolic", _("Panels"), self.toggle_panels)
+        self.panels = Tile("video-display-symbolic", _("Panels"), self.toggle_panels, "panels")
         # Laptop mode (duo-wc: one panel a desk, the other a keyboard and a touchpad).
-        self.laptop = Tile(laptopmodel.ICON, _("Laptop mode"), self.toggle_laptop)
+        self.laptop = Tile(laptopmodel.ICON, _("Laptop mode"), self.toggle_laptop, "laptop")
         # A display plugged in: a desk or the phone's mirror (displaymodel;
         # only while one is connected).
-        self.display = Tile("video-display-symbolic", _("Display"), self.toggle_display)
+        self.display = Tile("video-display-symbolic", _("Display"), self.toggle_display, "display")
         self.display.set_visible(False)
         # Mobile data (duo2-wwan honours the switch; a locked SIM: its PIN).
-        self.data = Tile("network-cellular-symbolic", _("Mobile data"), self.toggle_data)
+        self.data = Tile("network-cellular-symbolic", _("Mobile data"), self.toggle_data, "data")
         # The hotspot (duo2-hotspot; its state file, watched while shown).
-        self.hotspot = Tile(hotspotmodel.ICON, _("Hotspot"), self.toggle_hotspot)
+        self.hotspot = Tile(hotspotmodel.ICON, _("Hotspot"), self.toggle_hotspot, "hotspot")
         self._hotspot_error = None
         self._hotspot_watch = hotspot.Watch(lambda: self.get_visible() and self.refresh())
         # Airplane mode (the helper blocks WiFi + Bluetooth, duo2-wwan the modem).
-        self.airplane = Tile(mobilemodel.AIRPLANE_ICON, _("Airplane mode"), self.toggle_airplane)
+        self.airplane = Tile(
+            mobilemodel.AIRPLANE_ICON, _("Airplane mode"), self.toggle_airplane, "airplane"
+        )
         # Location (the shell is geoclue's agent: off, no app learns where
         # the phone is, and the GNSS engine stays off).
         self.location = Tile(
-            "location-services-active-symbolic", _("Location"), self.toggle_location
+            "location-services-active-symbolic", _("Location"), self.toggle_location, "location"
         )
         # The sound mode (feedbackd's profile and strength: the ringtone, the
         # message sounds, the vibrations; a tap is the next of the four).
         self.vibration = Tile(
-            hapticsmodel.MODE_ICONS[hapticsmodel.SOUND_VIBRATION], _("Sound"), self.toggle_vibration
+            hapticsmodel.MODE_ICONS[hapticsmodel.SOUND_VIBRATION],
+            _("Sound"),
+            self.toggle_vibration,
+            "sound",
         )
         # Do not disturb (dnd.py: GNOME's show-banners, Calls' ringer).
-        self.dnd = Tile("notifications-disabled-symbolic", _("Do not disturb"), self.toggle_dnd)
+        self.dnd = Tile(
+            "notifications-disabled-symbolic", _("Do not disturb"), self.toggle_dnd, "dnd"
+        )
         # The flashlight (torchmodel.py: the camera's flash LED through the
         # kernel's LED class; read every second while the menu shows).
-        self.torch = Tile(torchmodel.ICON_OFF, _("Flashlight"), self.toggle_torch)
+        self.torch = Tile(torchmodel.ICON_OFF, _("Flashlight"), self.toggle_torch, "torch")
         self._torch_led = torchmodel.find()
         self._torch_timer = None
-        content.append(
-            tile_grid(
-                (
-                    self.wifi,
-                    self.data,
-                    self.hotspot,
-                    self.bt,
-                    self.airplane,
-                    self.location,
-                    self.vibration,
-                    self.dnd,
-                    self.torch,
-                    self.rotate,
-                    self.keyboard,
-                    self.gap,
-                    self.panels,
-                    self.laptop,
-                    self.windows,
-                    self.display,
-                )
+        grid = tile_grid(
+            (
+                self.wifi,
+                self.data,
+                self.hotspot,
+                self.bt,
+                self.airplane,
+                self.location,
+                self.vibration,
+                self.dnd,
+                self.torch,
+                self.rotate,
+                self.keyboard,
+                self.gap,
+                self.panels,
+                self.laptop,
+                self.windows,
+                self.display,
             )
         )
+        # A long press: the tile's Settings page (quickpages.py).
+        hold_opens_pages(grid, lambda _tile, page: self.open_settings(page))
+        content.append(grid)
 
         self.brightness = None
         if system.has_backlight():
@@ -369,18 +431,35 @@ class QuickMenu(Gtk.Window):
             self._torch_timer = GLib.timeout_add(TORCH_POLL_MS, self._torch_poll)
         self.shell.quick_changed()
 
-    def open_settings(self):
+    def open_settings(self, page=None):
         """Duo Settings (shell/duo-settings) on this panel, like the app grid
-        starts an app: the next window here, then a launch with a token."""
+        starts an app: the next window here, then a launch with a token (a
+        running Settings comes forward). With a page (a tile's long press):
+        `duo-settings PAGE`, the desktop file's program with the page, with
+        the same launch context, as its own actions (Battery) do."""
         info = Gio.DesktopAppInfo.new("org.duo2os.Settings.desktop")
         if info is None:
             return
+        app = info
+        if page:
+            cmd = quickpages.commandline(info.get_executable(), page)
+            try:
+                app = Gio.AppInfo.create_from_commandline(
+                    cmd,
+                    info.get_name(),
+                    Gio.AppInfoCreateFlags.SUPPORTS_STARTUP_NOTIFICATION,
+                )
+            except (GLib.Error, TypeError) as e:
+                print("duo-shell: Settings %s: %s" % (page, e), flush=True)
+                app = info
         try:
             wc.request("expect_window", output=self.monitor.get_connector())
         except (OSError, RuntimeError, ValueError) as e:
             print("duo-shell: expect_window: %s" % e, flush=True)
         try:
-            info.launch([], self.get_display().get_app_launch_context())
+            app.launch([], self.get_display().get_app_launch_context())
+            if page:
+                print("duo-shell: Settings on its %s page" % page, flush=True)
         except GLib.Error as e:
             print("duo-shell: Settings: %s" % e.message, flush=True)
         self.close_menu()

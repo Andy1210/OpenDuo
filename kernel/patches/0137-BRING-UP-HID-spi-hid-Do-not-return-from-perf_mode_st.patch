@@ -1,7 +1,7 @@
 From 3f61fb4a7a051af666230eada7b50cfc31c88444 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Tue, 17 Nov 2026 01:31:21 +0100
-Subject: [PATCH 137/137] BRING-UP: HID: spi-hid: Do not return from
+Subject: [PATCH 137/147] BRING-UP: HID: spi-hid: Do not return from
  perf_mode_store with the lock held
 
 spi_hid_perf_mode_store() took input_lock with spin_lock_irqsave() and then

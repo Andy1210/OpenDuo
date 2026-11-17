@@ -1,7 +1,7 @@
 From 753d0e5be5bf5a101bdfe403f02419d7c9f9e6c2 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Fri, 13 Nov 2026 17:13:27 +0100
-Subject: [PATCH 133/137] arm64: dts: qcom: sm8350-microsoft-surface-duo2:
+Subject: [PATCH 133/147] arm64: dts: qcom: sm8350-microsoft-surface-duo2:
  Enable the camera flash LED
 
 The rear camera flash LED is driven by the PM8350C flash LED module, on

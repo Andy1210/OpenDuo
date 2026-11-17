@@ -1,7 +1,7 @@
 From 3267a27138f8c1887585b94d7d0767626d4cd57e Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 22:00:45 +0100
-Subject: [PATCH 117/137] PCI: qcom: Keep the link in system suspend while an
+Subject: [PATCH 117/147] PCI: qcom: Keep the link in system suspend while an
  endpoint may wake it
 
 With every endpoint in D3hot, dw_pcie_suspend_noirq() sends

@@ -1,7 +1,7 @@
 From 6d3cf279235720545483626954d233e72341912e Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 01:59:54 +0100
-Subject: [PATCH 082/137] media: i2c: imx48x: Retry the identification, defer
+Subject: [PATCH 082/147] media: i2c: imx48x: Retry the identification, defer
  on a busy CCI
 
 At boot the four sensors and the two EEPROMs probe at the same time on

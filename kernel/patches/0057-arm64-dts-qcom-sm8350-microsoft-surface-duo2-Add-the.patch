@@ -1,7 +1,7 @@
 From ab344bb9f7a4aedfadb2fe1168ee04b3d9d7c930 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 05:55:48 +0100
-Subject: [PATCH 057/137] arm64: dts: qcom: sm8350-microsoft-surface-duo2: Add
+Subject: [PATCH 057/147] arm64: dts: qcom: sm8350-microsoft-surface-duo2: Add
  the camera PMICs
 
 The four cameras take their analog, digital and I/O rails from two

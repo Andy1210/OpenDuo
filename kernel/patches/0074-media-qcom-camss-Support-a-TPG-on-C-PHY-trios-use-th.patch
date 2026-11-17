@@ -1,7 +1,7 @@
 From 02a57c7bd16633fab24f3c85a2e91e388494de55 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 01:19:23 +0100
-Subject: [PATCH 074/137] media: qcom: camss: Support a TPG on C-PHY trios, use
+Subject: [PATCH 074/147] media: qcom: camss: Support a TPG on C-PHY trios, use
  three on SM8350
 
 A TPG resource can now say that its lanes are C-PHY trios: a CSID linked

@@ -1,7 +1,7 @@
 From 8fd239f842fbbf959119975675ffbbac0e15a4e3 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Thu, 5 Nov 2026 23:56:22 +0100
-Subject: [PATCH 005/137] BRING-UP: arm64: dts: qcom:
+Subject: [PATCH 005/147] BRING-UP: arm64: dts: qcom:
  sm8350-microsoft-surface-duo2: Add variant H without PCIe
 
 pcie-qcom probes right after the LED triggers, enables L5B and L6B

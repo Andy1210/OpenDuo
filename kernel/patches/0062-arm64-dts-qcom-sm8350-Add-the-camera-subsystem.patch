@@ -1,7 +1,7 @@
 From 86481e9f50ba593a96325ef22dfb483f56a9bfb7 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 06:08:08 +0100
-Subject: [PATCH 062/137] arm64: dts: qcom: sm8350: Add the camera subsystem
+Subject: [PATCH 062/147] arm64: dts: qcom: sm8350: Add the camera subsystem
 
 Describe CAMSS (Titan 580) with the addresses and interrupts of the
 vendor device tree: six CSIPHYs (the fifth on GIC SPI 122, not 86 as on

@@ -1,7 +1,7 @@
 From 7b0f6ab076f036497adabd801e23c13dc0bdc768 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 11:15:28 +0100
-Subject: [PATCH 123/137] net: qrtr: Wake the system on selected messages of a
+Subject: [PATCH 123/147] net: qrtr: Wake the system on selected messages of a
  wakeup-source remote
 
 A modem's GLINK interrupt is delivered in suspend-to-idle, but nothing

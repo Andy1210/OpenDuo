@@ -1133,7 +1133,7 @@ impl DuoWc {
             return;
         }
         self.overview_close("new window");
-        let Some((output, launched)) = self.output_for_new_window() else {
+        let Some((output, hint)) = self.output_for_new_window() else {
             warn!("an X11 window arrived before any output; it will not be shown");
             return;
         };
@@ -1169,7 +1169,7 @@ impl DuoWc {
         );
         window
             .user_data()
-            .insert_if_missing(|| crate::state::WindowData::new(id, placement, saved, foreign, launched));
+            .insert_if_missing(|| crate::state::WindowData::new(id, placement, saved, foreign, hint));
         self.space.map_element(window.clone(), loc, true);
         self.place(&window);
         if self.is_dialog(&window) {

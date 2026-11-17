@@ -97,8 +97,23 @@ def fmt_bytes(n):
     return "%.1f TB" % n
 
 
+def password_problem(p):
+    """None for a password the helper takes (a WPA passphrase: 8 to 63
+    printable ASCII characters), else what is wrong with it: "chars" (an
+    accent, a tab ...: hostapd would refuse it), "short" or "long"."""
+    if not isinstance(p, str):
+        return "short"
+    if any(not 0x20 <= ord(c) <= 0x7E for c in p):
+        return "chars"
+    if len(p) < 8:
+        return "short"
+    if len(p) > 63:
+        return "long"
+    return None
+
+
 def valid_password(p):
-    return isinstance(p, str) and 8 <= len(p) <= 63 and all(0x20 <= ord(c) <= 0x7E for c in p)
+    return password_problem(p) is None
 
 
 def valid_ssid(s):

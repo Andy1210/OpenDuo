@@ -1,0 +1,68 @@
+From 6482ea625a0a8effb4fc8f1eed3529e0e9de9d70 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Tue, 17 Nov 2026 13:42:26 +0100
+Subject: [PATCH 144/147] usb: dwc3: qcom: Keep the VBUS override clear unless
+ the role is device
+
+The QSCRATCH VBUS override is what tells the controller about a device
+session; dwc3-qcom sets and clears it from the pre_set_role and
+pre_run_stop glue hooks. Two cases leave it set with no host attached:
+
+- dwc3_qcom_set_role_notifier() decides from the role it leaves, not
+  the one it enters, so host -> none (and none -> host) set the
+  override.
+- dwc3_qcom_run_stop_notifier() sets it on every pullup, so binding a
+  UDC from userspace after the role switch reported "none" (a gadget
+  rebound around system sleep, a function added to a configfs gadget)
+  sets it again.
+
+With the override set and no cable, the controller keeps D+ pulled up
+on an empty port and treats a later attach as a continuation of the old
+session: there is no disconnect and no new connect. Set the override
+exactly when the role becomes device, and let a pullup restore it only
+while the role is device. Until the role switch first reports, the role
+is device (as before), so a gadget bound early in boot still connects.
+
+dr_mode "peripheral" is unchanged: its role is device from probe on.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/usb/dwc3/dwc3-qcom.c | 17 +++++++++++------
+ 1 file changed, 11 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/usb/dwc3/dwc3-qcom.c b/drivers/usb/dwc3/dwc3-qcom.c
+index ac68b4218b56..1e4d0471ce0f 100644
+--- a/drivers/usb/dwc3/dwc3-qcom.c
++++ b/drivers/usb/dwc3/dwc3-qcom.c
+@@ -570,10 +570,12 @@ static void dwc3_qcom_set_role_notifier(struct dwc3 *dwc, enum usb_role next_rol
+ 		return;
+ 	}
+ 
+-	if (qcom->current_role == USB_ROLE_DEVICE)
+-		dwc3_qcom_vbus_override_enable(qcom, false);
+-	else if (qcom->current_role != USB_ROLE_DEVICE)
+-		dwc3_qcom_vbus_override_enable(qcom, true);
++	/*
++	 * The controller sees a session only while it is a device: a role
++	 * switch to "none" is the cable going away, and clearing the override
++	 * is what makes the controller report the disconnect.
++	 */
++	dwc3_qcom_vbus_override_enable(qcom, next_role == USB_ROLE_DEVICE);
+ 
+ 	pm_runtime_mark_last_busy(qcom->dev);
+ 	pm_runtime_put_sync(qcom->dev);
+@@ -593,9 +595,12 @@ static void dwc3_qcom_run_stop_notifier(struct dwc3 *dwc, bool is_on)
+ 	 * When autosuspend is enabled and controller goes to suspend
+ 	 * after removing UDC from userspace, the next UDC write needs
+ 	 * setting of QSCRATCH VBUS_VALID to "1" to generate a connect
+-	 * done event.
++	 * done event. Only do so while the role is "device": with no
++	 * cable the override must stay clear until the role switch
++	 * reports a host, or the controller pulls D+ up on an empty
++	 * port and never sees the next attach as a new session.
+ 	 */
+-	if (!is_on)
++	if (!is_on || qcom->current_role != USB_ROLE_DEVICE)
+ 		return;
+ 
+ 	dwc3_qcom_vbus_override_enable(qcom, true);

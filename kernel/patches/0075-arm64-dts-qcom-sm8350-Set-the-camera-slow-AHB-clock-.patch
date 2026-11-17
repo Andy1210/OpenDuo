@@ -1,7 +1,7 @@
 From a4a6f3e29205de5d2b027fdb51585a785378ff7e Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 01:19:44 +0100
-Subject: [PATCH 075/137] arm64: dts: qcom: sm8350: Set the camera slow AHB
+Subject: [PATCH 075/147] arm64: dts: qcom: sm8350: Set the camera slow AHB
  clock rate
 
 The vendor camera driver runs the camera slow AHB clock at 80 MHz at

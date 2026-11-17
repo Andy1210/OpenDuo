@@ -1,7 +1,7 @@
 From e522672ae4ce2de84b7b67940bf9895cd5b8a616 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 04:57:48 +0100
-Subject: [PATCH 035/137] net: qrtr: ns: Retry the announcement to a node that
+Subject: [PATCH 035/147] net: qrtr: ns: Retry the announcement to a node that
  cannot receive it yet
 
 The core sends its HELLO to a new endpoint from a work item, which

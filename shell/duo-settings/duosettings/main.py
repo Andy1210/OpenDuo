@@ -8,7 +8,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
 from . import penscroll  # noqa: E402
 
@@ -152,8 +152,51 @@ def set_quietly(row, active):
     row._quiet = False
 
 
+# A value up to this many characters is never cut short beside a combo row's
+# title; a longer one (a sound device's name) may ellipsize past it.
+VALUE_CHARS = 24
+
+
+def _value_setup(_factory, item):
+    label = Gtk.Label(xalign=0, valign=Gtk.Align.CENTER)
+    item.set_child(label)
+
+
+def _value_bind(_factory, item):
+    label = item.get_child()
+    obj = item.get_item()
+    text = obj.get_string() if hasattr(obj, "get_string") else str(obj or "")
+    label.set_label(text)
+    if len(text) <= VALUE_CHARS:
+        label.set_ellipsize(Pango.EllipsizeMode.NONE)
+        label.set_width_chars(-1)
+        label.set_max_width_chars(-1)
+    else:
+        label.set_ellipsize(Pango.EllipsizeMode.END)
+        label.set_width_chars(VALUE_CHARS)
+        label.set_max_width_chars(VALUE_CHARS)
+
+
+def keep_value_readable(row):
+    """An Adw.ComboRow shows its value in a label that may shrink to "…":
+    beside a subtitle GTK gives the title column its width first, and on a
+    538 px panel the Hotspot page's Band read "5…". The value beside the
+    title gets a label of its own that never cuts a value of up to
+    VALUE_CHARS characters (the title and the subtitle wrap instead); the
+    popup's list keeps libadwaita's own (its check mark)."""
+    default = row.get_factory()
+    if default is not None and row.get_list_factory() is None:
+        row.set_list_factory(default)
+    factory = Gtk.SignalListItemFactory()
+    factory.connect("setup", _value_setup)
+    factory.connect("bind", _value_bind)
+    row.set_factory(factory)
+    return row
+
+
 def combo_row(title, labels, selected=0, on_select=None, subtitle=None):
     row = Adw.ComboRow(use_markup=False, model=Gtk.StringList.new(labels))
+    keep_value_readable(row)
     row.set_title(title)
     if subtitle:
         row.set_subtitle(subtitle)
@@ -245,6 +288,14 @@ def ask(window, heading, body, ok_label, on_ok, destructive=False, extra=None, c
     d.connect("response", lambda _d, r: on_ok() if r == "ok" else None)
     d.present(window)
     return d
+
+
+def respond(dialog, response):
+    """Answer an Adw.AlertDialog as its button would: it has no response()
+    method (Adw.MessageDialog had one), so Enter in a dialog's entry
+    emits the signal and closes it."""
+    dialog.emit("response", response)
+    dialog.force_close()
 
 
 def inform(window, heading, body):

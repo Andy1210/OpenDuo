@@ -1,7 +1,7 @@
 From f71b35ea72da346dbe81ae151ac0361130e48fb1 Mon Sep 17 00:00:00 2001
 From: Richard Acayan <mailingradian@gmail.com>
 Date: Tue, 8 Oct 2024 19:30:45 -0400
-Subject: [PATCH 099/137] ASoC: qdsp6: q6voice-dai: add ALSA controls for the
+Subject: [PATCH 099/147] ASoC: qdsp6: q6voice-dai: add ALSA controls for the
  topology ID
 
 The topology IDs are different between sound card models (smartphones in

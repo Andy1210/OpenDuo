@@ -1,7 +1,7 @@
 From 7f31786cc73fdc8a5c49eadf50776e4bf5fe35d6 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 08:45:49 +0100
-Subject: [PATCH 041/137] drm/msm/a6xx: Force the GMU off after a GPU_SET OOB
+Subject: [PATCH 041/147] drm/msm/a6xx: Force the GMU off after a GPU_SET OOB
  timeout
 
 When the GMU does not acknowledge the GPU_SET OOB in hw_init(), the

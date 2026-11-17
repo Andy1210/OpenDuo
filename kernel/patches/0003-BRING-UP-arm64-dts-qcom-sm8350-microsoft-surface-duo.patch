@@ -1,7 +1,7 @@
 From ca2686bb1199e66beeca47de0a55004392f82652 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Thu, 5 Nov 2026 23:36:20 +0100
-Subject: [PATCH 003/137] BRING-UP: arm64: dts: qcom:
+Subject: [PATCH 003/147] BRING-UP: arm64: dts: qcom:
  sm8350-microsoft-surface-duo2: Add variants without the USB-C graph, with
  MDSS held
 

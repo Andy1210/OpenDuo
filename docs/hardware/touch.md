@@ -97,6 +97,33 @@ pen. Panel alignment comes from the phone's own `sfpd` partition
   second, 45-90 ms from the write to the tick), and the pen drops the link
   each time it comes near the screen (~140 ms gap, ~1 s until reports go out
   again).
+- **The pen's own inking haptics are out of reach (tested 2026-11-17).**
+  Microsoft lists no tactile signals and no zero-force inking for the
+  Surface Duo 2, and neither the stock Android nor the digitizer firmware
+  has any haptics code. What was tried, with the owner writing:
+  - eight ways of starting the inking waveforms over Bluetooth, Windows'
+    order included (the waveform sent while the pen hovers, then the tip
+    down), as manual and as auto trigger, repeated every 200 ms;
+  - the heat-map library's zero-force inking switched on through its own
+    setter (the Duo 2 build lacks the setting, so it is always off). The
+    library then sent "near" and "far" in its feedback to the pen, but never
+    "inking": the Duo 2 tuning has no zero-force thresholds;
+  - the feedback's inking indication set while the tip was down (about 950
+    of 2000 feedback messages in 30 s carried it), also together with the
+    indication's validity bit (0x100 in the payload's validity bitmap). The
+    Surface Pro 8's pen processor always sets that bit; its compiled-in
+    configuration for the Duo 2 does not.
+
+  None of them made the pen buzz while writing, although the host's
+  feedback then matched the Pro 8's. The pen runs the same official firmware
+  as on a Surface Pro, so what is left is the digitizer firmware's relay to
+  the pen. Its images are signed by Microsoft per product (the Duo 2's and
+  the Pro 8's have different signing certificates and component ids), so a
+  modified or foreign image would most likely be refused, and one that was
+  accepted could leave the phone without touch. This project does not
+  change it.
+  The experiments are kept on the branch `pen-zfi` (a test switch in
+  duo2-touchd, off by default and never shipped).
 - **The writing feel is timing.** `duo2-pend` reads duo2-touchd's tablet
   devices (the tip, the position in mm, `ABS_PRESSURE` 0..65535, each frame's
   kernel time on `CLOCK_MONOTONIC`) and decides per frame whether the pen

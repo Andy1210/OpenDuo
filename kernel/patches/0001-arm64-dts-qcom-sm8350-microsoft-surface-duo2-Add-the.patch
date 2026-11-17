@@ -1,7 +1,7 @@
 From 349df1df2d84adde8eb1d7cda2aff9f9c0606cda Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Thu, 5 Nov 2026 20:43:38 +0100
-Subject: [PATCH 001/137] arm64: dts: qcom: sm8350-microsoft-surface-duo2: Add
+Subject: [PATCH 001/147] arm64: dts: qcom: sm8350-microsoft-surface-duo2: Add
  the charger, USB-C, WiFi, BT and keys
 
 Describe what the phone needs first, taken from Microsoft's own device

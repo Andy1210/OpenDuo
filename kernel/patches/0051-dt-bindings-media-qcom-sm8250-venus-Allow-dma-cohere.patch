@@ -1,7 +1,7 @@
 From c9ee9fb740f9d4ae6765eb760654c0a422c3f4fc Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 18:38:23 +0100
-Subject: [PATCH 051/137] dt-bindings: media: qcom,sm8250-venus: Allow
+Subject: [PATCH 051/147] dt-bindings: media: qcom,sm8250-venus: Allow
  dma-coherent
 
 The Iris v2 video codecs can be IO-coherent (the SM8350's is: its

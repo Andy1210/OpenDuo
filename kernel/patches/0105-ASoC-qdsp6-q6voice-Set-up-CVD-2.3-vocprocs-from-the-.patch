@@ -1,7 +1,7 @@
 From 5e06a945f97893662a8a8bb3063f307cf70da7e6 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 19:31:42 +0100
-Subject: [PATCH 105/137] ASoC: qdsp6: q6voice: Set up CVD 2.3 vocprocs from
+Subject: [PATCH 105/147] ASoC: qdsp6: q6voice: Set up CVD 2.3 vocprocs from
  the back ends
 
 CVD 2.3 and later (CVP API version 2) want a vocproc to be created with

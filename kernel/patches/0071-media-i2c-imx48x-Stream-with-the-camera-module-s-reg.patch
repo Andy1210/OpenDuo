@@ -1,7 +1,7 @@
 From 00ae5fa4e563debcc934798ab84cc47b82d6c5a2 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 00:50:40 +0100
-Subject: [PATCH 071/137] media: i2c: imx48x: Stream with the camera module's
+Subject: [PATCH 071/147] media: i2c: imx48x: Stream with the camera module's
  register tables
 
 Turn the identification driver into a V4L2 sensor driver. The IMX481 and

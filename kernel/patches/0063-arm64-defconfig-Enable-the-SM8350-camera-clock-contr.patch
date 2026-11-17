@@ -1,7 +1,7 @@
 From 6ca0f7595cc84c7e3fc6338b2a4e2695714342fd Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 23:30:59 +0100
-Subject: [PATCH 063/137] arm64: defconfig: Enable the SM8350 camera clock
+Subject: [PATCH 063/147] arm64: defconfig: Enable the SM8350 camera clock
  controller
 
 Build the SM8350 camera clock controller as a module: the Surface Duo 2's

@@ -1,0 +1,105 @@
+From 96861a13bed922a7ac166ae06b675db2fb493269 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Tue, 17 Nov 2026 11:58:00 +0100
+Subject: [PATCH 140/147] media: iris: Treat a watchdog interrupt on HFI Gen1
+ as a system error
+
+On the Gen2 firmware interface a watchdog interrupt puts the core into
+the error state and schedules the system error handler, which unloads
+and reboots the firmware. The Gen1 response handler has no such check:
+the interrupt handler leaves the IRQ disabled and nothing else happens.
+The core stays in IRIS_CORE_INIT with a dead firmware, so every later
+command times out, new sessions fail, and runtime PM calls
+iris_vpu_prepare_pc() for a CPU that never reaches WFI:
+
+  qcom-iris aa00000.video-codec: received watchdog interrupt
+  qcom-iris aa00000.video-codec: skip power collapse, wfi=0x0, idle=0x0, pcr=0x0, ctrl=0x1)
+  qcom-iris aa00000.video-codec: failed to suspend
+
+repeated every autosuspend period until the next boot. The same -EAGAIN
+from the system sleep callback (pm_runtime_force_suspend()) would also
+abort every system suspend.
+
+Seen on SM8350 (Surface Duo 2) after an SMMU fault on the video stream
+ID crashed the firmware during an H.264 playback.
+
+Handle the watchdog in the Gen1 response handler the way Gen2 does: put
+the core and its instances into the error state and schedule the system
+error handler, without reading the queues the stopped firmware left
+behind. The shared part of the system error event is split out of
+iris_hfi_gen1_sys_event_notify() for this.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../qcom/iris/iris_hfi_gen1_response.c        | 34 ++++++++++++++-----
+ 1 file changed, 26 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen1_response.c b/drivers/media/platform/qcom/iris/iris_hfi_gen1_response.c
+index bfd7495bf44f..68e8703c9517 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen1_response.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen1_response.c
+@@ -11,6 +11,7 @@
+ #include "iris_instance.h"
+ #include "iris_vdec.h"
+ #include "iris_vpu_buffer.h"
++#include "iris_vpu_common.h"
+ 
+ static void iris_hfi_gen1_read_changed_params(struct iris_inst *inst,
+ 					      struct hfi_msg_event_notify_pkt *pkt)
+@@ -214,17 +215,10 @@ static void iris_hfi_gen1_event_seq_changed(struct iris_inst *inst,
+ 	iris_inst_sub_state_change_drc_last(inst);
+ }
+ 
+-static void
+-iris_hfi_gen1_sys_event_notify(struct iris_core *core, void *packet)
++static void iris_hfi_gen1_sys_error(struct iris_core *core)
+ {
+-	struct hfi_msg_event_notify_pkt *pkt = packet;
+ 	struct iris_inst *instance;
+ 
+-	if (pkt->event_id == HFI_EVENT_SYS_ERROR)
+-		dev_err(core->dev, "sys error (type: %x, session id:%x, data1:%x, data2:%x)\n",
+-			pkt->event_id, pkt->shdr.session_id, pkt->event_data1,
+-			pkt->event_data2);
+-
+ 	core->state = IRIS_CORE_ERROR;
+ 
+ 	mutex_lock(&core->lock);
+@@ -235,6 +229,19 @@ iris_hfi_gen1_sys_event_notify(struct iris_core *core, void *packet)
+ 	schedule_delayed_work(&core->sys_error_handler, msecs_to_jiffies(10));
+ }
+ 
++static void
++iris_hfi_gen1_sys_event_notify(struct iris_core *core, void *packet)
++{
++	struct hfi_msg_event_notify_pkt *pkt = packet;
++
++	if (pkt->event_id == HFI_EVENT_SYS_ERROR)
++		dev_err(core->dev, "sys error (type: %x, session id:%x, data1:%x, data2:%x)\n",
++			pkt->event_id, pkt->shdr.session_id, pkt->event_data1,
++			pkt->event_data2);
++
++	iris_hfi_gen1_sys_error(core);
++}
++
+ static void
+ iris_hfi_gen1_event_session_error(struct iris_inst *inst, struct hfi_msg_event_notify_pkt *pkt)
+ {
+@@ -690,6 +697,17 @@ static void iris_hfi_gen1_flush_debug_queue(struct iris_core *core, u8 *packet)
+ 
+ void iris_hfi_gen1_response_handler(struct iris_core *core)
+ {
++	/*
++	 * The firmware stopped: nothing it left in the queues can be trusted,
++	 * and it will not answer again. Without the error state the core stays
++	 * "initialised", every command times out, and runtime PM retries the
++	 * power collapse of a CPU that never reaches WFI, forever.
++	 */
++	if (iris_vpu_watchdog(core, core->intr_status)) {
++		iris_hfi_gen1_sys_error(core);
++		return;
++	}
++
+ 	memset(core->response_packet, 0, sizeof(struct hfi_pkt_hdr));
+ 	while (!iris_hfi_queue_msg_read(core, core->response_packet)) {
+ 		iris_hfi_gen1_handle_response(core, core->response_packet);

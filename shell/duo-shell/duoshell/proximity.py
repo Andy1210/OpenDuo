@@ -43,6 +43,9 @@ CA_PATH = "/org/mobian_project/CallAudio"
 
 SP = "net.hadess.SensorProxy"
 SP_PATH = "/net/hadess/SensorProxy"
+# After iio-sensor-proxy takes its name, HasProximity is read again this much
+# later (see _sensor_owner).
+SENSOR_REREAD_S = 3
 
 
 def log(*args):
@@ -60,6 +63,8 @@ class Proximity:
         self.voices = {}  # modem path -> [call paths]
         self.speaker = None
         self.has_sensor = False
+        self.recheck_asked = False  # this call asked the proxy again
+        self.described = None  # the inputs last logged (model.describe)
         self.claimed = False
         self.claiming = False
         self.debounce = model.Debounce()
@@ -283,10 +288,19 @@ class Proximity:
         self.evaluate()
 
     def _sensor_owner(self, _bus, _sender, _path, _iface, _signal, params):
-        # The proxy (re)started: our claim is gone with the old one.
+        # The proxy (re)started: our claim is gone with the old one. It
+        # takes its name before it has looked for its sensors, and it tells
+        # only claiming clients when they appear: ask now and once more a
+        # little later.
         self.claimed = self.claiming = False
         self.debounce.reset()
         self.read_has_sensor()
+        if params.unpack()[2]:
+            GLib.timeout_add_seconds(SENSOR_REREAD_S, self._reread_has_sensor)
+
+    def _reread_has_sensor(self):
+        self.read_has_sensor()
+        return False
 
     def _sensor_props(self, _bus, _sender, _path, _iface, _signal, params):
         _name, changed, _inv = params.unpack()
@@ -376,7 +390,21 @@ class Proximity:
         self.evaluate()
 
     def evaluate(self):
-        wanted = self.has_sensor and model.call_wants_sensor(self.calls.values(), self.speaker)
+        call_wants = model.call_wants_sensor(self.calls.values(), self.speaker)
+        if call_wants or self.calls:
+            line = model.describe(self.calls.values(), self.speaker, self.has_sensor)
+            if line != self.described:
+                log(line)
+                self.described = line
+        elif self.described is not None:
+            log("no call")
+            self.described = None
+        if model.sensor_recheck(call_wants, self.has_sensor, self.recheck_asked):
+            self.recheck_asked = True
+            self.read_has_sensor()
+        elif not call_wants:
+            self.recheck_asked = False
+        wanted = self.has_sensor and call_wants
         self.claim(wanted)
         st = self.shell.wc_state or {}
         panels = model.hold_panels(

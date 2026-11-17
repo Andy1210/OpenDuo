@@ -1,0 +1,214 @@
+From 332f1f219103d79f44f08cb0623a892f6b8dcdee Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Tue, 17 Nov 2026 14:42:26 +0100
+Subject: [PATCH 147/147] usb: dwc3: qcom: Power the controller down while the
+ role switch reports no partner
+
+Behind a USB role switch, dwc3-qcom clears the VBUS override when the
+role goes from device to none, and the controller reports the
+disconnect. Everything else stays powered: the HS PHY keeps running,
+and with the core's default (runtime PM forbidden) it never stops. On a
+Surface Duo 2 (SM8350, UCSI over pmic_glink) the next attach then sees
+"role none -> device", a bus reset and, 6 ms later, a bus suspend: no
+connect done, and the host never sees the device.
+
+The attach does work when the controller had runtime suspended in
+between (dwc3_core_exit(): PHY powered off, then a full PHY and core
+init on resume). With runtime PM allowed by hand that took the default
+5 s autosuspend delay: replugs after 6.6 s or more enumerated every
+time, replugs after 5.5 s or less never did. The vendor driver powers
+the PHY off on every detach for the same reason.
+
+Make it the rule behind a role switch (dr_mode "otg" with
+usb-role-switch):
+
+- the role holds a runtime PM reference while it is device or host,
+  from probe until the switch first reports none;
+- on device -> none, wait for the disconnect event (runtime suspend is
+  refused while dwc3 counts a host as connected) and suspend at once
+  instead of after the autosuspend delay;
+- on none -> device or host, resume first, which initialises the PHY
+  and core again, then set the override; if the controller is up
+  anyway (a UDC bind woke it since, or the power down failed), suspend
+  it first;
+- allow runtime PM by default for these controllers. While a partner
+  is attached the reference keeps them up, so this only changes what
+  happens with nothing attached. Userspace can still forbid it, at the
+  cost of the fresh start.
+
+dr_mode "peripheral" and "host", and "otg" without a role switch, are
+unchanged.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/usb/dwc3/dwc3-qcom.c | 105 ++++++++++++++++++++++++++++++++++-
+ 1 file changed, 102 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/usb/dwc3/dwc3-qcom.c b/drivers/usb/dwc3/dwc3-qcom.c
+index 1e4d0471ce0f..e11f22110e63 100644
+--- a/drivers/usb/dwc3/dwc3-qcom.c
++++ b/drivers/usb/dwc3/dwc3-qcom.c
+@@ -85,6 +85,8 @@ struct dwc3_qcom {
+ 	struct icc_path		*icc_path_apps;
+ 
+ 	enum usb_role		current_role;
++	bool			role_pm;
++	bool			role_pm_ref;
+ };
+ 
+ #define to_dwc3_qcom(d) container_of((d), struct dwc3_qcom, dwc)
+@@ -558,6 +560,42 @@ static int dwc3_qcom_setup_irq(struct dwc3_qcom *qcom, struct platform_device *p
+ 	return 0;
+ }
+ 
++static bool dwc3_qcom_gadget_connected(struct dwc3 *dwc)
++{
++	unsigned long flags;
++	bool connected;
++
++	spin_lock_irqsave(&dwc->lock, flags);
++	connected = dwc->connected;
++	spin_unlock_irqrestore(&dwc->lock, flags);
++
++	return connected;
++}
++
++/*
++ * The role switch reported that nothing is attached any more: power the
++ * controller and its PHYs down now, not when the autosuspend timer runs
++ * out, so that a cable plugged in again a moment later starts from a
++ * freshly initialised PHY and core. Consumes the caller's runtime PM
++ * reference.
++ */
++static void dwc3_qcom_power_down_detached(struct dwc3_qcom *qcom)
++{
++	struct dwc3 *dwc = &qcom->dwc;
++	bool connected;
++
++	/*
++	 * Runtime suspend is refused while dwc3 still counts a host as
++	 * connected; clearing the VBUS override has just raised the
++	 * disconnect event that ends this.
++	 */
++	if (read_poll_timeout(dwc3_qcom_gadget_connected, connected, !connected,
++			      USEC_PER_MSEC, 200 * USEC_PER_MSEC, false, dwc))
++		dev_warn(qcom->dev, "no disconnect after the cable went away\n");
++
++	pm_runtime_put_sync_suspend(qcom->dev);
++}
++
+ static void dwc3_qcom_set_role_notifier(struct dwc3 *dwc, enum usb_role next_role)
+ {
+ 	struct dwc3_qcom *qcom = to_dwc3_qcom(dwc);
+@@ -565,6 +603,18 @@ static void dwc3_qcom_set_role_notifier(struct dwc3 *dwc, enum usb_role next_rol
+ 	if (qcom->current_role == next_role)
+ 		return;
+ 
++	/*
++	 * A partner attached while the controller is still up from the last
++	 * one (its power down failed, or a UDC bind woke it since): power it
++	 * down first, so that the resume below initialises the PHY and core
++	 * again. A session on a PHY that was left running across a detach
++	 * may never enumerate. This fails, harmlessly, when userspace forbids
++	 * runtime PM.
++	 */
++	if (qcom->role_pm && qcom->current_role == USB_ROLE_NONE &&
++	    !pm_runtime_suspended(qcom->dev))
++		pm_runtime_suspend(qcom->dev);
++
+ 	if (pm_runtime_resume_and_get(qcom->dev)) {
+ 		dev_dbg(qcom->dev, "Failed to resume device\n");
+ 		return;
+@@ -577,14 +627,36 @@ static void dwc3_qcom_set_role_notifier(struct dwc3 *dwc, enum usb_role next_rol
+ 	 */
+ 	dwc3_qcom_vbus_override_enable(qcom, next_role == USB_ROLE_DEVICE);
+ 
+-	pm_runtime_mark_last_busy(qcom->dev);
+-	pm_runtime_put_sync(qcom->dev);
+-
+ 	/*
+ 	 * Current role changes via usb_role_switch_set_role callback protected
+ 	 * internally by mutex lock.
+ 	 */
+ 	qcom->current_role = next_role;
++
++	if (qcom->role_pm) {
++		/*
++		 * With a role switch the controller stays up while a partner
++		 * is attached and powers down when none is: the reference
++		 * just taken becomes the partner's.
++		 */
++		if (next_role != USB_ROLE_NONE && !qcom->role_pm_ref) {
++			qcom->role_pm_ref = true;
++			return;
++		}
++
++		if (next_role == USB_ROLE_NONE && qcom->role_pm_ref) {
++			qcom->role_pm_ref = false;
++			pm_runtime_put_noidle(qcom->dev);
++
++			if (dwc->current_dr_role == DWC3_GCTL_PRTCAP_DEVICE) {
++				dwc3_qcom_power_down_detached(qcom);
++				return;
++			}
++		}
++	}
++
++	pm_runtime_mark_last_busy(qcom->dev);
++	pm_runtime_put_sync(qcom->dev);
+ }
+ 
+ static void dwc3_qcom_run_stop_notifier(struct dwc3 *dwc, bool is_on)
+@@ -703,6 +775,19 @@ static int dwc3_qcom_probe(struct platform_device *pdev)
+ 			qcom->current_role = USB_ROLE_DEVICE;
+ 	}
+ 
++	/*
++	 * Behind a role switch, keep the controller up until the switch
++	 * reports that nothing is attached (dwc3_qcom_set_role_notifier()),
++	 * then let it runtime suspend. Taken before the core registers its
++	 * role switch, so that the first report always finds it.
++	 */
++	qcom->role_pm = qcom->mode == USB_DR_MODE_OTG &&
++			device_property_read_bool(dev, "usb-role-switch");
++	if (qcom->role_pm) {
++		pm_runtime_get_noresume(dev);
++		qcom->role_pm_ref = true;
++	}
++
+ 	qcom->dwc.glue_ops = &dwc3_qcom_glue_ops;
+ 
+ 	qcom->dwc.dev = dev;
+@@ -725,11 +810,23 @@ static int dwc3_qcom_probe(struct platform_device *pdev)
+ 
+ 	qcom->is_suspended = false;
+ 
++	/*
++	 * Behind a role switch the controller has to power down while
++	 * nothing is attached, so that the next session starts on a freshly
++	 * initialised PHY and core: allow the runtime PM the core forbids
++	 * by default. While a partner is attached the role holds a
++	 * reference, so this changes nothing then.
++	 */
++	if (qcom->role_pm)
++		pm_runtime_allow(dev);
++
+ 	return 0;
+ 
+ remove_core:
+ 	dwc3_core_remove(&qcom->dwc);
+ clk_disable:
++	if (qcom->role_pm_ref)
++		pm_runtime_put_noidle(dev);
+ 	clk_bulk_disable_unprepare(qcom->num_clocks, qcom->clks);
+ 
+ 	return ret;
+@@ -747,6 +844,8 @@ static void dwc3_qcom_remove(struct platform_device *pdev)
+ 	clk_bulk_disable_unprepare(qcom->num_clocks, qcom->clks);
+ 	dwc3_qcom_interconnect_exit(qcom);
+ 
++	if (qcom->role_pm_ref)
++		pm_runtime_put_noidle(qcom->dev);
+ 	pm_runtime_put_noidle(qcom->dev);
+ }
+ 

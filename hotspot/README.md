@@ -102,6 +102,31 @@ H2E and hunting-and-pecking), WPA3 only (`SAE`, MFP required), WPA2 only.
 No open hotspot. At most 8 devices (`MAX_CLIENTS`). Off by itself after 10
 minutes without a device (`IDLE_OFF_MIN`, 0 = never).
 
+## The devices on the hotspot
+
+The daemon lists them from hostapd's stations (`STA-FIRST` / `STA-NEXT` on
+its control socket: only authorized ones) and the DHCP server's leases
+(`networkctl --json=short status ap0`: the address and the device's own
+name, matched by the hardware address), and writes them to the state file
+(no MAC address). It reads them again on hostapd's `AP-STA-CONNECTED` /
+`AP-STA-DISCONNECTED` events, 3, 12 and 40 s after one (the lease and its
+name come later), and every 30 s while the access point runs (a device that
+left without an event, a name that came late; the state file is written only
+when the list changes).
+
+**2026-11-17, on the phone:** the hotspot worked (another phone joined and
+had internet), but Settings > Hotspot never listed it. The event socket has a
+timeout for its requests, and with a timeout Python's `recv` waits for it even
+with `MSG_DONTWAIT` and raises `TimeoutError`: at the first event the
+daemon's event watch ended with that exception, before it read the stations,
+so the list stayed empty for the rest of the run. Fixed (`ctrl.recv_event`
+polls without waiting; a broken socket drops only the event watch; the 30 s
+read). systemd 257 gives a lease's hardware address as the DHCP message's
+whole 16-byte field with its length beside it; that is now read too, so a
+device whose DHCP client id is not its MAC still gets its name and address.
+The fix is unit-tested (a real datagram socket in place of hostapd's, the
+daemon's event path); **not tried on the phone yet**.
+
 ## Regulatory domain (the WiFi country)
 
 Investigated 2026-11-12 (read-only on the phone, the stock firmware files
@@ -359,7 +384,7 @@ data, depending on its route metrics).
 | `wifi-country.conf` | `/etc/duo2/wifi-country.conf(.dist)` | `COUNTRY=auto` / `XX` / `off` |
 | — | `/run/duo2/wifi-country.json` | the last hint (country, time, why), its result (applied / ignored / failed), the last check |
 | `install.sh`, `install-files.sh` | | hostapd + the files on the phone / in the image; the `regulatory.db` alternative to the upstream-signed file |
-| `tests/` | | `python3 -m unittest discover -s tests` (80); `unshare -rn python3 tests/netns_check.py` (19 checks, no root) |
+| `tests/` | | `python3 -m unittest discover -s tests` (84); `unshare -rn python3 tests/netns_check.py` (19 checks, no root) |
 
 Elsewhere: `shell/duo-shell/duoshell/hotspot.py`, `hotspotmodel.py` (the
 quick menu tile), `shell/duo-settings/duosettings/hotspot.py`,

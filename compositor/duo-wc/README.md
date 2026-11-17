@@ -307,7 +307,15 @@ notifications, dock, lock screen client, the overview's card labels) is
 - **Launch hint** (`expect_window <output>`): the next toplevel within 10 s
   (or `timeout_ms`) opens on that panel, in front, whatever the open rule
   says, and that panel becomes the active one (the window gets the keyboard);
-  what the app grid sends before it starts an app.
+  what the app grid sends before it starts an app. **A toplevel that goes
+  within 1 s gives the hint back** (`front::gives_hint_back`, for the rest
+  of its time, unless a newer launch has asked since): an Android app
+  started cold made a Waydroid toplevel ~3 s after the tap that was gone
+  5 ms later (2026-11-17, the journal: `new toplevel id=13`, `toplevel gone
+  id=13`), it took the hint, and the app's own window, ~19 s after the tap,
+  opened by the open rule. The shell asks 40 s for such a launch
+  (`shell/duo-shell` README, "Starting Android apps"). Not tested on the
+  phone yet.
 - **ext-foreign-toplevel-list** (read-only list of windows, for task views and
   docks later): every toplevel with its title and app id, kept up to date,
   closed when it goes. `tools/toplevels.py` prints it.
@@ -707,6 +715,25 @@ notifications, dock, lock screen client, the overview's card labels) is
     or the overview's card to it; back the same way to a panel. Two
     Android apps share one panel side by side only at equal halves (a half
     is the display's size then).
+  - **A task that is not filled is kept inside its window** (`android.rs`
+    `fit_box`, `needs_refit`, `refit_wait`; 2026-11-17). Android never moves
+    a freeform task when its display changes size, and `fit` used to run
+    only when an app's window first appeared: after a turn (portrait to
+    landscape) the task kept its portrait size and ran past the bottom of
+    the panel, and back from a span (or a full screen) `restore` put back
+    the bounds measured before it, in the place and orientation of that
+    time. Now each Android window remembers the box its task is known to
+    lie in (its own part of the display, logical px from its corner: its
+    place, cut to the display where that is smaller); whenever that part
+    gets narrower or lower (a turn, a half, a lead of a half's size), or
+    the task is back from a fill, the task is fitted into it again
+    (`duo2-android-task fit`, queued after the `restore` on the helper's
+    one thread). It waits until no change has asked for 800 ms (at most
+    3 s after the first): a turn reconfigures one panel after the other and
+    Waydroid then makes its windows again (the box goes with the window
+    made again), so a turn costs one `fit` per Android app. A part that
+    only grows needs none (the task was inside the smaller one). Not
+    tested on the phone yet.
 - **Touch.** duo2-touchd's two uinput devices ("Surface Duo 2 Touchscreen
   Left/Right") carry `WL_OUTPUT=DSI-1/DSI-2` from the udev rule; libinput
   returns it as the device's output name, and a touch is the device's

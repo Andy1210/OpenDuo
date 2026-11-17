@@ -230,6 +230,7 @@ class FakeSys:
 
 class FakeCtrl:
     stations_list = []
+    events = []  # what recv_event hands out (an exception is raised)
 
     def __init__(self, server, local, timeout=2.0):
         self.r, self.w = os.pipe()
@@ -244,7 +245,12 @@ class FakeCtrl:
         return self.r
 
     def recv_event(self):
-        return None
+        if not FakeCtrl.events:
+            return None
+        e = FakeCtrl.events.pop(0)
+        if isinstance(e, Exception):
+            raise e
+        return e
 
     def close(self):
         for fd in (self.r, self.w):
@@ -293,6 +299,7 @@ class Daemon(unittest.TestCase):
         self.d.RUN = self.tmp
         ctrl.Ctrl = FakeCtrl
         FakeCtrl.stations_list = []
+        FakeCtrl.events = []
 
     def tearDown(self):
         state.STATE, state.WANT, self.d.CTRL_DIR, self.d.RUN, ctrl.Ctrl, self.d.SAVED = self.saved
@@ -559,6 +566,39 @@ class Daemon(unittest.TestCase):
         self.assertTrue(st["use_5g"])
         self.assertIsNone(st["idle_off_at"])
         self.assertNotIn("02:aa", json.dumps(st))
+        self.stop(hs, fs)
+
+    def test_a_device_joins_through_hostapds_events(self):
+        fs = FakeSys(self.files())
+        hs = self.hotspot(fs)
+        self.want(wifi=True)
+        hs.reconcile()
+        self.assertEqual(self.st()["client_count"], 0)
+        self.assertIn("poll", hs.wifi["watches"])
+        FakeCtrl.stations_list = [
+            {"mac": "02:aa:00:00:00:09", "authorized": True, "connected_time": 2}
+        ]
+        FakeCtrl.events = [
+            "<3>AP-STA-CONNECTED 02:aa:00:00:00:09",
+            "<3>EAPOL-4WAY-HS-COMPLETED 02:aa:00:00:00:09",
+        ]
+        self.assertTrue(hs._hostapd_event(hs.wifi["events"].fileno(), 0))  # the watch stays
+        st = self.st()
+        self.assertEqual(st["client_count"], 1)
+        self.assertEqual(st["clients"][0]["ip"], "10.15.43.12")
+        self.assertEqual(len(hs.lease_timers), 3)  # the lease and its name, later
+        # the periodic read writes only a change
+        os.remove(state.STATE)
+        self.assertTrue(hs._stations_poll())
+        self.assertFalse(os.path.exists(state.STATE))
+        FakeCtrl.stations_list = []
+        self.assertTrue(hs._stations_poll())
+        self.assertEqual(self.st()["client_count"], 0)
+        # a broken socket: the event watch goes, the poll stays
+        FakeCtrl.events = [OSError("connection refused")]
+        self.assertFalse(hs._hostapd_event(hs.wifi["events"].fileno(), 0))
+        self.assertNotIn("events", hs.wifi["watches"])
+        self.assertIn("poll", hs.wifi["watches"])
         self.stop(hs, fs)
 
     def test_cleanup_after_a_crash(self):

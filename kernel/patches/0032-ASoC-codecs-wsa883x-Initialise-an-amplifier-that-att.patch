@@ -1,7 +1,7 @@
 From 3869b7f236351af1048790c5d1f192fac7deafee Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 03:56:14 +0100
-Subject: [PATCH 032/137] ASoC: codecs: wsa883x: Initialise an amplifier that
+Subject: [PATCH 032/147] ASoC: codecs: wsa883x: Initialise an amplifier that
  attaches while suspended
 
 The codec's runtime PM starts in probe, with a 3 s autosuspend, while

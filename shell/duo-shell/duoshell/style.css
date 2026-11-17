@@ -21,7 +21,7 @@
 @define-color sd_outline rgba(255, 255, 255, 0.07);
 
 window.duo-bar, window.duo-quick, window.duo-launcher, window.duo-dock, window.duo-banner,
-window.duo-taskbar, window.duo-deskmenu, window.duo-volume, window.duo-home, window.duo-confirm, window.duo-overview-labels, window.duo-sim-pin,
+window.duo-taskbar, window.duo-deskmenu, window.duo-volume, window.duo-android-start, window.duo-home, window.duo-confirm, window.duo-overview-labels, window.duo-sim-pin,
 window.duo-ambient, popover.duo-menu {
   font-family: "Cantarell", "Noto Sans", sans-serif;
   color: @sd_text;
@@ -628,8 +628,23 @@ window.duo-overview-labels, window.duo-laptop-keys {
 
 /* -- volume keys --------------------------------------------------------------------------------- */
 
-window.duo-volume {
+window.duo-volume, window.duo-android-start {
   background: none;
+}
+
+/* "Starting Android apps..." (androidstart.py): like the volume pill, at
+   the panel's bottom above the dock. */
+.android-start-pill {
+  padding: 12px 18px;
+  border-radius: 26px;
+  background-color: @sd_card_raised;
+  border: 1px solid @sd_outline;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.55);
+  color: @sd_text;
+  font-size: 14px;
+  font-weight: 600;
+  margin: 16px 16px 4px 16px;
+  animation: sd-drop-in 260ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .volume-pill {

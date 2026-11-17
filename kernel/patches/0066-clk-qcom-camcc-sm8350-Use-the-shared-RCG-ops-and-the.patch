@@ -1,7 +1,7 @@
 From dab97a02f0c0881ea561ee723eac525f3c48549c Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 00:21:09 +0100
-Subject: [PATCH 066/137] clk: qcom: camcc-sm8350: Use the shared RCG ops and
+Subject: [PATCH 066/147] clk: qcom: camcc-sm8350: Use the shared RCG ops and
  the MX power domain
 
 Measured on the Surface Duo 2: with plain clk_rcg2_ops (and the vendor's

@@ -1,7 +1,7 @@
 From 6ac36671e80ae2d3a904be5373bcee9db1b88e9d Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 01:49:28 +0100
-Subject: [PATCH 054/137] drm/panel: microsoft-elgin: Keep a brightness set
+Subject: [PATCH 054/147] drm/panel: microsoft-elgin: Keep a brightness set
  while the panel is off
 
 The brightness is a DCS command, which the DSI host cannot send before

@@ -518,7 +518,10 @@ The steps, with the phone on the charger and an ssh session open:
 3. Install the keyring package, `sudo apt update`, then
    `sudo apt install --no-install-recommends openduo-surface-duo2` (or one
    package at a time, the kernel last). The kernel package may be the running
-   build (it takes over that release's modules) or a newer one.
+   build (it takes over that release's modules) or a newer one. One package at
+   a time, install the metapackage `openduo-kernel-surface-duo2` too: an update
+   is a dist-upgrade, which brings a new kernel build only as the new
+   dependency of that metapackage.
 4. Restart. On a new kernel: `sudo duo2-boot status` (trying → good within
    minutes), `journalctl -b -u duo2-boot-health`.
 5. If anything is off: `sudo duo2-update rollback`; the kernel falls back by

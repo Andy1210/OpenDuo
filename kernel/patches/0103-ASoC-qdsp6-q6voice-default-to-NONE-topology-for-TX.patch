@@ -1,7 +1,7 @@
 From 95a8660f526f2b468d842c12a912d9a1de3d727d Mon Sep 17 00:00:00 2001
 From: Val Packett <val@packett.cool>
 Date: Mon, 20 Apr 2026 15:54:45 -0300
-Subject: [PATCH 103/137] ASoC: qdsp6: q6voice: default to NONE topology for TX
+Subject: [PATCH 103/147] ASoC: qdsp6: q6voice: default to NONE topology for TX
 
 On kodiak + wcd9375, only this topology seems to work so far for the mic.
 

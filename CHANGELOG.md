@@ -66,6 +66,19 @@ Development state: `0.1.0-dev`. The first public release will be 0.1.0.
   they ran, so every packaged kernel went back to the previous one.
 - An update no longer stops Android apps from starting on a phone whose
   Waydroid was patched by an earlier version of OpenDuo's patch.
+- An Android app on one panel is fitted into its window again after the phone
+  is turned and after it leaves a span or full screen; it used to come up cut
+  off (not tested on the phone yet).
+- Starting an Android app while Android is not running shows "Starting
+  Android apps..." on that panel, and its window opens there even when it
+  takes Android ~20 s to start (not tested on the phone yet).
+- USB data to a computer works again (networking, the serial console), also
+  after the cable is unplugged and plugged in again: the USB controller follows
+  the role the USB-C port reports and starts afresh on every attach. USB
+  tethering is not tested yet.
+- The video decoder no longer stays stuck until the next restart after its
+  firmware crashes: the kernel restarts the firmware. A video the decoder
+  cannot play no longer leaves a kernel warning behind.
 
 ### Tooling
 - Image build from the repository (`scripts/build-images.sh`), kernel and

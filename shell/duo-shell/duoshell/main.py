@@ -45,6 +45,7 @@ from . import (  # noqa: E402
     trust,
     wc,
 )  # noqa: E402
+from .androidstart import AndroidStart  # noqa: E402
 from .bar import StatusBar  # noqa: E402
 from .confirm import ConfirmSheet  # noqa: E402
 from .dbus import Bluetooth, Keyboard  # noqa: E402
@@ -158,6 +159,11 @@ class Shell:
             3, self.touch_fallback_changed
         )  # a note from before the shell started
         self.volume_keys = VolumeKeys(self.volume_osd_for)
+        # "Starting Android apps..." while an Android app waits for Android
+        # to start (androidstart), and the longer launch hint it needs.
+        self.android_start = AndroidStart(
+            app, self.monitor_named, lambda: (self.wc_state or {}).get("windows")
+        )
         # A volume key while a call rings aloud silences it (callsmodel.RingKeys).
         from .callsmodel import RingKeys
 
@@ -230,6 +236,16 @@ class Shell:
             self.proximity = Proximity(self)
         except (ImportError, ValueError) as e:
             log("no proximity handling (%s)" % e)
+
+        # A Bluetooth or USB output that connects becomes the output
+        # (audioroute.py, audioroutemodel.py).
+        self.audio_route = None
+        try:
+            from .audioroute import AudioRoute
+
+            self.audio_route = AudioRoute()
+        except (ImportError, ValueError) as e:
+            log("no audio routing (%s)" % e)
 
         # Incoming calls light the screen; the lock screen shows the call
         # (calls.py, callsmodel.py).
@@ -314,6 +330,7 @@ class Shell:
                     if surface is not None:
                         surface.destroy()
                 self.notifications.drop_monitor(name)
+                self.android_start.drop_monitor(name)
         for name, monitor in sorted(present.items()):
             if name not in self.bars:
                 log("status bar on %s" % name)
@@ -677,15 +694,26 @@ class Shell:
     def desk_menu_changed(self):
         pass
 
+    def expect_window(self, output, desktop_id=None):
+        """Tell duo-wc that the window of the app about to be launched
+        (`desktop_id`) opens on `output`. An Android app launched while
+        Android is not running gets the "Starting Android apps" notice there
+        and a hint that waits for Android to start (androidstart)."""
+        args = {}
+        ms = self.android_start.launching(output, desktop_id)
+        if ms:
+            args["timeout_ms"] = ms
+        try:
+            wc.request("expect_window", output=output, **args)
+        except (OSError, RuntimeError, ValueError) as e:
+            log("expect_window: %s" % e)
+
     def desk_launch(self, name, info, display):
         """An app started from a desk (its taskbar, its app menu): its
         window opens on that desk."""
         if info is None:
             return
-        try:
-            wc.request("expect_window", output=name)
-        except (OSError, RuntimeError, ValueError) as e:
-            log("expect_window: %s" % e)
+        self.expect_window(name, info.get_id())
         try:
             info.launch([], display.get_app_launch_context())
             log("desk %s launched %s" % (name, info.get_id()))
@@ -1448,6 +1476,7 @@ class Shell:
                 banner.hide_banner()
             for osd in self.volume_osds.values():
                 osd.hide_osd()
+            self.android_start.hide_all()
             self.volume_keys.screen_off()
             for dialog in self.sim_dialogs.values():
                 dialog.hide_dialog()

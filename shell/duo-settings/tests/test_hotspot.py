@@ -52,6 +52,21 @@ class Hotspot(unittest.TestCase):
         self.assertEqual(hs.masked("abcd-efgh-jkmn"), "•" * 14)
         self.assertEqual(hs.masked(""), "•" * 8)
 
+    def test_password_problem(self):
+        self.assertIsNone(hs.password_problem("abcd-efgh-jkmn"))
+        self.assertIsNone(hs.password_problem("my own pass 1"))
+        self.assertIsNone(hs.password_problem("x" * 8))
+        self.assertIsNone(hs.password_problem("~" * 63))
+        self.assertEqual(hs.password_problem(""), "short")
+        self.assertEqual(hs.password_problem("x" * 7), "short")
+        self.assertEqual(hs.password_problem("x" * 64), "long")
+        self.assertEqual(hs.password_problem("pässwörd12"), "chars")
+        self.assertEqual(hs.password_problem("tab\there12"), "chars")
+        self.assertEqual(hs.password_problem("é"), "chars")  # the accent first
+        self.assertEqual(hs.password_problem(None), "short")
+        self.assertTrue(hs.valid_password("abcd-efgh-jkmn"))
+        self.assertFalse(hs.valid_password("short"))
+
     def test_parse(self):
         self.assertEqual(hs.parse('{"ok": true}'), {"ok": True})
         self.assertEqual(hs.parse(""), {"ok": False, "error": "no answer"})
@@ -63,7 +78,16 @@ class Hotspot(unittest.TestCase):
 
         for s in ("Duo", "", " ", "a" * 32, "a" * 33, "é" * 16, "é" * 17, "x\ty"):
             self.assertEqual(hs.valid_ssid(s), conf.valid_ssid(s), repr(s))
-        for p in ("short", "abcd-efgh-jkmn", "x" * 63, "x" * 64, "pässwörd12", "tab\there"):
+        for p in (
+            "short",
+            "abcd-efgh-jkmn",
+            "x" * 63,
+            "x" * 64,
+            "pässwörd12",
+            "tab\there",
+            "my own pass 1",
+            "",
+        ):
             self.assertEqual(hs.valid_password(p), conf.valid_password(p), repr(p))
         self.assertEqual([v for v, _l in hs.BANDS], list(conf.BANDS))
         self.assertEqual([v for v, _l in hs.SECURITIES], list(conf.SECURITIES))
