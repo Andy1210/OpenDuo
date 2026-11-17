@@ -61,7 +61,7 @@ mode the phone is turned, with the desk panel above the keyboard.
 
 ## Hardware status
 
-As of 2026-11-16, on the maintainer's phone. **Works**: tested on the phone.
+As of 2026-11-17, on the maintainer's phone. **Works**: tested on the phone.
 **Partial**: some of it is tested, the notes say what is not. **In
 progress**: being worked on, not usable yet. **Not tested**: the code exists
 but has not been tried with real hardware. **No**: not available.
@@ -73,11 +73,11 @@ but has not been tried with real hardware. **No**: not available.
 | Pen | Partial | Tested with a Surface Slim Pen 2: pressure, tilt, eraser, palm rejection, the top button over Bluetooth, pen firmware update from Settings. Open: the pen's Bluetooth link can drop when the pen comes near the screen, and hover has gaps. Charging the pen in the cover does not work yet |
 | Hinge and postures | Works | Hinge angle and posture from the sensor DSP (book, tent, folded back, closed); opening the phone wakes it |
 | Rotation | Works | Per panel, automatic from the accelerometers |
-| Other sensors | Partial | Accelerometers, gyroscopes, magnetometers, ambient light (automatic brightness) and proximity work; switching the screen off at the ear during a call is built but not yet checked in a real call |
+| Other sensors | Partial | Accelerometers, gyroscopes, magnetometers and ambient light (automatic brightness) work. Proximity: switching the screen off at the ear during a call does not work yet (tried in a real call) |
 | GPU | Works | Adreno 660 with Mesa freedreno (OpenGL 4.6, OpenGL ES 3.2) and turnip (Vulkan) |
-| Hardware video decoding | Partial | H.264 and HEVC in mpv, GStreamer and Pipeline (YouTube). VP9 in hardware crashes the video firmware, so it is decoded in software; the chip has no AV1; browsers decode in software |
+| Hardware video decoding | Partial | H.264 and HEVC in mpv, GStreamer and Pipeline (YouTube). The decoder can get stuck after a while until the next restart (being investigated). VP9 in hardware crashes the video firmware, so it is decoded in software; the chip has no AV1; browsers decode in software |
 | WiFi | Works | 2.4 and 5 GHz, Wi-Fi 6, the factory MAC address, the regulatory country from the mobile network. Off while asleep; wake-on-WLAN is built but off and not tested |
-| Bluetooth | Partial | The controller works with its factory address and the pen pairs; headsets and keyboards are not tested yet |
+| Bluetooth | Partial | The controller works with its factory address; the pen pairs; headphones play music (A2DP), but the sound does not switch to them by itself when they connect yet. Keyboards are not tested |
 | Mobile data | Works | LTE and 5G (NSA); 5G only while a screen is on and WiFi is not connected, to save power |
 | Calls | Works | Incoming and outgoing over 2G fallback (CSFB), so the network must still have 2G; earpiece, speakerphone, mute, DTMF, ringtones, do not disturb; a call wakes the phone |
 | VoLTE | In progress | The modem talks to our IMS data service, but IMS does not register yet |
@@ -92,9 +92,9 @@ but has not been tried with real hardware. **No**: not available.
 | Charging and battery | Works | USB-C charging, battery level and health, a clean shutdown at 3 % |
 | Charge limit | In progress | Microsoft's "Long Life" charge hold is exposed; where the firmware stops charging is not measured yet |
 | Sleep | Works | Sleeps by itself when both panels are dark; wakes on the power key, opening the phone, a call, an SMS, an alarm or the charger. Measured standby on battery with LTE: about 2.3 % per hour |
-| USB | Partial | Device mode (USB 2): charging, USB networking, serial console. No host mode (OTG) and no USB 3 |
-| External display | Not tested | DisplayPort over USB-C and a desktop mode are built; not tried with a monitor |
-| Hotspot | Not tested | The WiFi hotspot comes up next to the phone's own WiFi connection; no device has connected to it yet; USB tethering not tested |
+| USB | Partial | Charging works. USB data (networking, tethering, serial console) does not connect to a computer in the current build (being investigated). No host mode (OTG) and no USB 3 |
+| External display | No | The compositor side (a desktop mode or mirroring, chosen on connect) is built; DisplayPort over USB-C is not enabled in the kernel yet |
+| Hotspot | Partial | The WiFi hotspot works next to the phone's own WiFi connection (a phone connected and browsed); Settings does not list the connected devices yet. USB tethering waits for USB data (above) |
 | Fingerprint | No | The sensor belongs to the secure world; no realistic path for now |
 | NFC | No | Not started |
 
@@ -133,13 +133,16 @@ but has not been tried with real hardware. **No**: not available.
   screen PIN ([homecrypt/](homecrypt/README.md), switched on for the first
   time on the maintainer's phone on 2026-11-16); bug reports with personal
   identifiers masked.
-- **Updates:** Debian updates with the phone-specific parts pinned, a
-  snapshot and a way back before each update; a new kernel boots once as a
-  trial and falls back by itself if it does not come up.
+- **Updates:** Settings > Updates installs Debian's updates and OpenDuo's
+  own packages from a signed repository (the public one goes live with the
+  first release), with a snapshot and a way back before each update; a new
+  kernel boots as a trial and the phone falls back to the previous one by
+  itself if it does not come up.
 
 Known limits: apps that need Google's Play Integrity (banking and the like)
 do not run in Waydroid, and there is no hardware video decoding inside
-Android.
+Android. An Android app on one panel can come up in the two-panel layout and
+not fit, and Angelfish plays no sound yet; both are being fixed.
 
 ## Documentation
 

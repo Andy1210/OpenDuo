@@ -98,8 +98,7 @@ jobs:
         run: |
           set -eu
           docker build -q -t duo2-build build >/dev/null
-          git clone -q --depth 1 --branch "$KERNEL_TAG" \
-              https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git src/linux
+          scripts/fetch-linux.sh "$KERNEL_TAG" src/linux
           # the same patches give the same commits (and so the same release string)
           git -C src/linux -c user.name=OpenDuo -c user.email=noreply@example.org \
               am -q --committer-date-is-author-date kernel/patches/*.patch

@@ -309,8 +309,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Apply kernel/patches to Linux ${{ env.KERNEL_TAG }}
         run: |
-          git clone -q --depth 1 --branch "$KERNEL_TAG" \
-              https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git /tmp/linux
+          scripts/fetch-linux.sh "$KERNEL_TAG" /tmp/linux
           git -C /tmp/linux -c user.name=ci -c user.email=ci@example.invalid am -q \
               "$GITHUB_WORKSPACE"/kernel/patches/*.patch
           git -C /tmp/linux log --oneline "$KERNEL_TAG"..HEAD | wc -l
@@ -327,11 +326,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: checkpatch.pl from Linux ${{ env.KERNEL_TAG }}
         run: |
-          mkdir -p /tmp/cp
-          for f in checkpatch.pl spelling.txt const_structs.checkpatch; do
-              curl -sSfL -o "/tmp/cp/$f" \
-                  "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/scripts/$f?h=$KERNEL_TAG"
-          done
+          scripts/fetch-linux.sh --scripts "$KERNEL_TAG" /tmp/cp
       - name: checkpatch --strict
         env:
           PATCHES: ${{ needs.changes.outputs.patches }}
