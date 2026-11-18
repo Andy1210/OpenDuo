@@ -328,15 +328,31 @@ config is in the modem.
 ## SIM slots
 
 Physical slot 1 is the nano-SIM tray, physical slot 2 the built-in eSIM
-(eUICC). The modem runs both at once (dual SIM dual standby, as the stock
-Android configured it: `persist.radio.multisim.config=dsds`): physical 1 =
-logical 1, physical 2 = logical 2. ModemManager, and so Calls and Chatty, use
-the **primary GW provisioning session** only; `duo2-sim primary N` moves it to
-the SIM in slot N (and restarts ModemManager). ModemManager's own
-`--set-primary-sim-slot` is not for this modem: it assumes one active slot,
-reports slot 2 as "primary" whenever both are active, and would remap logical
-slot 2. An eSIM profile needs an LPA first (e.g. lpac, which has a QMI-over-QRTR
-backend; not packaged).
+(eUICC). The modem came up running both at once (dual SIM dual standby, as
+the stock Android configured it: `persist.radio.multisim.config=dsds`):
+physical 1 = logical 1, physical 2 = logical 2. ModemManager, and so Calls
+and Chatty, use the **primary GW provisioning session** only, and this modem
+opens that session **only on logical slot 1**: with a working eSIM profile
+(2026-11-18) a request for it on logical slot 2 was answered "cancelled", or
+with a success that never became a session, while the same profile opened at
+once as the secondary session (what the stock Android used for the second
+SIM). So `duo2-sim use N` (`primary N` is the same) maps physical slot N to
+logical slot 1 (QMI UIM switch slot, as ModemManager's own
+`--set-primary-sim-slot` does; the other physical slot becomes inactive),
+waits for the card, opens its primary session (the card status decides: the
+modem's answer to the request is not reliable either way), keeps
+`PROVISION_SLOT=N` in `/etc/duo2/wwan.conf`, and stops ModemManager and
+duo2-wwan for the switch and starts them again. `duo2-sim slots` gives the
+slots as JSON for Duo Settings (Settings > SIM card > **SIM in use**, through
+`duo-settings-helper sim`, after the shell's question). `boot-wait` and
+`auto` ask for the primary session on logical slot 1 only and never switch
+slots. The modem does **not** keep a switch across a restart (back to
+physical 1 = logical 1, both active), so `boot-wait` moves the slot in
+`PROVISION_SLOT` to logical slot 1 again before it asks for the session, and
+takes the other slot's card when no USIM shows in the chosen one (an eSIM
+with no profile switched on). Tried on the phone (2026-11-18): `use 2` in
+9 s, registered on LTE and 5G NR 33 s after it; after a restart the eSIM
+was moved back at 7 s, its session there at 9.6 s, registered home at 20 s.
 
 ## Mobile data
 
@@ -542,9 +558,26 @@ activation code `LPA:1$<SM-DP+>$<matching id>`, a nickname 64 printable
 characters); the question names the profile and, for a download, only the
 SM-DP+ host (never the matching id). Nothing logs an EID or an ICCID.
 
+A failed change answers `{"ok": false, "error", "step", "detail"}`: `error`
+in words for the user (`explain()`: no internet when the SM-DP+ could not be
+reached, the SM-DP+'s own message when it refused, a confirmation code
+missing, the chip's install reason such as no free memory), `step` and
+`detail` lpac's own (its failing function and reason; runs of six digits or
+more cut to their last two). A download is reported done only when the
+chip's list has the new profile afterwards (`{"ok": true, "profile":
+{...}}`); lpac's word alone is not taken for it. A download's steps and a
+failure's reason go to the system log (`journalctl -t duo2-esim`), without
+the activation code, the server or any identifier. lpac runs one at a time
+(`flock` on `/run/duo2-esim.lock`): the page used to read the chip's info
+and its list at once, and one of the two lpac processes crashed (SIGSEGV)
+on the phone. Activation codes are taken with the scheme in any case or
+without it (`lpa:1$...`, `1$...`: what a QR code reader may give).
+
 Testing without the chip: while root's `/etc/duo2/esim-fake` exists, the
 helper runs `tests/fake_lpac.py` instead of lpac: a chip with two made-up
-profiles, its state in `/run/duo2-esim-fake.json`. `tests/test_esim.py`
+profiles, its state in `/run/duo2-esim-fake.json`; a download goes through
+lpac's steps, and its matching id plays a failure (`OFFLINE`, `REFUSED`,
+`NEEDCONF`, `GHOST`: lpac says done but nothing is installed). `tests/test_esim.py`
 runs the helper's commands against the fake (`python3 -m unittest discover
 -s tests` here). Duo Settings' eSIM page is the UI
 (`shell/duo-settings/duosettings/esimpage.py`).

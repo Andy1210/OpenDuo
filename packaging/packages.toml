@@ -99,7 +99,9 @@ summary = "Duo Settings, OpenDuo's settings app"
 description = """Network, display, appearance, battery, sound, mobile and eSIM, hotspot,
 Android apps, pen, security, updates, developer options, About; its root
 helper (exact subcommands) and the panels' refresh rate at boot."""
-depends = ["python3", "sudo", "python3-gi", "gir1.2-gtk-4.0", "gir1.2-adw-1", "gtk-update-icon-cache"]
+depends = ["python3", "sudo", "python3-gi", "gir1.2-gtk-4.0", "gir1.2-adw-1", "gtk-update-icon-cache",
+           "gir1.2-gdkpixbuf-2.0", "gir1.2-gstreamer-1.0", "gstreamer1.0-plugins-bad",
+           "gstreamer1.0-pipewire", "gstreamer1.0-gtk4"]
 check = ["/usr/local/lib/duo-settings/duo-settings", "/usr/local/bin/duo-settings",
          "/etc/sudoers.d/duo-settings",
          "/usr/local/share/applications/org.duo2os.Settings.desktop",

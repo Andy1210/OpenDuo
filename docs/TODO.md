@@ -3,6 +3,13 @@
 Software work that is planned but not started. Hardware support is tracked in
 the README's hardware status table instead.
 
+## First start
+
+- **A setup wizard on the first start**: language and keyboard, time zone,
+  WiFi, a lock screen PIN (and with it the offer to encrypt the home folder),
+  and whether to turn on developer mode. Today the phone starts straight on
+  the home screen as the user `duo`, and all of this is in Settings.
+
 ## Translations
 
 OpenDuo's own programs are English only today. Everything below should be
@@ -43,6 +50,34 @@ come with their own translations.
   the image also keeps them optional for anyone who wants an Android without
   Google. With Google Play, Settings then explains Google's device
   registration (an uncertified device until it is registered).
+
+## WiFi
+
+- **The WiFi firmware can hang and nothing notices it.** Seen once on the
+  release image (2026-11-18): after about 19 hours up (WiFi working, the
+  panels dark for five hours, the phone held awake on the charger, WiFi power
+  save on, no suspend), the firmware stopped taking frames and commands at one
+  moment, with no kernel message before it: from then on every frame failed
+  (`failed to transmit frame -12`, 511 frames left in the queue), every WMI
+  command timed out (`wmi command ... timeout`), and the firmware neither
+  crashed nor asked for a restart, so ath11k never recovered. The shell kept
+  showing WiFi as connected with no traffic for hours, and mobile data stayed
+  idle because the default route was still on WiFi. Before it, 71
+  `msdu_done bit in attention is not set` warnings in 19 hours (known on this
+  chip family, maybe unrelated). A restart of the phone brought it back.
+  - **Detect it:** a watchdog on the kernel's messages (a run of transmit
+    failures and WMI timeouts) or on traffic (no answer from the gateway while
+    associated), which tells the user and takes WiFi's default route away so
+    mobile data carries on.
+  - **Recover without a restart:** taking the driver out
+    (`modprobe -r ath11k_pci`) with the firmware hung restarted the whole
+    phone (no oops or pstore record, about seven seconds after
+    `qmi failed to send wlan mode off: -110`): a hard reset, not a panic. A
+    safe way needs the driver to skip the firmware handshakes it cannot get
+    and reset the chip over MHI / PCIe, as on a firmware crash; this is
+    kernel work and has to go through `duo2-try`.
+  - **Find the trigger:** a long run on WiFi with the panels dark, with and
+    without power save, with the firmware's own logs if they can be reached.
 
 ## Updates
 

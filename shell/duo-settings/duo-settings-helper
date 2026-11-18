@@ -94,6 +94,14 @@
                                                 (Settings > Privacy; desktop ids):
                                                 /etc/geoclue/conf.d/91-duo2-apps.conf,
                                                 then geoclue starts anew if it runs
+    duo-settings-helper sim slots               the SIM slots (JSON: duo2-sim slots:
+                                                card, eSIM, active, in use)
+    duo-settings-helper sim use 1|2             use the SIM in that slot (1 = the tray,
+                                                2 = the eSIM) for calls, messages and
+                                                data: duo2-sim use, once the user says
+                                                yes to the shell's question (any app
+                                                can run this helper); answers JSON
+                                                {"ok": ..., "error": ...}
 
 Run by Duo Settings as `sudo -n duo-settings-helper ...`; install-files.sh
 puts a sudoers rule for exactly this file in /etc/sudoers.d/duo-settings.
@@ -138,6 +146,9 @@ DAYS = {"mon": "2", "sun": "1", "sat": "7"}
 TOUCH_NAMES = {"left": "Surface Duo 2 Touchscreen Left", "right": "Surface Duo 2 Touchscreen Right"}
 BATTERY_REPORT = "/run/duo2-battery/report.json"
 QMI_SCRIPT = "/usr/local/lib/duo-settings/duo-settings-qmi"
+SIM_TOOL = "/usr/local/sbin/duo2-sim"
+SYSTEMD_RUN = "/usr/bin/systemd-run"
+WC_ADMIN_SOCKET_WAIT_S = 30  # a question the user answers (duo-wc's "helper": 20 s)
 DMI = "/sys/class/dmi/id"
 SYSTEMD_RUN = "/usr/bin/systemd-run"
 # The QMI reader's service: QRTR only, nothing it could write.
@@ -588,6 +599,75 @@ def wc_admin_reply(request, **args):
         return None
 
 
+def ask_user(detail):
+    """Ask the user in the shell (duo-wc's confirm, action "helper", waited
+    for): True only on a yes. No answer, no shell: no."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(WC_ADMIN_SOCKET_WAIT_S)
+            s.connect(WC_ADMIN)
+            request = {"id": 1, "request": "confirm", "action": "helper", "detail": detail}
+            s.sendall((json.dumps(dict(request, wait=True)) + "\n").encode())
+            buf = b""
+            while b"\n" not in buf:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+        reply = json.loads(buf.split(b"\n")[0] or b"{}")
+    except (OSError, ValueError):
+        return False
+    return isinstance(reply, dict) and (reply.get("ok") or {}).get("yes") is True
+
+
+SIM_QUESTION = {
+    "1": "Use the SIM card in the tray for calls, messages and mobile data? The eSIM is "
+    "switched off until you switch back. The phone has no signal for about a minute.",
+    "2": "Use the eSIM for calls, messages and mobile data? The SIM card in the tray is "
+    "switched off until you switch back. The phone has no signal for about a minute.",
+}
+
+
+def sim_tool(args, timeout):
+    """duo2-sim as a transient service that systemd (PID 1) starts: it talks
+    QMI over QRTR, which the GUI's programs, and this helper under their
+    sudo, may not (docs/hardware/security.md). (exit code, stdout, stderr)."""
+    cmd = [
+        SYSTEMD_RUN,
+        "--quiet",
+        "--pipe",
+        "--wait",
+        "--collect",
+        "--service-type=exec",
+        "--unit=duo-settings-sim-%d" % os.getpid(),
+        "--description=Duo Settings: the SIM slots",
+        "--property=RuntimeMaxSec=%d" % timeout,
+        "--",
+        SIM_TOOL,
+    ] + list(args)
+    try:
+        r = subprocess.run(
+            cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout + 15
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return -1, "", str(e)
+    return r.returncode, r.stdout, r.stderr
+
+
+def sim_use(slot):
+    """Switch the SIM in use after the user's yes; prints the JSON answer."""
+    if not ask_user(SIM_QUESTION[slot]):
+        print(json.dumps({"ok": False, "error": "not confirmed"}))
+        return 1
+    code, out, err = sim_tool(["use", slot], 150)
+    if code == 0:
+        print(json.dumps({"ok": True, "message": (out.strip().splitlines() or [""])[-1]}))
+        return 0
+    why = (err.strip().splitlines() or out.strip().splitlines() or ["it did not work"])[-1]
+    print(json.dumps({"ok": False, "error": why}))
+    return 1
+
+
 def battery_stats(action, report=None, wait_s=10.0):
     """Ask the collector for a fresh report (refresh) or to clear its usage
     history (clear); True once its report has been rewritten."""
@@ -789,6 +869,12 @@ def main(argv):
         return 0 if wc_admin("set_external", **display_request(argv[1:])) else 1
     if argv[:1] == ["pose"] and tuple(argv[1:]) in POSES:
         return 0 if wc_admin("set_pose", **POSES[tuple(argv[1:])]) else 1
+    if argv == ["sim", "slots"]:
+        code, out, _err = sim_tool(["slots"], 40)
+        print((out.strip().splitlines() or ["[]"])[-1])
+        return 0 if code == 0 else 1
+    if n == 3 and argv[:2] == ["sim", "use"] and argv[2] in SIM_QUESTION:
+        return sim_use(argv[2])
     if argv == ["restart-display"]:
         # Not `systemctl restart`: any app can run this helper. duo-wc asks
         # the user in the shell, and restarts (it exits, systemd brings it

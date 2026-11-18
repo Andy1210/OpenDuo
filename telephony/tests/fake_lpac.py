@@ -124,23 +124,59 @@ def main(argv):
         )
         return reply(data=None)
     if argv[:2] == ["profile", "download"]:
-        n = 3 + len(profiles)
-        profiles.append(
-            {
-                "iccid": "890000000000000000%02d" % (n * 11 % 100),
-                "isdpAid": "A0",
-                "profileState": "disabled",
-                "profileNickname": None,
-                "serviceProviderName": "Test Operator C",
-                "profileName": "Test C",
-                "iconType": "none",
-                "icon": None,
-                "profileClass": "operational",
-            }
-        )
-        save(profiles)
-        return reply(data=None)
+        return download(profiles, argv[2:])
     return reply(-1, "unknown command")
+
+
+def progress(message, data=None):
+    print(
+        json.dumps({"type": "progress", "payload": {"code": 0, "message": message, "data": data}})
+    )
+
+
+def download(profiles, args):
+    """lpac's download, step by step. The matching id plays a failure:
+    OFFLINE (no internet), REFUSED (the server says no), NEEDCONF (a
+    confirmation code is needed and none was given), GHOST (lpac says done
+    but nothing is installed); anything else installs "Test C"."""
+    code = args[args.index("-a") + 1] if "-a" in args else ""
+    matching = code.split("$")[2] if code.count("$") >= 2 else ""
+    if matching == "NEEDCONF" and "-c" not in args:
+        progress("es10b_cancel_session")
+        return reply(-1, "confirmation_code", "required")
+    progress("es10b_get_euicc_challenge_and_info", "rsp.example.com")
+    progress("es9p_initiate_authentication", "rsp.example.com")
+    if matching == "OFFLINE":
+        progress("es10b_cancel_session")
+        return reply(-1, "es9p_initiate_authentication", "HTTP transport failed")
+    progress("es10b_authenticate_server", "rsp.example.com")
+    progress("es9p_authenticate_client", "rsp.example.com")
+    if matching == "REFUSED":
+        progress("es10b_cancel_session")
+        return reply(-1, "es9p_authenticate_client", "The Matching ID 12345678 was refused")
+    n = 3 + len(profiles)
+    new = {
+        "iccid": "890000000000000000%02d" % (n * 11 % 100),
+        "isdpAid": "A0",
+        "profileState": "disabled",
+        "profileNickname": None,
+        "serviceProviderName": "Test Operator C",
+        "profileName": "Test C",
+        "iconType": "none",
+        "icon": None,
+        "profileClass": "operational",
+    }
+    progress(
+        "es8p_meatadata_parse",
+        {k: new[k] for k in ("iccid", "serviceProviderName", "profileName", "profileClass")},
+    )
+    progress("es10b_prepare_download", "rsp.example.com")
+    progress("es9p_get_bound_profile_package", "rsp.example.com")
+    progress("es10b_load_bound_profile_package", "rsp.example.com")
+    if matching != "GHOST":
+        profiles.append(new)
+        save(profiles)
+    return reply(data={"seqNumber": 1, "bppCommandId": None, "errorReason": None})
 
 
 if __name__ == "__main__":

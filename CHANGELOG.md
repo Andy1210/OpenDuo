@@ -40,6 +40,15 @@ Development state: `0.1.0-dev`. The first public release will be 0.1.0.
   shows what's new, installs with a snapshot first (on the charger or at 50 %
   battery), can install at night (off by default), and offers a testing channel
   in developer mode.
+- Settings > eSIM reads the operator's activation code from its QR code: with
+  the camera (the ultra-wide first, a live view) or from a picture such as a
+  screenshot; typing it stays as the third way. Factory test profiles are
+  marked as such, a download shows its progress, and a finished download
+  offers to switch to the new profile.
+- Settings > SIM card chooses the SIM in use: the SIM card in the tray or the
+  eSIM. The modem takes calls, messages and data only on its first logical
+  slot, so the chosen SIM is moved there (`duo2-sim use`); switching on an
+  eSIM profile while the tray's SIM is in use offers the switch.
 
 ### Pen
 - Surface Slim Pen 2 (the pen tested): pressure, tilt, eraser, the Bluetooth top
@@ -82,6 +91,17 @@ Development state: `0.1.0-dev`. The first public release will be 0.1.0.
 - Bug reports with personal identifiers masked.
 
 ### Fixed
+- An eSIM download that failed said only lpac's internal step name (for
+  example `es9p_initiate_authentication`); it now says what went wrong (no
+  internet, what the operator's server answered, a confirmation code missing)
+  with the step under it, logs the steps (`journalctl -t duo2-esim`, no
+  identifiers), and a download counts as done only when the chip lists the
+  new profile.
+- The eSIM page started two lpac processes at once, and one of them could
+  crash; lpac now runs one at a time.
+- `duo2-sim primary 2` could never make the eSIM the SIM in use: the modem
+  opens the primary subscription only on its first logical slot, and the
+  request on the second one was refused. It now moves the slot there.
 - A network saved in Settings > WiFi no longer leaves wpa_supplicant's
   configuration, with the network's key, readable by every user.
 - The image no longer carries the D-Bus machine id made during its build

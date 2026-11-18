@@ -19,7 +19,7 @@ Pictures: `out/shell-shots/settings-*.png`, `apps-settings-list.png`.
 | --- | --- | --- |
 | Wi-Fi | radio on/off; the network in use (signal, address, Forget); the networks around (signal, lock, "Saved"); tap to join, with a password dialog when needed | wpa_supplicant's control socket (`/run/wpa_supplicant/wlan0`, group `netdev`); the radio via `duo-shell-helper wifi` |
 | Bluetooth | power; my devices (connect, disconnect, forget; "Connected · Battery 64 %" where BlueZ knows the battery); nearby devices (tap to pair) while the page is open | BlueZ on the system bus as the user, one `bluetooth.Bluez` for the window (`shared`: the Pen page uses it too); a pairing agent (`org.bluez.Agent1`, KeyboardDisplay) answering PIN / passkey / confirmation in dialogs (BlueZ makes the adapter bondable only while a default agent is registered: `AlwaysPairable` is off); a pairing sets the device trusted and connects it; the battery is `org.bluez.Battery1` (GATT Battery Service); a radio rfkill-blocked by airplane mode is freed first (`duo-shell-helper bluetooth on`) |
-| SIM card | **Voicemail number** (below "Voicemail"); the SIM's state; **Lock the SIM with its PIN** (on / off, asks the current SIM PIN, the attempts left under it, "1 attempt left: a wrong PIN blocks the SIM"); **Change the SIM PIN** (current, new twice; only with the lock on, as SIMs allow); a SIM waiting for its PIN or PUK is the shell's PIN dialog's, the page only says so | ModemManager on the system bus as the user (polkit's Device.Control): `Modem3gpp.EnabledFacilityLocks` ("sim"), `UnlockRetries`, `Sim.EnablePin` / `DisablePin` / `ChangePin` (`duosettings/sim.py`); a PIN goes to ModemManager only, is never logged, stored or shown, the fields are emptied when the dialog closes |
+| SIM card | **SIM in use**: the SIM card in the tray or the eSIM (radio rows: in use / off / no card; a tap asks the shell, then the phone switches in about a minute); **Voicemail number** (below "Voicemail"); the SIM's state; **Lock the SIM with its PIN** (on / off, asks the current SIM PIN, the attempts left under it, "1 attempt left: a wrong PIN blocks the SIM"); **Change the SIM PIN** (current, new twice; only with the lock on, as SIMs allow); a SIM waiting for its PIN or PUK is the shell's PIN dialog's, the page only says so | `sudo -n duo-settings-helper sim slots` / `sim use 1\|2` (the helper asks the shell's "helper" question, then runs `duo2-sim use` as a transient system unit: it talks QMI over QRTR, which the GUI and its sudo may not; `sim.slot_view()` pure); ModemManager on the system bus as the user (polkit's Device.Control): `Modem3gpp.EnabledFacilityLocks` ("sim"), `UnlockRetries`, `Sim.EnablePin` / `DisablePin` / `ChangePin` (`duosettings/sim.py`); a PIN goes to ModemManager only, is never logged, stored or shown, the fields are emptied when the dialog closes |
 | Hotspot | share the mobile data: WiFi hotspot on/off (its band, channel and whether it runs beside the phone's own WiFi), network name, password (Show / Copy, a new one, your own: Save only for 8 to 63 characters without accents, the dialog says what is wrong; the password goes to the helper on stdin), band (5 / 2.4 GHz), security (WPA2/WPA3, WPA3, WPA2); the connected devices (name, address, WiFi / USB, minutes); USB tethering (asks first: the USB connection drops for a moment); if WiFi cannot stay on (don't start / ask to switch WiFi off: greyed in development mode), off with no device (never, 5-60 min), use 5G for the hotspot, data shared this time | `sudo -n duo2-hotspot` (hotspot/README.md): on, USB on and a new password are asked of the user in the shell (this app has no grant); the state from `/run/duo2/hotspot.json` every 3 s (no password in it), the bytes every 10 s while on; the password is fetched only for Show / Copy and forgotten after 60 s or when the page closes (`duosettings/hotspot.py` pure, `tests/test_hotspot.py`; `tests/gtk_hotspot_page.py` under GTK) |
 | Display | brightness (both panels), screen off after (30 s to never), refresh rate 60/90 Hz, scale 200-300 %, hinge gap | brightness: `duo-shell-helper`; idle and hinge gap saved in `duo-wc.conf` and applied live by the helper (duo-wc's admin socket); refresh and scale take a display restart (offered on the page) |
 | Appearance | **Style: Dark / Light / Automatic** (light from / dark from, whole hours; dark by default): the apps follow it; the bars, the home screen and the lock screen stay dark (AMOLED), the on-screen keyboard (phosh-osk-stub, libadwaita) follows the apps | `duo-appearance` (the user's, next to this app): `~/.config/duo2/appearance.conf`; GSettings `color-scheme` (`prefer-dark` / `prefer-light`: `default` would leave apps that ask for dark dark; the portal hands it to Flatpaks) and `gtk-theme` (Adwaita-dark / Adwaita, GTK 3); Qt / KDE apps: Breeze Light's colours in `~/.config/kdeglobals` (a file marked as the tool's; a user's own is never touched), removed again for dark (the system's `/etc/xdg/kdeglobals` is dark), running ones told by KGlobalSettings `notifyChange`; Android: `sudo duo2-android-task night yes|no` while it runs, and `duo2-waydroid-idle` asks again when Android starts; Automatic: the user timer `duo-appearance.timer` (every 15 min, enabled only for Automatic). `duosettings/appearance.py` pure, `tests/test_settings.py`; `tests/gtk_appearance_page.py` under GTK |
@@ -391,16 +391,50 @@ network 26201: 3311, and 4712 for some prepaid providers); the app grid's **Voic
 `duo-voicemail`, which has Calls dial it (`gnome-calls --dial`), or opens
 this page when no number is set.
 
-## eSIM (2026-11-07 night)
+## eSIM (2026-11-07 night; QR codes 2026-11-18)
 
 `duosettings/esimpage.py` (the page, after "SIM card"), `duosettings/esim.py`
-(pure: the helper's answer, the activation code's shape, masking;
-`tests/test_esim.py`). Everything goes through `sudo -n duo2-esim`
-(telephony/README.md "eSIM"): the EID (by its last four digits; a tap shows
-it whole), the profiles (name or nickname, operator, in use / off, the
-ICCID's last four digits), a menu per profile (Use this profile / Switch
-off, Rename, Delete: not for the one in use, asked here first and then in
-the shell), and **Add a profile**: paste the activation code (the text
-under the operator's QR code; there is no camera yet) and an optional
-confirmation code. The helper asks the user in the shell before every
-change; this page only says what to do and shows the result.
+(pure: the helper's answer, the activation code's shape, masking, the
+failure's words; `tests/test_esim.py`). Everything goes through `sudo -n
+duo2-esim` (telephony/README.md "eSIM"): the EID (by its last four digits; a
+tap shows it whole), the profiles (name or nickname, operator, in use / off,
+the ICCID's last four digits; the chip's factory profiles for lab network
+simulators, class `test`, say "Factory test profile"), a menu per profile
+(Use this profile / Switch off, Rename, Delete: not for the one in use, asked
+here first and then in the shell). The chip is read one lpac at a time (info,
+then the list).
+
+**Add a profile** has three ways to the operator's activation code:
+
+- **Scan the QR code**: the camera's live view (`duosettings/qrscan.py`,
+  `ScanDialog`): the camera through PipeWire (`pipewiresrc` from PipeWire's
+  device provider), 1280 x 720 when the camera has it, a `tee` to
+  `gtk4paintablesink` (the view; the sink turns it upright by the
+  `image-orientation` tag that PipeWire's libcamera plugin puts on the
+  buffers, as in Snapshot: no turn of the page's own) and to GStreamer's `zbar` element, whose
+  `barcode` messages carry the code. The ultra-wide camera comes first (its
+  fixed focus is sharp up close; the main and tele lenses have no autofocus
+  yet), the header's button goes through the others. A QR code that is not
+  an activation code is named under the view and the scan goes on.
+- **QR code from a picture**: a file chooser (a screenshot, a photo, an
+  e-mail's attachment); the picture is read with GdkPixbuf at most 1600 px
+  (then 800), its green channel goes through `appsrc ! zbar`.
+- **Type the code**: paste or type it (the text under the QR code).
+
+A code read from a QR code opens the download question with the code filled
+in and the operator's server named; a code whose fifth field asks for a
+confirmation code (`$1`) asks for it. A download shows a progress dialog
+that follows the helper's `{"progress": STEP}` lines (connecting to the
+operator, checking the code, downloading, installing, checking the eSIM:
+`esim.progress_stage()`); a profile switched on (from its menu or "Use it
+now" after a download) while the phone uses the SIM card in the tray offers
+to switch to the eSIM (`duo-settings-helper sim use 2`). The helper asks the user in the shell
+before every change; this page only says what to do and shows the result:
+a failure in the helper's words (no internet, the operator's server's
+answer, a confirmation code missing, not enough memory...) with lpac's step
+and reason under it; a download that worked offers to switch to the new
+profile. The pure parts of the reader (the cameras' order and names, a
+picture's grey rows) are in `duosettings/qr.py` (`tests/test_qr.py`). The
+reader needs `gir1.2-gstreamer-1.0`, `gstreamer1.0-plugins-bad` (zbar),
+`gstreamer1.0-pipewire` and `gstreamer1.0-gtk4` (the package depends on
+them); without them the two QR rows are not shown.

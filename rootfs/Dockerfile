@@ -67,7 +67,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # gst-launch-1.0). The cameras (docs/hardware/camera.md): libcamera's simple pipeline
 # with its software ISP (libcamera-ipa), cam (libcamera-tools), and the
 # PipeWire and GStreamer sources; the sensors' register tables are a
-# post-install step (scripts/build-camera-tables.sh --install).
+# post-install step (scripts/build-camera-tables.sh --install). Settings'
+# QR code reader (the eSIM page) takes GStreamer from Python
+# (gir1.2-gstreamer-1.0) and shows the camera through gstreamer1.0-gtk4.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         fonts-cantarell fonts-noto-color-emoji appstream apt-config-icons apt-config-icons-hidpi \
         gnome-clocks gnome-calculator gnome-calendar evolution-data-server gnome-weather \
@@ -79,6 +81,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         packagekit packagekit-tools \
         gir1.2-adw-1 \
         libcamera-tools libcamera-ipa libspa-0.2-libcamera gstreamer1.0-libcamera \
+        gir1.2-gstreamer-1.0 gstreamer1.0-gtk4 \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 # The camera stack over trixie's (camera/build-debs.sh, docs/hardware/camera.md):
 # libcamera 0.7.2 (trixie's 0.4.0 tints every picture green and has no helper

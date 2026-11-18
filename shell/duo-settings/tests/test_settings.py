@@ -94,6 +94,27 @@ class SimLockView(unittest.TestCase):
         self.assertFalse(sim.wrong_pin(None))
 
 
+class SimSlots(unittest.TestCase):
+    # duo2-sim slots after `use 2`: the tray inactive, the eSIM logical slot 1
+    SLOTS = [
+        {"slot": 1, "card": True, "esim": False, "active": False, "logical": None, "in_use": False},
+        {"slot": 2, "card": True, "esim": True, "active": True, "logical": 1, "in_use": True},
+    ]
+
+    def test_in_use_and_off(self):
+        v = sim.slot_view(self.SLOTS)
+        self.assertEqual(v["2"], {"card": True, "in_use": True, "state": "in use"})
+        self.assertEqual(v["1"]["state"], "off")
+
+    def test_no_card(self):
+        slots = [dict(self.SLOTS[0], card=False), self.SLOTS[1]]
+        self.assertEqual(sim.slot_view(slots)["1"]["state"], "no card")
+
+    def test_unreadable(self):
+        for bad in (None, [], "x", [{"slot": 3}], [1]):
+            self.assertIsNone(sim.slot_view(bad), bad)
+
+
 class Conf(unittest.TestCase):
     def test_replace_keeps_comments(self):
         text = "# scale of the panels\nscale = 2.5\nhinge_gap = on\n"

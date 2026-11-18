@@ -3,22 +3,31 @@
 #
 #   duo2-sim status        slots, cards, the primary subscription, ModemManager's view
 #                          (no ICCID, EID, IMSI, IMEI or phone number is printed)
-#   duo2-sim primary N     make the SIM in physical slot N (1 = nano-SIM tray,
-#                          2 = built-in eSIM) the primary subscription, the one
-#                          ModemManager, Calls and Chatty use; restarts ModemManager
+#   duo2-sim slots         the same for programs (Duo Settings): one JSON line, per
+#                          physical slot: card there, eSIM, active, logical slot, in use
+#   duo2-sim use N         use the SIM in physical slot N (1 = nano-SIM tray, 2 =
+#                          built-in eSIM): the one ModemManager, Calls and Chatty
+#                          use; maps it to logical slot 1 (the other slot goes
+#                          inactive), opens its primary subscription and restarts
+#                          ModemManager (`primary N` is the same)
 #   duo2-sim boot-wait     before ModemManager starts: ask for the primary
 #                          subscription and wait for it (bounded), see below
-#   duo2-sim auto          if ModemManager has no SIM (sim-missing): the first slot
-#                          (PROVISION_SLOT in /etc/duo2/wwan.conf, then the other)
-#                          whose card has a USIM application (duo2-wwan runs this)
+#   duo2-sim auto          if ModemManager has no SIM (sim-missing): ask for the
+#                          primary subscription of the SIM in logical slot 1
+#                          (duo2-wwan runs this); it never switches slots
 #
-# The modem runs both slots at once (dual SIM dual standby, as Android
-# configured it: persist.radio.multisim.config=dsds): physical slot 1 is
-# logical slot 1, physical slot 2 logical slot 2, and both are "active".
-# ModemManager talks to the primary GW provisioning session only, so which
-# card is "primary" is the switch, not the slot mapping (ModemManager's own
-# --set-primary-sim-slot assumes a single active slot and would remap logical
-# slot 2). Run as root.
+# The modem came up running both slots at once (dual SIM dual standby, as
+# Android configured it: persist.radio.multisim.config=dsds): physical slot 1
+# logical slot 1, physical slot 2 logical slot 2, both "active". ModemManager
+# talks to the primary GW provisioning session only, and this modem opens
+# that session ONLY ON LOGICAL SLOT 1: asked for logical slot 2 (the eSIM
+# with a working profile, 2026-11-18) it answered "cancelled" or a success
+# that never became a session, while the same profile opened at once as the
+# secondary session (which is what Android used for the second SIM). So the
+# SIM to use is mapped to logical slot 1 (UIM switch slot: the other
+# physical slot becomes inactive), as ModemManager's own
+# --set-primary-sim-slot does. Switching back is the same with the other
+# slot. Run as root.
 set -eu
 q() { timeout 20 qmicli -d qrtr://0 "$@" 2>&1; }
 conf=/etc/duo2/wwan.conf
@@ -38,6 +47,13 @@ logical_of() {
         /Slot status: active/ { if (p == P) active = 1; next }
         /Logical slot:/ { if (p == P && active) { print $3; exit } }'
 }
+# Physical slot $1 has a card in it (active or not).
+card_in() {
+    q --uim-get-slot-status | awk -v P="$1" '
+        /Physical slot [0-9]+:/ { p = $3; gsub(/[^0-9]/, "", p); next }
+        /Card status: present/ { if (p == P) { found = 1; exit } }
+        END { exit !found }'
+}
 # The logical slot of the primary GW session (empty: none).
 primary_slot() {
     q --uim-get-card-status | sed -n "s/.*Primary GW: *slot '\([0-9]*\)'.*/\1/p"
@@ -56,31 +72,99 @@ status)
         echo "  no modem in ModemManager"
     fi
     ;;
-primary)
-    phys=${2:?usage: duo2-sim primary 1|2}
-    l=$(logical_of "$phys")
-    [ -n "$l" ] || { echo "physical slot $phys is not active" >&2; exit 1; }
-    aid=$(usim_aid "$l")
-    [ -n "$aid" ] || { echo "no USIM application on the card in slot $phys" >&2; exit 1; }
-    cur=$(primary_slot)
-    if [ "$cur" = "$l" ]; then
-        echo "slot $phys is the primary subscription already"
+slots)
+    # One JSON line: [{"slot": 1, "card": true, "esim": false, "active": true,
+    # "logical": 1, "in_use": true}, ...] (no identifier).
+    prim=$(primary_slot)
+    q --uim-get-slot-status | awk -v prim="$prim" '
+        function flush() {
+            if (p == "") return
+            printf "%s{\"slot\": %s, \"card\": %s, \"esim\": %s, \"active\": %s, \"logical\": %s, \"in_use\": %s}", \
+                (n++ ? ", " : ""), p, card, esim, active, (l == "" ? "null" : l), \
+                ((active == "true" && l != "" && l == prim) ? "true" : "false")
+        }
+        BEGIN { printf "["; p = "" }
+        /Physical slot [0-9]+:/ { flush(); p = $3; gsub(/[^0-9]/, "", p); card = "false"; esim = "false"; active = "false"; l = ""; next }
+        /Card status: present/ { card = "true"; next }
+        /Slot status: active/ { active = "true"; next }
+        /Logical slot:/ { l = $3; gsub(/[^0-9]/, "", l); next }
+        /Is eUICC: yes/ { esim = "true"; next }
+        END { flush(); print "]" }'
+    ;;
+primary | use)
+    phys=${2:-}
+    case $phys in
+    1 | 2) ;;
+    *)
+        echo "usage: duo2-sim use 1|2" >&2
+        exit 2
+        ;;
+    esac
+    if [ "$(logical_of "$phys")" = 1 ] && [ "$(primary_slot)" = 1 ]; then
+        echo "slot $phys is in use already"
         exit 0
     fi
-    if [ -n "$cur" ]; then
-        q --uim-change-provisioning-session="session-type=primary-gw-provisioning,activate=no" >/dev/null ||
-            echo "could not end the primary session on logical slot $cur" >&2
-        sleep 1
+    # ModemManager and duo2-wwan (which would run `auto` on the sim-missing
+    # in between) are stopped while the slots change, and started again.
+    services=
+    for unit in duo2-wwan.service ModemManager.service; do
+        systemctl -q is-active "$unit" && services="$services $unit"
+    done
+    # shellcheck disable=SC2086 # the unit names, split on purpose
+    [ -z "$services" ] || systemctl stop $services
+    again() {
+        # shellcheck disable=SC2086
+        [ -z "$services" ] || systemctl start $services
+    }
+    # $1 tries, 2 s apart, until the command $2... succeeds
+    until_ok() {
+        n=$1
+        shift
+        while [ "$n" -gt 0 ]; do
+            "$@" && return 0
+            n=$((n - 1))
+            sleep 2
+        done
+        return 1
+    }
+    on_l1() { [ "$(logical_of "$phys")" = 1 ]; }
+    has_usim() { [ -n "$(usim_aid 1)" ]; }
+    is_primary() { [ "$(primary_slot)" = 1 ]; }
+    if ! on_l1; then
+        q --uim-switch-slot="$phys" | grep -qi successfully ||
+            echo "the modem did not answer the switch to slot $phys; looking anyway" >&2
+        if ! until_ok 10 on_l1; then
+            echo "slot $phys did not become logical slot 1" >&2
+            again
+            exit 1
+        fi
     fi
-    if q --uim-change-provisioning-session="session-type=primary-gw-provisioning,activate=yes,slot=$l,aid=$aid" |
-        grep -q successfully; then
-        echo "slot $phys is the primary subscription now"
-    else
-        echo "the modem refused slot $phys as the primary subscription" >&2
+    if ! until_ok 8 has_usim; then
+        echo "no USIM application on the card in slot $phys" >&2
+        again
         exit 1
     fi
-    sleep 2
-    systemctl try-restart ModemManager.service
+    # The modem often opens the session by itself after a switch; its
+    # answer to the request is not reliable either way (a refusal with the
+    # session there 0.2 s later, or a success that never came): the card
+    # status decides.
+    if ! until_ok 3 is_primary; then
+        q --uim-change-provisioning-session="session-type=primary-gw-provisioning,activate=yes,slot=1,aid=$(usim_aid 1)" >/dev/null || true
+        if ! until_ok 10 is_primary; then
+            echo "the modem did not open the subscription of slot $phys" >&2
+            again
+            exit 1
+        fi
+    fi
+    if [ -w "$conf" ]; then
+        if grep -q '^PROVISION_SLOT=' "$conf"; then
+            sed -i "s/^PROVISION_SLOT=.*/PROVISION_SLOT=$phys/" "$conf"
+        else
+            echo "PROVISION_SLOT=$phys" >>"$conf"
+        fi
+    fi
+    again
+    echo "slot $phys is in use now"
     ;;
 auto)
     first=1
@@ -89,7 +173,9 @@ auto)
     cand=
     for phys in "$first" $((3 - first)); do
         l=$(logical_of "$phys")
-        [ -n "$l" ] && [ -n "$(usim_aid "$l")" ] || continue
+        # only the SIM in logical slot 1 can be the primary subscription;
+        # switching slots is the user's choice (duo2-sim use), never auto's
+        [ "$l" = 1 ] && [ -n "$(usim_aid "$l")" ] || continue
         cand=$phys
         break
     done
@@ -111,8 +197,8 @@ auto)
     }
     wait_primary 10
     if [ -z "$(primary_slot)" ]; then
-        echo "no primary subscription after 30 s: taking the SIM in slot $cand"
-        "$0" primary "$cand" && exit 0
+        echo "no primary subscription after 30 s: asking for the SIM in slot $cand"
+        q --uim-change-provisioning-session="session-type=primary-gw-provisioning,activate=yes,slot=1,aid=$(usim_aid 1)" >/dev/null || true
         wait_primary 10
     fi
     if [ -n "$(primary_slot)" ]; then
@@ -138,6 +224,37 @@ boot-wait)
     first=1
     [ -r "$conf" ] && first=$(sed -n 's/^PROVISION_SLOT=\([12]\).*/\1/p' "$conf" | tail -n 1)
     [ -n "$first" ] || first=1
+    # The modem does not keep a slot switch across a restart (2026-11-18:
+    # after a reboot physical slot 1 was logical slot 1 again, both active):
+    # the slot chosen with `duo2-sim use` (PROVISION_SLOT) is moved to
+    # logical slot 1 again, before the session is asked for. If no USIM
+    # shows there (an eSIM with no profile switched on), the other slot's
+    # card is taken instead: a signal before the choice.
+    to_l1() {
+        [ "$(logical_of "$1")" = 1 ] && return 0
+        card_in "$1" || return 1
+        qb --uim-switch-slot="$1" >/dev/null || true
+        n=0
+        while [ "$(logical_of "$1")" != 1 ] && [ $n -lt 10 ]; do
+            sleep 1
+            n=$((n + 1))
+        done
+        [ "$(logical_of "$1")" = 1 ]
+    }
+    usim_soon() {
+        n=0
+        while [ -z "$(usim_aid 1)" ] && [ $n -lt 8 ]; do
+            sleep 1
+            n=$((n + 1))
+        done
+        [ -n "$(usim_aid 1)" ]
+    }
+    if [ "$(logical_of "$first")" != 1 ] && to_l1 "$first"; then
+        echo "slot $first (PROVISION_SLOT) moved to logical slot 1"
+        if ! usim_soon && to_l1 $((3 - first)); then
+            echo "no USIM in slot $first: slot $((3 - first)) moved to logical slot 1 instead"
+        fi
+    fi
     deadline=$(( $(date +%s) + 25 ))
     asked='' empty=0
     while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -149,7 +266,8 @@ boot-wait)
         cand='' aid=''
         for phys in "$first" $((3 - first)); do
             l=$(logical_of "$phys")
-            [ -n "$l" ] || continue
+            # only logical slot 1 opens the primary subscription (above)
+            [ "$l" = 1 ] || continue
             aid=$(usim_aid "$l")
             [ -n "$aid" ] && { cand=$l; break; }
         done

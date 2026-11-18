@@ -226,3 +226,25 @@ class SimLock:
         self._with_sim(
             lambda sim: sim.change_pin(old, new, None, self._finish("change_pin", done)), done
         )
+
+
+def slot_view(slots):
+    """What the "SIM in use" group shows for `duo-settings-helper sim slots`
+    (a list of {"slot", "card", "esim", "active", "logical", "in_use"}):
+    {"1": {...}, "2": {...}} with per slot "card" (there is one), "in_use"
+    and "state": "in use" / "off" / "no card"; None when the slots could not
+    be read (no modem). Slot 1 is the tray, slot 2 the built-in eSIM."""
+    if not isinstance(slots, list) or not slots:
+        return None
+    view = {}
+    for entry in slots:
+        if not isinstance(entry, dict) or entry.get("slot") not in (1, 2):
+            continue
+        card = bool(entry.get("card"))
+        in_use = bool(entry.get("in_use"))
+        view[str(entry["slot"])] = {
+            "card": card,
+            "in_use": in_use,
+            "state": "in use" if in_use else ("off" if card else "no card"),
+        }
+    return view or None

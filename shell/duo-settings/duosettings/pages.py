@@ -1,5 +1,6 @@
 """The settings pages."""
 
+import json
 import os
 import time
 
@@ -1339,6 +1340,27 @@ class SimPage(Page):
         g = self.group()
         self.status = Adw.ActionRow(use_markup=False, title=_("SIM card"))
         g.add(self.status)
+        # Which SIM the phone uses (duo-settings-helper sim, duo2-sim use):
+        # the modem takes calls, messages and data on one at a time.
+        g = self.group(
+            _("SIM in use"),
+            _("The phone uses one SIM at a time for calls, messages and mobile data."),
+        )
+        self.slot_rows, self.slot_checks, self.slot_quiet, self.slot_busy = {}, {}, False, False
+        first = None
+        for slot, title in (("1", _("SIM card in the tray")), ("2", _("eSIM"))):
+            row = Adw.ActionRow(use_markup=False, title=title, subtitle=_("Reading…"))
+            check = Gtk.CheckButton(valign=Gtk.Align.CENTER)
+            if first is None:
+                first = check
+            else:
+                check.set_group(first)
+            check.connect("toggled", lambda b, s=slot: self.pick_slot(s, b))
+            row.add_prefix(check)
+            row.set_activatable_widget(check)
+            g.add(row)
+            self.slot_rows[slot], self.slot_checks[slot] = row, check
+        self.slots = None
         g = self.group(
             _("SIM PIN"),
             _(
@@ -1383,10 +1405,67 @@ class SimPage(Page):
             except (ImportError, ValueError):
                 self.simlock = None
         self.update()
+        self.read_slots()
 
     def close(self):
         if self.simlock is not None:
             self.simlock.close()
+
+    # -- which SIM is in use ------------------------------------------------------------
+
+    def read_slots(self):
+        def got(_ok, out):
+            try:
+                slots = json.loads((out or "").strip().splitlines()[-1])
+            except (ValueError, IndexError):
+                slots = None
+            self.show_slots(sim.slot_view(slots))
+
+        run_async(["sudo", "-n", system.HELPER, "sim", "slots"], got)
+
+    def show_slots(self, view):
+        self.slots = view
+        texts = {"in use": _("In use"), "off": _("Off"), "no card": _("No card")}
+        self.slot_quiet = True
+        for slot, row in self.slot_rows.items():
+            v = (view or {}).get(slot)
+            if v is None:
+                row.set_subtitle(_("Not known") if view is None else _("No card"))
+                self.slot_checks[slot].set_sensitive(False)
+                continue
+            row.set_subtitle(texts[v["state"]])
+            self.slot_checks[slot].set_sensitive(v["card"] and not self.slot_busy)
+            if v["in_use"]:
+                self.slot_checks[slot].set_active(True)
+        self.slot_quiet = False
+
+    def pick_slot(self, slot, button):
+        if self.slot_quiet or not button.get_active() or self.slots is None:
+            return
+        if (self.slots.get(slot) or {}).get("in_use") or self.slot_busy:
+            return
+        self.slot_busy = True
+        for check in self.slot_checks.values():
+            check.set_sensitive(False)
+        self.slot_rows[slot].set_subtitle(_("Confirm on the screen, then about a minute…"))
+
+        def done(_ok, out):
+            self.slot_busy = False
+            try:
+                res = json.loads((out or "").strip().splitlines()[-1])
+            except (ValueError, IndexError):
+                res = {"ok": False, "error": _("no answer")}
+            if res.get("ok"):
+                self.toast(
+                    _("The phone uses the eSIM now")
+                    if slot == "2"
+                    else _("The phone uses the SIM card now")
+                )
+            elif res.get("error") != "not confirmed":
+                inform(self.window, _("SIM in use"), _("It did not switch: %s") % res.get("error"))
+            self.read_slots()
+
+        run_async(["sudo", "-n", system.HELPER, "sim", "use", slot], done)
 
     def left_text(self, left):
         if left is None:
