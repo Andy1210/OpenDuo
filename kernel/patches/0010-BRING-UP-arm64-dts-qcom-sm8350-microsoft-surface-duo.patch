@@ -1,7 +1,7 @@
 From f188eb210321f0b72a5502fcd8a8cac5b7c35c58 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Fri, 6 Nov 2026 09:09:53 +0100
-Subject: [PATCH 010/147] BRING-UP: arm64: dts: qcom:
+Subject: [PATCH 010/149] BRING-UP: arm64: dts: qcom:
  sm8350-microsoft-surface-duo2: Disable usb_2 in variant H
 
 The second USB controller's GDSC (usb30_sec_gdsc) is stuck off on this

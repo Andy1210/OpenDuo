@@ -1,7 +1,7 @@
 From e7011df5e7010c4894390febc7d1e304adee9a1e Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 07:46:14 +0100
-Subject: [PATCH 084/147] BRING-UP: arm64: dts: qcom:
+Subject: [PATCH 084/149] BRING-UP: arm64: dts: qcom:
  sm8350-microsoft-surface-duo2: Set the camera rotation
 
 The vendor configuration gives all four camera sensors a mounting roll

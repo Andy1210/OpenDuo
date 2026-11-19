@@ -1,7 +1,7 @@
 From 00cb1c4d15b46b047a85bfb538a698f6fa7d5e9f Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Fri, 6 Nov 2026 18:08:07 +0100
-Subject: [PATCH 021/147] clk: qcom: gcc-sm8350: Use retention for the PCIe
+Subject: [PATCH 021/149] clk: qcom: gcc-sm8350: Use retention for the PCIe
  power domains
 
 As on SM8450 and SC8280XP, the PCIe GDSCs do not reach the off state

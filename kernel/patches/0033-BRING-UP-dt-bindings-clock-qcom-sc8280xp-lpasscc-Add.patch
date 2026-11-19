@@ -1,7 +1,7 @@
 From ab5566d1570cfc202348d551e7f2ba7dbaa7099e Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 04:10:04 +0100
-Subject: [PATCH 033/147] BRING-UP: dt-bindings: clock: qcom,sc8280xp-lpasscc:
+Subject: [PATCH 033/149] BRING-UP: dt-bindings: clock: qcom,sc8280xp-lpasscc:
  Add the SM8350 LPASS audio CSR
 
 SM8350 has the SoundWire clock gating controls of the LPASS audio CSR at

@@ -1,7 +1,7 @@
 From 151dc979647ad0811579fd712a5d83589b4abe20 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Thu, 5 Nov 2026 22:12:50 +0100
-Subject: [PATCH 002/147] BRING-UP: arm64: dts: qcom:
+Subject: [PATCH 002/149] BRING-UP: arm64: dts: qcom:
  sm8350-microsoft-surface-duo2: Put the USB controller in peripheral mode
 
 Keep the USB console and network gadget independent of the ADSP's UCSI

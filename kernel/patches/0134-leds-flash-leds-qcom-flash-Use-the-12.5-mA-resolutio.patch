@@ -1,7 +1,7 @@
 From a34116b881aac3bfcd347cd061a87806fe8f25f1 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Fri, 13 Nov 2026 18:46:46 +0100
-Subject: [PATCH 134/147] leds: flash: leds-qcom-flash: Use the 12.5 mA
+Subject: [PATCH 134/149] leds: flash: leds-qcom-flash: Use the 12.5 mA
  resolution for torch on 4ch rev 0.1
 
 The torch of the 4-channel flash module revision 0.1 (PM8350C on SM8350,

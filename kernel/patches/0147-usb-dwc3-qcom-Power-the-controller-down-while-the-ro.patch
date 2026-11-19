@@ -1,7 +1,7 @@
 From 332f1f219103d79f44f08cb0623a892f6b8dcdee Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Tue, 17 Nov 2026 14:42:26 +0100
-Subject: [PATCH 147/147] usb: dwc3: qcom: Power the controller down while the
+Subject: [PATCH 147/149] usb: dwc3: qcom: Power the controller down while the
  role switch reports no partner
 
 Behind a USB role switch, dwc3-qcom clears the VBUS override when the

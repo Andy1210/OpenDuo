@@ -54,7 +54,7 @@ import duo2_ssc as ssc  # noqa: E402
 import posepolicy as pp  # noqa: E402
 
 DEFAULTS = {
-    "enabled": "off",  # off: read and log, never call duo-wc (dry run)
+    "enabled": "on",  # off: read and log, never call duo-wc (dry run)
     "auto_pose": "on",
     "panels": "both",  # both | left | right: the user's panel choice over the sensors
     "auto_rotate": "on",
@@ -253,6 +253,9 @@ class Posed:
         self.pose_db = pp.Debounce(float(cfg["pose_settle_ms"]) / 1000.0)
         self.rot_db = pp.Debounce(float(cfg["rotation_settle_ms"]) / 1000.0)
         self.posture = None
+        # True while self.posture is only what the hinge angle implied (the
+        # posture sensor has not spoken yet): see the hinge event below.
+        self.posture_from_hinge = False
         self.held_posture = None  # a first posture at hinge 0, before any angle
         self.wake_delivery = True  # the wake sensors' SSC delivery is the wakeup one
         self.angle = None  # from the SLPI's hinge_angle sensor
@@ -455,6 +458,7 @@ class Posed:
         if msg_id == ssc.MSG_POSTURE_EVENT:
             st = ssc.state_event(payload)
             self.posture = ssc.POSTURES.get(st, "state%d" % st)
+            self.posture_from_hinge = False
             log("posture %s" % self.posture)
         elif msg_id == ssc.MSG_HALL_EVENT:
             near, _ = ssc.hall_event(payload)
@@ -486,6 +490,7 @@ class Posed:
                 if posture != self.posture:
                     log("posture %s (hinge %.0f)" % (posture, data[5] if len(data) > 5 else -1))
                 self.posture = posture
+                self.posture_from_hinge = False
             elif s is self.s_hinge and data:
                 prev, self.angle = self.angle, data[0]
                 if self.debug or prev is None or abs(prev - self.angle) >= 10:
@@ -498,6 +503,25 @@ class Posed:
                         )
                         self.posture = self.held_posture
                     self.held_posture = None
+                # The posture sensor reports on change only: a phone that was
+                # already closed when duo-posed started may never send its
+                # posture (2026-11-19: one all-zeros event, then nothing all
+                # night, and the panels of the closed phone stayed lit). Until
+                # it speaks, the hinge angle (trusted above to confirm a held
+                # "closed") says closed; opened again with the sensor still
+                # silent, both panels (open_dpm) instead of a stale "closed".
+                if self.posture is None and self.angle < 15:
+                    log(
+                        "posture closed (the posture sensor is silent, the hinge says %.0f)"
+                        % self.angle
+                    )
+                    self.posture, self.posture_from_hinge = "closed", True
+                elif self.posture_from_hinge and self.posture == "closed" and self.angle > 30:
+                    log(
+                        "posture open_dpm (the posture sensor is silent, the hinge says %.0f)"
+                        % self.angle
+                    )
+                    self.posture = "open_dpm"
             elif suid in self.acc_output and len(data) >= 3:
                 o = self.acc_output[suid]
                 self.acc[o] = self.smooth[o].feed(data[:3])
@@ -755,8 +779,14 @@ class Posed:
         st = self.poll_state(now)
         self.forward_posture(now)
         self.update_touch()
-        if on(self.cfg["auto_pose"]) and self.pose_source:
+        auto = on(self.cfg["auto_pose"])
+        if self.pose_source and (auto or self.cfg["closed_action"] == "blank"):
             pose = self.sensor_pose()
+            if not auto and pose != "blank":
+                # Automatic poses off: a closed phone still goes dark
+                # (closed_action) and lights again when opened, in the pose
+                # it had (duo-wc's own): no other pose comes from the sensors.
+                pose = (st or {}).get("pose")
             got = self.pose_db.feed(pose, now)
             if got is not None:
                 self.wanted_pose = got

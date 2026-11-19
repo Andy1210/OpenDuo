@@ -1,7 +1,7 @@
 From ad75e05cc9b9183df11c87e86c425fbd341c831d Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Fri, 6 Nov 2026 20:32:54 +0100
-Subject: [PATCH 024/147] BRING-UP: arm64: dts: qcom:
+Subject: [PATCH 024/149] BRING-UP: arm64: dts: qcom:
  sm8350-microsoft-surface-duo2: Clock the high-speed-only USB PIPE from UTMI
 
 The bring-up DTBs run the primary USB controller high speed only (no

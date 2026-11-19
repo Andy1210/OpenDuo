@@ -1,7 +1,7 @@
 From 7fa7ec74a0cae26e130955e5260fe1db1d7492d9 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 21:56:39 +0100
-Subject: [PATCH 114/147] rtc: interface: Release the wakeup source when
+Subject: [PATCH 114/149] rtc: interface: Release the wakeup source when
  reading the time fails
 
 rtc_set_time(), rtc_update_irq() and rtc_timer_enqueue() take the RTC's

@@ -1,7 +1,7 @@
 From eda9b6de33d206069ad3716bd57ceda7e0eefc08 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 12:02:42 +0100
-Subject: [PATCH 043/147] BRING-UP: HID: spi-hid: Keep the digitizer off long
+Subject: [PATCH 043/149] BRING-UP: HID: spi-hid: Keep the digitizer off long
  enough, quieten per-report logging
 
 Two fixes to Microsoft's spi-hid driver (added for bring-up earlier in

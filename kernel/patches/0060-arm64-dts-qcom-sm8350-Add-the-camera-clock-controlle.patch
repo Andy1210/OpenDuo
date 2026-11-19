@@ -1,7 +1,7 @@
 From afb63c6b72907e963feeb716effdd3f4cc49d05d Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 06:04:06 +0100
-Subject: [PATCH 060/147] arm64: dts: qcom: sm8350: Add the camera clock
+Subject: [PATCH 060/149] arm64: dts: qcom: sm8350: Add the camera clock
  controller and the CCIs
 
 Add camcc (0xad00000, MMCX) and the two camera control interfaces

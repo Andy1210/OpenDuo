@@ -1,7 +1,7 @@
 From e908d6767ca1fc948fa71acf18edba9240c78e71 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 10:20:35 +0100
-Subject: [PATCH 122/147] BRING-UP: HID: spi-hid: Keep the interrupt off in
+Subject: [PATCH 122/149] BRING-UP: HID: spi-hid: Keep the interrupt off in
  system suspend
 
 The driver had no system sleep callbacks: the digitizer's interrupt

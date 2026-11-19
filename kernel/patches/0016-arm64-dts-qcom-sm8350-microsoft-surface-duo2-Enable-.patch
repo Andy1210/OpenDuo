@@ -1,7 +1,7 @@
 From 96e1b79bfc09585256d5f614158c2c353948a939 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Fri, 6 Nov 2026 14:39:59 +0100
-Subject: [PATCH 016/147] arm64: dts: qcom: sm8350-microsoft-surface-duo2:
+Subject: [PATCH 016/149] arm64: dts: qcom: sm8350-microsoft-surface-duo2:
  Enable the GPU
 
 Enable the Adreno 660 with the device's own signed zap shader.

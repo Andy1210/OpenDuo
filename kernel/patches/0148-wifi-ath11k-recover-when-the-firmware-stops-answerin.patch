@@ -1,0 +1,86 @@
+From 3a86358c63ab68e5750c51cf54872f1c8bd375e2 Mon Sep 17 00:00:00 2001
+From: Andy1210 <andy1210@gmail.com>
+Date: Wed, 18 Nov 2026 23:23:21 +0100
+Subject: [PATCH 148/149] wifi: ath11k: recover when the firmware stops
+ answering WMI commands
+
+On a WCN6855 (QCA6490) in a Surface Duo 2 the firmware stopped taking
+frames and commands after about 19 hours up: every data frame failed
+with -ENOMEM, every WMI command timed out waiting for credits, and the
+firmware neither crashed nor entered RDDM. The recovery is only started
+from the MHI RDDM callback, so it never ran: the interface stayed
+associated, with nothing getting through, until the driver was removed.
+
+Count WMI command timeouts in a row; after three, with no command sent
+in between, queue the same reset work a firmware crash does.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/net/wireless/ath/ath11k/core.h |  2 ++
+ drivers/net/wireless/ath/ath11k/wmi.c  | 32 +++++++++++++++++++++++++-
+ 2 files changed, 33 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/wireless/ath/ath11k/core.h b/drivers/net/wireless/ath/ath11k/core.h
+index 58911a73d4e1..3ef2a171e64d 100644
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -1036,6 +1036,8 @@ struct ath11k_base {
+ 	/* continuous recovery fail count */
+ 	atomic_t fail_cont_count;
+ 	unsigned long reset_fail_timeout;
++	/* WMI commands timed out in a row (no credits back from firmware) */
++	atomic_t wmi_timeouts;
+ 	struct {
+ 		/* protected by data_lock */
+ 		u32 fw_crash_counter;
+diff --git a/drivers/net/wireless/ath/ath11k/wmi.c b/drivers/net/wireless/ath/ath11k/wmi.c
+index bbca275a8289..f0ab340f14aa 100644
+--- a/drivers/net/wireless/ath/ath11k/wmi.c
++++ b/drivers/net/wireless/ath/ath11k/wmi.c
+@@ -303,6 +303,32 @@ static int ath11k_wmi_cmd_send_nowait(struct ath11k_pdev_wmi *wmi, struct sk_buf
+ 	return ret;
+ }
+ 
++/* A firmware that stops returning WMI credits without crashing never
++ * reaches the MHI RDDM path that starts a recovery: every command then
++ * times out, data frames pile up in the rings, and the interface stays
++ * associated with nothing getting through. After a few timeouts in a row,
++ * with no command sent in between, start the same recovery as on a crash.
++ */
++#define ATH11K_WMI_HANG_TIMEOUTS 3
++
++static void ath11k_wmi_hang_check(struct ath11k_base *ab)
++{
++	if (atomic_inc_return(&ab->wmi_timeouts) < ATH11K_WMI_HANG_TIMEOUTS)
++		return;
++
++	/* a recovery that runs already flushes and resets */
++	if (test_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags))
++		return;
++
++	atomic_set(&ab->wmi_timeouts, 0);
++	ath11k_warn(ab, "firmware stopped answering WMI commands, recovering\n");
++
++	spin_lock_bh(&ab->base_lock);
++	if (!test_bit(ATH11K_FLAG_UNREGISTERING, &ab->dev_flags))
++		queue_work(ab->workqueue_aux, &ab->reset_work);
++	spin_unlock_bh(&ab->base_lock);
++}
++
+ int ath11k_wmi_cmd_send(struct ath11k_pdev_wmi *wmi, struct sk_buff *skb,
+ 			u32 cmd_id)
+ {
+@@ -334,8 +360,12 @@ int ath11k_wmi_cmd_send(struct ath11k_pdev_wmi *wmi, struct sk_buff *skb,
+ 			}), WMI_SEND_TIMEOUT_HZ);
+ 	}
+ 
+-	if (ret == -EAGAIN)
++	if (ret == -EAGAIN) {
+ 		ath11k_warn(wmi_ab->ab, "wmi command %d timeout\n", cmd_id);
++		ath11k_wmi_hang_check(ab);
++	} else if (!ret) {
++		atomic_set(&ab->wmi_timeouts, 0);
++	}
+ 
+ 	if (ret == -ENOBUFS)
+ 		ath11k_warn(wmi_ab->ab, "ce desc not available for wmi command %d\n",

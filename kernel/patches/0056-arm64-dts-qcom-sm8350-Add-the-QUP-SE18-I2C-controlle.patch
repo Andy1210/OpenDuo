@@ -1,7 +1,7 @@
 From a6ade066776f8c58234c373735f87d4de96f8c2e Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 05:54:25 +0100
-Subject: [PATCH 056/147] arm64: dts: qcom: sm8350: Add the QUP SE18 I2C
+Subject: [PATCH 056/149] arm64: dts: qcom: sm8350: Add the QUP SE18 I2C
  controller
 
 The comment above spi18 says that QUP no. 18 is SPI/UART-only, but the

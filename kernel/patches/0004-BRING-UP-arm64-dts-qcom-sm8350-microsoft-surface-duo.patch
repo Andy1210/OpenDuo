@@ -1,7 +1,7 @@
 From 61cc3da87ed7772f39a8d122a3a017f44c2d8368 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Thu, 5 Nov 2026 23:51:13 +0100
-Subject: [PATCH 004/147] BRING-UP: arm64: dts: qcom:
+Subject: [PATCH 004/149] BRING-UP: arm64: dts: qcom:
  sm8350-microsoft-surface-duo2: Add a variant without dispcc
 
 The display clock controller's probe reprograms disp_cc_pll0/1 under

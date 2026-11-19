@@ -1,7 +1,7 @@
 From dfa7e70b59b5d032e22a0fd029ea5712eed88b5b Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Mon, 9 Nov 2026 20:29:21 +0100
-Subject: [PATCH 139/147] media: iris: Give buffers back as QUEUED when
+Subject: [PATCH 139/149] media: iris: Give buffers back as QUEUED when
  start_streaming() fails in the error state
 
 vb2_start_streaming() passes the buffers queued before VIDIOC_STREAMON

@@ -1,7 +1,7 @@
 From a96440e0508621f006f8055cd807123610b7bc25 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 16:57:15 +0100
-Subject: [PATCH 049/147] arm64: dts: qcom: sm8350-microsoft-surface-duo2:
+Subject: [PATCH 049/149] arm64: dts: qcom: sm8350-microsoft-surface-duo2:
  Enable the haptics
 
 Describe the HAP520 haptics module of the PM8350B (configuration,

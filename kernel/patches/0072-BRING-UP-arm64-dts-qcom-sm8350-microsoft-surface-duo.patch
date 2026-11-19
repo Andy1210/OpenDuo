@@ -1,7 +1,7 @@
 From 3ace954c150d6887e973ae1afc856ea5e856b6a6 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 00:50:40 +0100
-Subject: [PATCH 072/147] BRING-UP: arm64: dts: qcom:
+Subject: [PATCH 072/149] BRING-UP: arm64: dts: qcom:
  sm8350-microsoft-surface-duo2: Add the ultrawide camera's endpoint
 
 Connect the ultrawide IMX481 (CCI1 bus 0, 0x10) to CSIPHY4, four lanes

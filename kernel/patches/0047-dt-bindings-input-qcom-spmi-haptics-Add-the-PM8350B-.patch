@@ -1,7 +1,7 @@
 From dc21212380b2a31bfbac43468167dd1a13f62daa Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 16:57:15 +0100
-Subject: [PATCH 047/147] dt-bindings: input: qcom,spmi-haptics: Add the
+Subject: [PATCH 047/149] dt-bindings: input: qcom,spmi-haptics: Add the
  PM8350B haptics
 
 The PM8350B PMIC (SM8350 phones, e.g. the Surface Duo 2) has the older

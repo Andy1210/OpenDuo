@@ -1,7 +1,7 @@
 From 99ea7ad8bfaab2da97a3fc16f93990a3b4a5e4eb Mon Sep 17 00:00:00 2001
 From: Richard Acayan <mailingradian@gmail.com>
 Date: Mon, 11 Sep 2023 21:50:54 -0400
-Subject: [PATCH 096/147] ASoC: qdsp6: q6voice: add cvd 2.3 initialization
+Subject: [PATCH 096/149] ASoC: qdsp6: q6voice: add cvd 2.3 initialization
  sequence
 
 Some platforms such as SDM670 have CVD version 2.3. This version

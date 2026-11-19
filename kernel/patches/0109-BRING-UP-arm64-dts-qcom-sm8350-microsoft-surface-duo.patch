@@ -1,7 +1,7 @@
 From b8c1f55ca6799134797bd2c52095cdc002f222f2 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 19:31:56 +0100
-Subject: [PATCH 109/147] BRING-UP: arm64: dts: qcom:
+Subject: [PATCH 109/149] BRING-UP: arm64: dts: qcom:
  sm8350-microsoft-surface-duo2: Enable voice calls and the earpiece
 
 Enable the Q6 voice services and add the VoiceMMode1 and VoiceMMode2

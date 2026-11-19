@@ -1,7 +1,7 @@
 From 05dc9687e86c4dcc36ce524c991dfda8ffcdbad2 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 00:50:40 +0100
-Subject: [PATCH 070/147] BRING-UP: media: qcom: camss: Add receiver and PHY
+Subject: [PATCH 070/149] BRING-UP: media: qcom: camss: Add receiver and PHY
  diagnostics
 
 While a CSID gen2 streams, count its RDI start / end of frame interrupts

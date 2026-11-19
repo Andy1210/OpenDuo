@@ -1,7 +1,7 @@
 From 5a4e680b29618c06ac993bad1db0620dbf0688ad Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Tue, 17 Nov 2026 13:41:02 +0100
-Subject: [PATCH 142/147] arm64: dts: qcom: sm8350: Flatten the USB controller
+Subject: [PATCH 142/149] arm64: dts: qcom: sm8350: Flatten the USB controller
  nodes
 
 Describe both DWC3 controllers with the flattened qcom,snps-dwc3

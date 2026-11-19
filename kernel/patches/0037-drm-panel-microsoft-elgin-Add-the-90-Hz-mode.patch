@@ -1,7 +1,7 @@
 From 2a3eb767988764e85d539aa4e03cdc4033326f9f Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 05:37:07 +0100
-Subject: [PATCH 037/147] drm/panel: microsoft-elgin: Add the 90 Hz mode
+Subject: [PATCH 037/149] drm/panel: microsoft-elgin: Add the 90 Hz mode
 
 The panels run at 60 or 90 Hz: the vendor device tree has a timing node
 for each, with the same geometry, porches and init sequence except for

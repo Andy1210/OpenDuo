@@ -42,10 +42,15 @@ enable_unit duo2-try-netwatch.service
 
 install -d /etc/duo2
 if [ ! -e /etc/duo2/autosleep.conf ]; then
-    # first install: automatic sleep starts held (the owner switches it on)
-    install -m 0644 autosleep-hold /etc/duo2/autosleep-hold
     sed "s/^user = .*/user = $U/" autosleep.conf >/etc/duo2/autosleep.conf
     chmod 0644 /etc/duo2/autosleep.conf
+fi
+# The first release held automatic sleep from the first install (this file,
+# put there by the installer, not by the user), so a phone never suspended,
+# closed or not. That hold goes; a hold the user made (duo2-autosleep-switch
+# off, Duo Settings) has the switch's own text and stays.
+if [ -e /etc/duo2/autosleep-hold ] && cmp -s autosleep-hold /etc/duo2/autosleep-hold; then
+    rm -f /etc/duo2/autosleep-hold
 fi
 sed "s/^user = .*/user = $U/" autosleep.conf >/etc/duo2/autosleep.conf.dist
 chmod 0644 /etc/duo2/autosleep.conf.dist

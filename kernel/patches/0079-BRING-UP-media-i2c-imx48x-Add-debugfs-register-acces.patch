@@ -1,7 +1,7 @@
 From 7616048f448e5400a5cd8a5908a80a3e8aebc632 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 01:40:28 +0100
-Subject: [PATCH 079/147] BRING-UP: media: i2c: imx48x: Add debugfs register
+Subject: [PATCH 079/149] BRING-UP: media: i2c: imx48x: Add debugfs register
  access
 
 /sys/kernel/debug/<i2c device>/addr and val read and write one 8-bit

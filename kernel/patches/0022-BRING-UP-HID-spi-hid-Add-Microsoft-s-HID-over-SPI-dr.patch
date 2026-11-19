@@ -1,7 +1,7 @@
 From d469f724038b71c5713e68b5d036c64f20d4c00b Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Fri, 6 Nov 2026 18:38:20 +0100
-Subject: [PATCH 022/147] BRING-UP: HID: spi-hid: Add Microsoft's HID over SPI
+Subject: [PATCH 022/149] BRING-UP: HID: spi-hid: Add Microsoft's HID over SPI
  driver of the Surface Duo 2
 
 The Surface Duo 2 touch digitizer speaks HID over SPI as Microsoft's

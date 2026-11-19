@@ -1,7 +1,7 @@
 From ec5995a8e3881caaac2c08940c41975d71c14329 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 17:42:41 +0100
-Subject: [PATCH 127/147] drm/msm/dsi/phy: Unprepare the interface clock across
+Subject: [PATCH 127/149] drm/msm/dsi/phy: Unprepare the interface clock across
  system sleep
 
 The PHY's interface clock (the display clock controller's MDSS AHB clock)

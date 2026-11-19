@@ -1,7 +1,7 @@
 From 6871ed0a510e9e1c4bcd3994a0a68d1e7c3e3091 Mon Sep 17 00:00:00 2001
 From: Richard Acayan <mailingradian@gmail.com>
 Date: Tue, 8 Oct 2024 19:25:59 -0400
-Subject: [PATCH 098/147] ASoC: qdsp6: q6voice: pass new topology property to
+Subject: [PATCH 098/149] ASoC: qdsp6: q6voice: pass new topology property to
  q6cvp
 
 The topology ID is now expected by q6cvp. Add the topology ID properties

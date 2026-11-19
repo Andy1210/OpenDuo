@@ -1,7 +1,7 @@
 From e9f11c36bcde538fd1dbf86637511fb0729a6323 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 19:31:56 +0100
-Subject: [PATCH 106/147] ASoC: qdsp6: q6voice: Add uplink and downlink mute
+Subject: [PATCH 106/149] ASoC: qdsp6: q6voice: Add uplink and downlink mute
  switches
 
 Muting a call has to happen in the DSP: the uplink goes from the AFE

@@ -1,7 +1,7 @@
 From a20de8f36062a4b04688855140e31916bfa4cdc9 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Tue, 17 Nov 2026 13:43:07 +0100
-Subject: [PATCH 146/147] BRING-UP: arm64: dts: qcom:
+Subject: [PATCH 146/149] BRING-UP: arm64: dts: qcom:
  sm8350-microsoft-surface-duo2: Let variant J take the USB role from UCSI
 
 Variant J cut both graph links of the pmic_glink connector, so UCSI

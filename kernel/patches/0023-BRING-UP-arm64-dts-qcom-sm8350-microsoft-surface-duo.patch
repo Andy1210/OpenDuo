@@ -1,7 +1,7 @@
 From 392110251f695072298a12bb5751742bd246b4ca Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Fri, 6 Nov 2026 18:38:20 +0100
-Subject: [PATCH 023/147] BRING-UP: arm64: dts: qcom:
+Subject: [PATCH 023/149] BRING-UP: arm64: dts: qcom:
  sm8350-microsoft-surface-duo2: Add the touch digitizer
 
 The digitizer of both panels on SE4 (spi4, GPI DMA), interrupt on gpio84,

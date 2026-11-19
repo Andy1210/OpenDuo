@@ -1,7 +1,7 @@
 From 96861a13bed922a7ac166ae06b675db2fb493269 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Tue, 17 Nov 2026 11:58:00 +0100
-Subject: [PATCH 140/147] media: iris: Treat a watchdog interrupt on HFI Gen1
+Subject: [PATCH 140/149] media: iris: Treat a watchdog interrupt on HFI Gen1
  as a system error
 
 On the Gen2 firmware interface a watchdog interrupt puts the core into

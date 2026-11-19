@@ -1,7 +1,7 @@
 From 559a687ee7ad0585534aff404b9da00d9beef1c2 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Mon, 16 Nov 2026 20:11:01 +0100
-Subject: [PATCH 136/147] arm64: dts: qcom: sm8350: Add the UFS Inline Crypto
+Subject: [PATCH 136/149] arm64: dts: qcom: sm8350: Add the UFS Inline Crypto
  Engine
 
 SM8350's UFS host has an Inline Crypto Engine (ICE v3.2 with a hardware

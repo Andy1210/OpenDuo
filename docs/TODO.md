@@ -53,31 +53,17 @@ come with their own translations.
 
 ## WiFi
 
-- **The WiFi firmware can hang and nothing notices it.** Seen once on the
-  release image (2026-11-18): after about 19 hours up (WiFi working, the
-  panels dark for five hours, the phone held awake on the charger, WiFi power
-  save on, no suspend), the firmware stopped taking frames and commands at one
-  moment, with no kernel message before it: from then on every frame failed
-  (`failed to transmit frame -12`, 511 frames left in the queue), every WMI
-  command timed out (`wmi command ... timeout`), and the firmware neither
-  crashed nor asked for a restart, so ath11k never recovered. The shell kept
-  showing WiFi as connected with no traffic for hours, and mobile data stayed
-  idle because the default route was still on WiFi. Before it, 71
-  `msdu_done bit in attention is not set` warnings in 19 hours (known on this
-  chip family, maybe unrelated). A restart of the phone brought it back.
-  - **Detect it:** a watchdog on the kernel's messages (a run of transmit
-    failures and WMI timeouts) or on traffic (no answer from the gateway while
-    associated), which tells the user and takes WiFi's default route away so
-    mobile data carries on.
-  - **Recover without a restart:** taking the driver out
-    (`modprobe -r ath11k_pci`) with the firmware hung restarted the whole
-    phone (no oops or pstore record, about seven seconds after
-    `qmi failed to send wlan mode off: -110`): a hard reset, not a panic. A
-    safe way needs the driver to skip the firmware handshakes it cannot get
-    and reset the chip over MHI / PCIe, as on a firmware crash; this is
-    kernel work and has to go through `duo2-try`.
-  - **Find the trigger:** a long run on WiFi with the panels dark, with and
-    without power save, with the firmware's own logs if they can be reached.
+- **The WiFi chip's PCIe link (held at Gen2 since 2026-11-19).** At Gen3 the
+  link reported receiver errors and completion timeouts; three times in a day
+  the WLAN firmware then stopped answering (connected, nothing got through for
+  hours) or crashed, and once ath11k's recovery failed with the link still bad
+  and a mac80211 oops wedged the phone (RCU stall). The stock kernel keeps this
+  link at Gen2 (`max-link-speed = <2>`), and so does OpenDuo now; ath11k also
+  starts its crash recovery when WMI commands time out three times in a row.
+  Left to watch: a correctable receiver error was still logged once at Gen2,
+  and the `msdu_done bit in attention is not set` warnings come more often
+  with the panels dark. Whether a recovery from a firmware that hung without
+  crashing works (the firmware ignores the WMI hang simulations) is not tested.
 
 ## Stability
 

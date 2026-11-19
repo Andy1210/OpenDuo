@@ -1,7 +1,7 @@
 From 2ead68ff4029e0dda809ab2404c0238cabff5b0d Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 01:46:17 +0100
-Subject: [PATCH 081/147] BRING-UP: media: qcom: camss: Mask the unmapped VC/DT
+Subject: [PATCH 081/149] BRING-UP: media: qcom: camss: Mask the unmapped VC/DT
  interrupt in the diagnostics
 
 Sensors send other data types (embedded data) on every line: with the

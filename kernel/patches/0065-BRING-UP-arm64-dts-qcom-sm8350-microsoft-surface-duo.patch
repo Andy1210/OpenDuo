@@ -1,7 +1,7 @@
 From 99afb1237b61444352b9ce0b6d1a10edc083019d Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 00:03:58 +0100
-Subject: [PATCH 065/147] BRING-UP: arm64: dts: qcom:
+Subject: [PATCH 065/149] BRING-UP: arm64: dts: qcom:
  sm8350-microsoft-surface-duo2: Add the camera sensors and enable CAMSS
 
 Describe the four camera sensors on the CCI buses for the identification

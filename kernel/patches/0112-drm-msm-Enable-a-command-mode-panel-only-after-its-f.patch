@@ -1,7 +1,7 @@
 From 8abead0f5a39f37fbe1a4364b1c90a3459e2b783 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 09:01:22 +0100
-Subject: [PATCH 112/147] drm/msm: Enable a command-mode panel only after its
+Subject: [PATCH 112/149] drm/msm: Enable a command-mode panel only after its
  first frame
 
 A command-mode panel shows its own frame memory. After the panel has

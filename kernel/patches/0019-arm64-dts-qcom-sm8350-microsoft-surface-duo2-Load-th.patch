@@ -1,7 +1,7 @@
 From 59077928efb4b5e2e62be01cc24882a7822ca519 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Fri, 6 Nov 2026 16:16:35 +0100
-Subject: [PATCH 019/147] arm64: dts: qcom: sm8350-microsoft-surface-duo2: Load
+Subject: [PATCH 019/149] arm64: dts: qcom: sm8350-microsoft-surface-duo2: Load
  the IPA firmware
 
 The GSI firmware of IPA is loaded by Linux on this SoC; name the

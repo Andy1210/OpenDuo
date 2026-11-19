@@ -1,7 +1,7 @@
 From 40c8351ae5a94148c2b252452180db5e60e09905 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 00:50:40 +0100
-Subject: [PATCH 069/147] arm64: dts: qcom: sm8350: Add the camera test pattern
+Subject: [PATCH 069/149] arm64: dts: qcom: sm8350: Add the camera test pattern
  generators
 
 Describe the two TPG 1.0.2 blocks and the camera top registers that

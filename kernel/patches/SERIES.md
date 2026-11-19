@@ -6,7 +6,7 @@
 kernel-compatible SPDX identifier, that one applies. Patches by other
 authors (class 3 below) keep their authors' terms.
 
-OpenDuo's kernel is Linux **v7.3.4** (stable) plus the 147 patches in this
+OpenDuo's kernel is Linux **v7.3.4** (stable) plus the 149 patches in this
 directory, in order. They are exported from the `duo2` branch of the kernel
 tree:
 
@@ -22,7 +22,11 @@ decoder's error handling (`0138`-`0140`: a crashed video firmware is restarted
 instead of leaving the decoder stuck until the next boot) and USB device mode
 across unplug and replug (`0141`-`0147`: the controller follows the USB role
 that UCSI reports and starts afresh on every attach). `0137`-`0147` are first
-built together in `7.3.4-duo2-g332f1f219`. `duo2-clean` is the
+built together in `7.3.4-duo2-g332f1f219`. `0148`-`0149` (2026-11-19) are the
+WLAN fixes: the WCN6855's PCIe link held at Gen2 as the stock kernel does (at
+Gen3 it reported completion timeouts and receiver errors, and the firmware
+crashed or stopped answering), and ath11k's crash recovery started also when
+the firmware stops answering WMI commands without crashing. `duo2-clean` is the
 bring-up series of the kernel promoted on 2026-11-15 (`7.3.4-duo2-g3ba7db140`)
 with the same code: its commit messages rewritten in upstream style and
 checkpatch's style findings fixed (whitespace, alignment, comments; the vendor
@@ -38,7 +42,7 @@ commit).
 
 | Class | Meaning | Patches |
 | --- | --- | --- |
-| 1 | Upstreamable driver, binding or DT change (as it is, or after the work in the notes) | 89 |
+| 1 | Upstreamable driver, binding or DT change (as it is, or after the work in the notes) | 91 |
 | 2 | `BRING-UP:` device-local workaround, diagnostic or vendor code; not for upstream as it is (every such subject starts with `BRING-UP:`) | 36 |
 | 3 | Backport or cherry-pick of someone else's posted or out-of-tree work | 22 |
 
@@ -302,3 +306,5 @@ What is left, and why:
 | 0145 | 1 | arm64: dts: qcom: sm8350-microsoft-surface-duo2 | Take the USB role from UCSI | series | board DT series; needs 0142 (and 0144, 0147 for replugs to work) |
 | 0146 | 2 | arm64: dts: qcom: sm8350-microsoft-surface-duo2 | Let variant J take the USB role from UCSI | no | bring-up DTB variant / USB console workaround |
 | 0147 | 1 | usb: dwc3: qcom | Power the controller down while the role switch reports no partner | first | after 0144; RFC to linux-usb (changes runtime PM for every dwc3-qcom behind a role switch) |
+| 0148 | 1 | wifi: ath11k | recover when the firmware stops answering WMI commands | first | three WMI timeouts in a row queue the reset work a crash does; seen once after ~19 h up (frames -ENOMEM, WMI credits never back, no RDDM) |
+| 0149 | 1 | arm64: dts: qcom: sm8350-microsoft-surface-duo2 | Limit the WLAN link to Gen2 | series | board DT series; cnss2 keeps this link at Gen2; at Gen3: CmpltTO / RxErr, then firmware crashes, once a failed recovery and a wedged system |

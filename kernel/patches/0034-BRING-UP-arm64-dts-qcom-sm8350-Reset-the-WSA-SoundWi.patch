@@ -1,7 +1,7 @@
 From f0753580cb9a436cb2112ab9e1899b0487a1576a Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 04:10:04 +0100
-Subject: [PATCH 034/147] BRING-UP: arm64: dts: qcom: sm8350: Reset the WSA
+Subject: [PATCH 034/149] BRING-UP: arm64: dts: qcom: sm8350: Reset the WSA
  SoundWire clock gate
 
 The WSA SoundWire controller is v1.6.0 (SWRM_COMP_HW_VERSION 0x01060000

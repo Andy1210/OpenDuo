@@ -1,7 +1,7 @@
 From 1dc8345cef7f3a345f3a3b5d69ea58550c861400 Mon Sep 17 00:00:00 2001
 From: Vincent Knecht <vincent.knecht@mailoo.org>
 Date: Tue, 28 Sep 2021 20:03:13 +0200
-Subject: [PATCH 092/147] ASoC: qdsp6: q6voice: Add getter/setter for rx and tx
+Subject: [PATCH 092/149] ASoC: qdsp6: q6voice: Add getter/setter for rx and tx
  ports
 
 Add function to get and set RX/TX ports and use those

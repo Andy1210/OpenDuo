@@ -1,7 +1,7 @@
 From 288b2cd2c27cfd963fcdd0c16a765ca590c97fb1 Mon Sep 17 00:00:00 2001
 From: Bhushan Shah <bhushan.shah@machinesoul.in>
 Date: Tue, 3 Feb 2026 15:16:58 +0530
-Subject: [PATCH 102/147] ASoC: qdsp6: q6voice-dai: add routes for
+Subject: [PATCH 102/149] ASoC: qdsp6: q6voice-dai: add routes for
  TX_CODEC_DMA_TX to VOICEMMODE1
 
 Signed-off-by: Bhushan Shah <bhushan.shah@machinesoul.in>

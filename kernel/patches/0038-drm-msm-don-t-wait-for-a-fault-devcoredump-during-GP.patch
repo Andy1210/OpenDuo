@@ -1,7 +1,7 @@
 From cd932858f0a0e86673d830c6afe1761373b9cc95 Mon Sep 17 00:00:00 2001
 From: Nico Angelo Dela Cruz <nicoangelodelacruz@gmail.com>
 Date: Mon, 2 Nov 2026 05:56:30 -0800
-Subject: [PATCH 038/147] drm/msm: don't wait for a fault devcoredump during
+Subject: [PATCH 038/149] drm/msm: don't wait for a fault devcoredump during
  GPU recovery
 
 adreno_fault_handler() calls reinit_completion() on

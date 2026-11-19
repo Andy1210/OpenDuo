@@ -1,7 +1,7 @@
 From e072c497df9c4acf1ae2f0202af9cf100ed3088f Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Fri, 6 Nov 2026 18:02:51 +0100
-Subject: [PATCH 020/147] PCI: qcom: Do not advertise native hot-plug on the
+Subject: [PATCH 020/149] PCI: qcom: Do not advertise native hot-plug on the
  Root Ports
 
 The Root Ports keep the hardware's Hot-Plug Capable and Hot-Plug Surprise

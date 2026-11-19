@@ -91,6 +91,23 @@ Development state: `0.1.0-dev`. The first public release will be 0.1.0.
 - Bug reports with personal identifiers masked.
 
 ### Fixed
+- WiFi could stop working (connected, nothing getting through) or crash, and
+  once a failed recovery wedged the whole phone: the link to the WiFi chip ran
+  at PCIe Gen3, where it reported errors; it is held at Gen2 now, as the stock
+  kernel does. A WiFi firmware that stops answering without crashing is now
+  restarted by the driver (a few seconds without WiFi instead of hours).
+- On a fresh install the sensors only logged what they would do: rotation,
+  the poses, the peek screen, the hinge text and blanking a closed phone did
+  nothing until Settings > Rotation & poses > "Use the sensors" was switched
+  on. They are on from the start now; an update switches them on where the
+  configuration was never changed.
+- A closed phone goes dark also with "Automatic poses" off (it lights again
+  when opened, in the pose it had), and also when it was already closed as
+  the sensors started (the hinge angle decides while the posture sensor has
+  said nothing yet: one night the panels of a closed phone stayed lit).
+- Automatic sleep was held on every fresh install (a bring-up default), so
+  the phone never slept, closed or not. It is on from the start; an update
+  removes the hold the installer made and keeps one switched off by the user.
 - The first start's firmware import refused a phone whose copy of the sensor
   configuration beside its registry was older than the registry itself (the
   sensors step failed, so no touch, WiFi or sensors). It now checks what the

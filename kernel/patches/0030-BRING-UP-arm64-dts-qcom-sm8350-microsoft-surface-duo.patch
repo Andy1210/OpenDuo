@@ -1,7 +1,7 @@
 From 8d6eca797e92c415eda61c37e1feb6c767a6b5a3 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 03:00:00 +0100
-Subject: [PATCH 030/147] BRING-UP: arm64: dts: qcom:
+Subject: [PATCH 030/149] BRING-UP: arm64: dts: qcom:
  sm8350-microsoft-surface-duo2: Add the speakers and microphones
 
 Three WSA883x on the WSA SoundWire bus (stock MP DTBO "Surface Duo2 MP",

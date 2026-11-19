@@ -1,7 +1,7 @@
 From 7a1e51c1e37182e3970828f4799e57faaa5d8670 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 06:04:45 +0100
-Subject: [PATCH 061/147] arm64: dts: qcom: sm8350-microsoft-surface-duo2:
+Subject: [PATCH 061/149] arm64: dts: qcom: sm8350-microsoft-surface-duo2:
  Enable the CCIs and the camera EEPROMs
 
 Enable both camera control interfaces and describe the two I2C EEPROMs

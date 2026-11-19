@@ -1,7 +1,7 @@
 From 3d34dd8cc2d4f82cebc0976115a64655f260a2ae Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Tue, 17 Nov 2026 12:28:36 +0100
-Subject: [PATCH 141/147] usb: dwc3: qcom-legacy: Don't leave the controller in
+Subject: [PATCH 141/149] usb: dwc3: qcom-legacy: Don't leave the controller in
  reset after remove
 
 dwc3_qcom_remove() and the error path of dwc3_qcom_probe() assert the

@@ -1,7 +1,7 @@
 From 935843a61cea787aede0b3eb3602b45afaf2657c Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 18:38:23 +0100
-Subject: [PATCH 052/147] arm64: dts: qcom: sm8350: Mark the video codec
+Subject: [PATCH 052/149] arm64: dts: qcom: sm8350: Mark the video codec
  dma-coherent
 
 The video codec's non-secure context bank is IO-coherent: the vendor

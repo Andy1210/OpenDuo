@@ -1,7 +1,7 @@
 From bdf611ae63cb4f5ec405f6fd9c883f0cbccce561 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Fri, 6 Nov 2026 09:09:53 +0100
-Subject: [PATCH 009/147] iommu/arm-smmu-qcom: Add SM8350 MDSS compatible to
+Subject: [PATCH 009/149] iommu/arm-smmu-qcom: Add SM8350 MDSS compatible to
  the identity-domain list
 
 The display subsystem of SM8350 is missing from qcom_smmu_client_of_match,

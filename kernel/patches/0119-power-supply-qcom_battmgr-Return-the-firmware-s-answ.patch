@@ -1,7 +1,7 @@
 From efc8f02f519ddb2d7876cac646c168f266bbf411 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 22:33:09 +0100
-Subject: [PATCH 119/147] power: supply: qcom_battmgr: Return the firmware's
+Subject: [PATCH 119/149] power: supply: qcom_battmgr: Return the firmware's
  answer from the charge thresholds
 
 The charge_control_start_threshold / end_threshold setters returned 0

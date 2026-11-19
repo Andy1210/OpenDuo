@@ -1,7 +1,7 @@
 From ae87065cf5cd317d57aef3d278dbfb912c593ef0 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Fri, 6 Nov 2026 14:22:31 +0100
-Subject: [PATCH 015/147] BRING-UP: arm64: dts: qcom:
+Subject: [PATCH 015/149] BRING-UP: arm64: dts: qcom:
  sm8350-microsoft-surface-duo2: Add bring-up variant J with dispcc
 
 Variant J is variant I with the display clock controller enabled, for

@@ -1,7 +1,7 @@
 From 47526c2dc798695873da1f2ceabc76985d0f7e56 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 16:53:10 +0100
-Subject: [PATCH 046/147] Input: qcom-spmi-haptics: Advertise the FF_SINE
+Subject: [PATCH 046/149] Input: qcom-spmi-haptics: Advertise the FF_SINE
  waveform
 
 upload_effect() plays an FF_PERIODIC effect with the FF_SINE waveform in

@@ -1,7 +1,7 @@
 From de73687ab0dfb211ea6f8151522cd0c4e375e751 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 08:40:33 +0100
-Subject: [PATCH 085/147] ASoC: qcom: qdsp6: q6asm-dai: Offer 24-bit PCM as
+Subject: [PATCH 085/149] ASoC: qcom: qdsp6: q6asm-dai: Offer 24-bit PCM as
  S32_LE, not S24_LE
 
 The MultiMedia front ends offer S24_LE and pass it to the DSP as 24-bit

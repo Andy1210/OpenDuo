@@ -1,7 +1,7 @@
 From 2801175aec8324439e0b0a04860f2a3b65f951c1 Mon Sep 17 00:00:00 2001
 From: Richard Acayan <mailingradian@gmail.com>
 Date: Sat, 7 Mar 2026 08:19:19 -0500
-Subject: [PATCH 100/147] ASoC: qdsp6: q6voice: Constify APR callback response
+Subject: [PATCH 100/149] ASoC: qdsp6: q6voice: Constify APR callback response
  data
 
 The client callback for q6voice should not modify the response, as noted

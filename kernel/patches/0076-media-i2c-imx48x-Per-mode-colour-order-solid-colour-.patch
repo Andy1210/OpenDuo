@@ -1,7 +1,7 @@
 From 91ffd5cd2780061aaeb5cffe75002d777b27678b Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 01:27:44 +0100
-Subject: [PATCH 076/147] media: i2c: imx48x: Per-mode colour order, solid
+Subject: [PATCH 076/149] media: i2c: imx48x: Per-mode colour order, solid
  colour, model name, IMX563 timing
 
 - Name the subdevice after the model ("imx481 3-0010"), which is how

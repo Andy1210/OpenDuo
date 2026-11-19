@@ -1,7 +1,7 @@
 From ed524e5e176bf95156729388ec95ab15c5f8c43f Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 08:59:05 +0100
-Subject: [PATCH 111/147] drm/panel: microsoft-elgin: Turn the display on only
+Subject: [PATCH 111/149] drm/panel: microsoft-elgin: Turn the display on only
  in enable
 
 The vendor splits the panel's power-on into an "on" sequence (the

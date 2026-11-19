@@ -1,7 +1,7 @@
 From 6482ea625a0a8effb4fc8f1eed3529e0e9de9d70 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Tue, 17 Nov 2026 13:42:26 +0100
-Subject: [PATCH 144/147] usb: dwc3: qcom: Keep the VBUS override clear unless
+Subject: [PATCH 144/149] usb: dwc3: qcom: Keep the VBUS override clear unless
  the role is device
 
 The QSCRATCH VBUS override is what tells the controller about a device

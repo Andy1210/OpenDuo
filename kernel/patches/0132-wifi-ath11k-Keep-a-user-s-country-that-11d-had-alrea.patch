@@ -1,7 +1,7 @@
 From 6e18c2fb411d645ffc0bb80300599be4af21a7bc Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Thu, 12 Nov 2026 16:27:17 +0100
-Subject: [PATCH 132/147] wifi: ath11k: Keep a user's country that 11d had
+Subject: [PATCH 132/149] wifi: ath11k: Keep a user's country that 11d had
  already set
 
 A user regulatory hint for the country the phy already has (typically

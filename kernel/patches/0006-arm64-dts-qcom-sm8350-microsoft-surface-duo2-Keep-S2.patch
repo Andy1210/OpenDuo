@@ -1,7 +1,7 @@
 From 61726ebf3a68f1da0de9af9c2b6fdbc400fe17a7 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Fri, 6 Nov 2026 00:04:02 +0100
-Subject: [PATCH 006/147] arm64: dts: qcom: sm8350-microsoft-surface-duo2: Keep
+Subject: [PATCH 006/149] arm64: dts: qcom: sm8350-microsoft-surface-duo2: Keep
  S2E at the bootloader's 1.012 V
 
 Its max was 0.976 V, so the regulator core pulled the rail down at probe

@@ -1,7 +1,7 @@
 From f047c5188eb8bd11e1a32512d31a5f3eb5903b87 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 22:48:55 +0100
-Subject: [PATCH 121/147] arm64: dts: qcom: sm8350-microsoft-surface-duo2: Add
+Subject: [PATCH 121/149] arm64: dts: qcom: sm8350-microsoft-surface-duo2: Add
  the board thermistors
 
 Describe the six board thermistors the stock device tree reads through

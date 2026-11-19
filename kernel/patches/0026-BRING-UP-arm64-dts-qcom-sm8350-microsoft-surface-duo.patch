@@ -1,7 +1,7 @@
 From 5e6e5a6bf777b1d7f85bcf98616adebb16ad4217 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 00:45:41 +0100
-Subject: [PATCH 026/147] BRING-UP: arm64: dts: qcom:
+Subject: [PATCH 026/149] BRING-UP: arm64: dts: qcom:
  sm8350-microsoft-surface-duo2: Add the SLPI sleepstate SMP2P entries
 
 The sensor DSP waits for the SMP2P entry "sleepstate" before it

@@ -1,7 +1,7 @@
 From 33734cb9bb53eddca5d90bfc13a2a06595eab37b Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 01:46:17 +0100
-Subject: [PATCH 080/147] media: i2c: imx48x: Show the IMX563 test pattern over
+Subject: [PATCH 080/149] media: i2c: imx48x: Show the IMX563 test pattern over
  the whole frame
 
 The IMX563's full-resolution modes send four lines of a test pattern a

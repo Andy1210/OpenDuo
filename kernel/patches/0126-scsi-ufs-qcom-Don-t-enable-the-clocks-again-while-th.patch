@@ -1,7 +1,7 @@
 From 111c3cbc7d8e214179a6704d7c4a6f53b84024c9 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 17:02:49 +0100
-Subject: [PATCH 126/147] scsi: ufs: qcom: Don't enable the clocks again while
+Subject: [PATCH 126/149] scsi: ufs: qcom: Don't enable the clocks again while
  they are enabled
 
 ufs_qcom_enable_lane_clks() enables all of the host's clocks in bulk and

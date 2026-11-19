@@ -1,7 +1,7 @@
 From eac609e0ab3765ebde447c22bfd8052ca8fa4047 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Tue, 17 Nov 2026 13:41:23 +0100
-Subject: [PATCH 143/147] BRING-UP: arm64: dts: qcom:
+Subject: [PATCH 143/149] BRING-UP: arm64: dts: qcom:
  sm8350-microsoft-surface-duo2: Follow the flattened USB node
 
 The SM8350 USB controller is one node now (glue and core): the

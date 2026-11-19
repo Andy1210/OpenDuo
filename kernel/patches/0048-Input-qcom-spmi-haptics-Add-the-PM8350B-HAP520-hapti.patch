@@ -1,7 +1,7 @@
 From 59067651ec71e074be62efc389af62ed663d8f71 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 16:57:15 +0100
-Subject: [PATCH 048/147] Input: qcom-spmi-haptics: Add the PM8350B (HAP520)
+Subject: [PATCH 048/149] Input: qcom-spmi-haptics: Add the PM8350B (HAP520)
  haptics
 
 HAP520, the haptics module of the PM8350B, is programmed like HAP530_HV

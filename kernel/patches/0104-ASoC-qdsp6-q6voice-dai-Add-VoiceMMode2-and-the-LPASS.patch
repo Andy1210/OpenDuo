@@ -1,7 +1,7 @@
 From b7e94aa4d20c6ddb72573a6b84d898ed342010d8 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 19:26:48 +0100
-Subject: [PATCH 104/147] ASoC: qdsp6: q6voice-dai: Add VoiceMMode2 and the
+Subject: [PATCH 104/149] ASoC: qdsp6: q6voice-dai: Add VoiceMMode2 and the
  LPASS codec DMA ports
 
 Newer modem firmware runs a call of the first subscription on the

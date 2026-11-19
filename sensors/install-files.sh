@@ -23,6 +23,16 @@ ldconfig
 install -d /usr/local/lib/duo-posed
 install -m 0644 duo2_ssc.py posepolicy.py /usr/local/lib/duo-posed/
 install -m 0755 duo-posed duo2-ssc /usr/local/bin/
+# A configuration nobody changed (still the .dist an earlier version shipped)
+# takes the new one: the first release shipped `enabled = off`, so duo-posed
+# only logged on a fresh install (no rotation, poses, peek or blanking when
+# closed) until "Use the sensors" was switched on in Settings.
+if [ -e /etc/duo-posed.conf ] && [ -e /etc/duo-posed.conf.dist ] &&
+    cmp -s /etc/duo-posed.conf /etc/duo-posed.conf.dist &&
+    ! cmp -s duo-posed.conf /etc/duo-posed.conf; then
+    install -m 0644 duo-posed.conf /etc/duo-posed.conf
+    systemctl try-reload-or-restart duo-posed.service 2>/dev/null || true
+fi
 install -m 0644 duo-posed.conf /etc/duo-posed.conf.dist
 [ -e /etc/duo-posed.conf ] || install -m 0644 duo-posed.conf /etc/duo-posed.conf
 install -D -m 0644 hexagonrpcd-duo2.conf /etc/systemd/system/hexagonrpcd.service.d/duo2.conf

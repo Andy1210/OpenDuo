@@ -1,7 +1,7 @@
 From 817738e037078ff89ea77a9010f6a20ded923a86 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 19:31:56 +0100
-Subject: [PATCH 107/147] ASoC: codecs: wsa883x: Keep the PA off without a DAC
+Subject: [PATCH 107/149] ASoC: codecs: wsa883x: Keep the PA off without a DAC
  port
 
 An earpiece amplifier can share the master ports of a speaker amplifier

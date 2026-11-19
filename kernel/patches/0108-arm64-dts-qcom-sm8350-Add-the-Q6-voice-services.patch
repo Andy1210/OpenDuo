@@ -1,7 +1,7 @@
 From 40a23a13819399aa1e69827dee7987f3451a948c Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 19:31:56 +0100
-Subject: [PATCH 108/147] arm64: dts: qcom: sm8350: Add the Q6 voice services
+Subject: [PATCH 108/149] arm64: dts: qcom: sm8350: Add the Q6 voice services
 
 The SM8350 ADSP runs the Elite voice services (MVM, CVS, CVP) next to
 AFE/ASM/ADM on the APR "apr_audio_svc" channel, in the same audio

@@ -1,7 +1,7 @@
 From 761b11cae7e28f74df70a17e9bdc4a015781a820 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 12:11:42 +0100
-Subject: [PATCH 044/147] drm/panel: microsoft-elgin: Leave the reset line
+Subject: [PATCH 044/149] drm/panel: microsoft-elgin: Leave the reset line
  alone until the first prepare
 
 The panel driver asserted the reset line at probe (GPIOD_OUT_HIGH), which

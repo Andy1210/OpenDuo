@@ -1,7 +1,7 @@
 From 3d91ef799da784ddb8e39f47c543282e00d15c71 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 05:14:30 +0100
-Subject: [PATCH 036/147] arm64: dts: qcom: sm8350: Fix the IPA interrupt
+Subject: [PATCH 036/149] arm64: dts: qcom: sm8350: Fix the IPA interrupt
 
 The IPA interrupt of SM8350 is SPI 654, as in the vendor device tree of
 the SoC ("ipa-irq", 0x28e) and as on SC7280 and SM8550, not 655. With

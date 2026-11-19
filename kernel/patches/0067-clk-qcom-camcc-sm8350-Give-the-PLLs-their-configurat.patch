@@ -1,7 +1,7 @@
 From d870098c413e2cd8c61f85b1d2f6fcefc01f7d7d Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 00:25:15 +0100
-Subject: [PATCH 067/147] clk: qcom: camcc-sm8350: Give the PLLs their
+Subject: [PATCH 067/149] clk: qcom: camcc-sm8350: Give the PLLs their
  configurations
 
 qcom_cc_probe() configures the PLLs from clk_alpha_pll.config: without it

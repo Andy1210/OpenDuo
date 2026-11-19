@@ -1,7 +1,7 @@
 From 5a867ed6f794e0b94c7b8ae66c5feb45c6adf136 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 19:16:49 +0100
-Subject: [PATCH 053/147] arm64: dts: qcom: sm8350: Add the CPU capacities and
+Subject: [PATCH 053/149] arm64: dts: qcom: sm8350: Add the CPU capacities and
  dynamic power coefficients
 
 The CPU nodes have no capacity-dmips-mhz, so every core reports a

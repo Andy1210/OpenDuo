@@ -1,7 +1,7 @@
 From 63b1d57d1c8418855e07b36415e0738b920478d5 Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 01:19:23 +0100
-Subject: [PATCH 073/147] media: qcom: camss: Set the SM8350 camera NoC clock
+Subject: [PATCH 073/149] media: qcom: camss: Set the SM8350 camera NoC clock
  rates
 
 Put the camera NoC's levels (300 and 400 MHz, the vendor driver's low

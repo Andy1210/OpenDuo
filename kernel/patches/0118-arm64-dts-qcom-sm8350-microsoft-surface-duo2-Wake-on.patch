@@ -1,7 +1,7 @@
 From 3042391a958dea93ef74e8e0c110af3988b1ebaf Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sun, 8 Nov 2026 11:15:56 +0100
-Subject: [PATCH 118/147] arm64: dts: qcom: sm8350-microsoft-surface-duo2: Wake
+Subject: [PATCH 118/149] arm64: dts: qcom: sm8350-microsoft-surface-duo2: Wake
  on the modem and sensor DSP
 
 Mark the GLINK edges of the modem and of the sensor DSP as wakeup

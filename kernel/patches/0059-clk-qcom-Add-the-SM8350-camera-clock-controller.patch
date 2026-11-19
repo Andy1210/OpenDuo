@@ -1,7 +1,7 @@
 From 5a9e7f39a6c79cd80a591636e8f70d19f5c8c10b Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 06:02:40 +0100
-Subject: [PATCH 059/147] clk: qcom: Add the SM8350 camera clock controller
+Subject: [PATCH 059/149] clk: qcom: Add the SM8350 camera clock controller
 
 Port the camera clock controller of the vendor msm-5.4 kernel
 (camcc-lahaina.c, GPL; Microsoft surface-duo-oss-kernel.msm-5.4,

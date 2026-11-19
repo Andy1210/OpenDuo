@@ -1,7 +1,7 @@
 From 6f72b3bd80caff39b9c96584ea5f00e9749420ac Mon Sep 17 00:00:00 2001
 From: Andy1210 <andy1210@gmail.com>
 Date: Sat, 7 Nov 2026 21:59:24 +0100
-Subject: [PATCH 116/147] power: supply: qcom_battmgr: Wake the system when a
+Subject: [PATCH 116/149] power: supply: qcom_battmgr: Wake the system when a
  charger comes or goes
 
 A phone wakes up when it is plugged in. The battery manager reports a
