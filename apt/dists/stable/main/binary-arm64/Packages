@@ -462,7 +462,7 @@ Description: libraries for the PipeWire multimedia server Simple Plugin API - mo
  clients should depend on the pipewire package instead.
 
 Package: openduo-android
-Version: 0.1.0~dev+20261118211558.g6dd1dab
+Version: 0.1.0~dev+20261119110112.ga3aed5a
 Architecture: all
 Maintainer: OpenDuo <noreply@example.org>
 Installed-Size: 133
@@ -470,70 +470,70 @@ Depends: python3, sudo, lxc, dnsmasq-base, nftables, apparmor
 Recommends: waydroid
 Priority: optional
 Section: misc
-Filename: pool/main/o/openduo-android/openduo-android_0.1.0~dev+20261118211558.g6dd1dab_all.deb
-Size: 31092
-SHA256: 534a15dbebb0b88ccb049c47352a988903de55b0d1188e82eec8f4042acb307c
-SHA1: fe5d4e92ba4e01a4b1d16dfc4be41f66451eb50c
-MD5sum: 62d8262412d0a43b487dbaa01e1fe0ed
+Filename: pool/main/o/openduo-android/openduo-android_0.1.0~dev+20261119110112.ga3aed5a_all.deb
+Size: 31104
+SHA256: 5d9a247705f3a9433e6e05ffa2e271ae750ff7709f215a92292f7e6f70d45b4f
+SHA1: ab0b23dd19247263901c468d112d56c835ab07f3
+MD5sum: 525e0c168d01ffa6a9123c90417d0a14
 Description: OpenDuo's Android apps integration (Waydroid)
  The hardening of Waydroid (patches, LXC include, AppArmor, seccomp, the
  firewall), the on-demand session, the idle stop, the weekly image update and
  the location bridge. No Android image: waydroid init after installation.
 
 Package: openduo-archive-keyring
-Version: 0.1.0~dev+20261118211558.g6dd1dab
+Version: 0.1.0~dev+20261119110112.ga3aed5a
 Architecture: all
 Maintainer: OpenDuo <noreply@example.org>
 Installed-Size: 14
 Depends: apt (>= 2.6)
 Priority: important
 Section: admin
-Filename: pool/main/o/openduo-archive-keyring/openduo-archive-keyring_0.1.0~dev+20261118211558.g6dd1dab_all.deb
+Filename: pool/main/o/openduo-archive-keyring/openduo-archive-keyring_0.1.0~dev+20261119110112.ga3aed5a_all.deb
 Size: 2580
-SHA256: 8dca8c8cd13afaa338191e78cc1ed080ca14fac989a05d77d439b9dcfa907b88
-SHA1: ffa561d17489a4a55aea0bd70f9364d7e801bd25
-MD5sum: 7a2d22ccaf4a1a52af465b6dd5745651
+SHA256: 2e64087b701d6d93c8e1e33a38478a02a72687bb24c905478f19e6adf0899c76
+SHA1: 45026f5d1d87d5fd7059849a801875e2d4370eff
+MD5sum: 26da44d0924dc1c3d52aab37cf202af3
 Description: OpenDuo's repository key, its sources and pins
  The OpenDuo archive signing key, the deb822 sources file (signed-by) and the
  pins that keep OpenDuo's rebuilds of Debian packages.
 
 Package: openduo-battery-surface-duo2
-Version: 0.1.0~dev+20261118211558.g6dd1dab
+Version: 0.1.0~dev+20261119110112.ga3aed5a
 Architecture: all
 Maintainer: OpenDuo <noreply@example.org>
 Installed-Size: 108
 Depends: python3, systemd
 Priority: optional
 Section: misc
-Filename: pool/main/o/openduo-battery-surface-duo2/openduo-battery-surface-duo2_0.1.0~dev+20261118211558.g6dd1dab_all.deb
-Size: 29244
-SHA256: a10d069a17c7f10f22516259703a7b4f3637247a665453516e265e78f592d0b5
-SHA1: bc333c053ac6ad3be88f72f9db1284b9ac3da3b7
-MD5sum: e523f338e55e969980d9bd8aecc1c109
+Filename: pool/main/o/openduo-battery-surface-duo2/openduo-battery-surface-duo2_0.1.0~dev+20261119110112.ga3aed5a_all.deb
+Size: 29248
+SHA256: df90070df728fc0b4c3ce1bba99a364a442042d2b225b4656f8257c33559d39a
+SHA1: 329a83649478f6172b0b7b492861842c89a5ccbd
+MD5sum: ef6d129c385ac76894c1a8ef2d3a5258
 Description: OpenDuo's battery usage statistics for the Surface Duo 2
  The battery usage collector behind Settings > Battery, its sleep hook and
  the group that may read the history (it stays on the phone).
 
 Package: openduo-devmode
-Version: 0.1.0~dev+20261118211558.g6dd1dab
+Version: 0.1.0~dev+20261119110112.ga3aed5a
 Architecture: all
 Maintainer: OpenDuo <noreply@example.org>
 Installed-Size: 112
 Depends: python3, sudo, openssh-server
 Priority: optional
 Section: misc
-Filename: pool/main/o/openduo-devmode/openduo-devmode_0.1.0~dev+20261118211558.g6dd1dab_all.deb
-Size: 29784
-SHA256: 75742a99547bdda17bf4a4075c40f772525cba70eea2147f054198bf4db01b29
-SHA1: 48364e52629dc77297e4ae0b8434aecbf8aea771
-MD5sum: 6f18bf2bcca422964d77a795ea6ffcc2
+Filename: pool/main/o/openduo-devmode/openduo-devmode_0.1.0~dev+20261119110112.ga3aed5a_all.deb
+Size: 29788
+SHA256: 47a215756d18680b1b63e316d22788eafe1d19353765392cbdce4d1a84477738
+SHA1: 21b9f9e1804a3301c7ba4efdbc6e722337da613b
+MD5sum: 817f22e129a2d1f125be041e122568b3
 Description: OpenDuo's developer mode (Settings > Developer)
  ssh (key login only), the keys that may log in, the USB network, the
  developer tools (installed only while developer mode is on) and the bug
  report with identifiers masked.
 
 Package: openduo-duo-apps
-Version: 0.1.0~dev+20261118211558.g6dd1dab
+Version: 0.1.0~dev+20261119110112.ga3aed5a
 Architecture: all
 Maintainer: OpenDuo <noreply@example.org>
 Installed-Size: 80
@@ -541,150 +541,150 @@ Depends: libglib2.0-bin, polkitd
 Recommends: fonts-cantarell, fonts-noto-color-emoji, appstream, apt-config-icons, apt-config-icons-hidpi, gnome-clocks, gnome-calculator, gnome-calendar, evolution-data-server, gnome-weather, nautilus, portfolio-filemanager, loupe, papers, amberol, celluloid, mpv, ffmpeg, gstreamer1.0-libav, gstreamer1.0-plugins-bad, gstreamer1.0-pipewire, libgtk-4-media-gstreamer, sound-theme-freedesktop, angelfish, qt6-wayland, libqt6sql6-sqlite, qml6-module-org-kde-desktop, plasma-integration, kde-style-breeze, gnome-software, gnome-software-plugin-deb, gnome-software-plugin-flatpak, flatpak, packagekit, packagekit-tools
 Priority: optional
 Section: misc
-Filename: pool/main/o/openduo-duo-apps/openduo-duo-apps_0.1.0~dev+20261118211558.g6dd1dab_all.deb
-Size: 17520
-SHA256: 2f130031a01f389d955a09ad3243ceff9429f2fbe212d6f496de8885e5256cdd
-SHA1: a7d395d6fd4119d3dab46cbe56efed5fd863f8ee
-MD5sum: f384eb7976d16be75ac16cd2be4da362
+Filename: pool/main/o/openduo-duo-apps/openduo-duo-apps_0.1.0~dev+20261119110112.ga3aed5a_all.deb
+Size: 17524
+SHA256: 3637e25b4e1c2e963c84296f78269d912c2f8ad3b742800ee41f128dd1828504
+SHA1: 23b5f5d3630d79fcaa92fd93a6e6d36afd1b81a0
+MD5sum: 06ef3382d245ab73bd1b2f6d7cc0e0be
 Description: OpenDuo's app integration (Clocks, Calculator, Software, Qt apps)
  How the preinstalled apps fit the phone: the alarm services, Calculator
  without the keyboard over its keypad, GNOME Software through PackageKit with
  the user's confirmation, Flathub for the user, dark Breeze for Qt apps.
 
 Package: openduo-duo-screencast
-Version: 0.1.0~dev+20261118211558.g6dd1dab
+Version: 0.1.0~dev+20261119110112.ga3aed5a
 Architecture: all
 Maintainer: OpenDuo <noreply@example.org>
 Installed-Size: 46
 Depends: xdg-desktop-portal-wlr, grim, python3
 Priority: optional
 Section: misc
-Filename: pool/main/o/openduo-duo-screencast/openduo-duo-screencast_0.1.0~dev+20261118211558.g6dd1dab_all.deb
-Size: 11944
-SHA256: e849ce2d38d13e087631b9eeede6bf8da3baf0e6cd16b9e1624d3e13a3a1c669
-SHA1: f822edd4ce0b16105b2a087c7902555d146828b0
-MD5sum: ad3ec7609e40bb4a80e10b0449f0c104
+Filename: pool/main/o/openduo-duo-screencast/openduo-duo-screencast_0.1.0~dev+20261119110112.ga3aed5a_all.deb
+Size: 11936
+SHA256: 0f39766a294223f2dc788e173d6e216b5a6db130726d606075a506e09f7fb16d
+SHA1: 74f5db4a83234d890cd213a829427449fc885d9a
+MD5sum: 276c16e20dba5e9f12615a9e08329af2
 Description: OpenDuo's screen sharing (the portal backend's launcher, chooser and gate)
  Screen casting and screenshots through xdg-desktop-portal-wlr, with the
  compositor's own chooser and the screenshot gate.
 
 Package: openduo-duo-settings
-Version: 0.1.0~dev+20261118211558.g6dd1dab
+Version: 0.1.0~dev+20261119110112.ga3aed5a
 Architecture: all
 Maintainer: OpenDuo <noreply@example.org>
 Installed-Size: 578
 Depends: python3, sudo, python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1, gtk-update-icon-cache, gir1.2-gdkpixbuf-2.0, gir1.2-gstreamer-1.0, gstreamer1.0-plugins-bad, gstreamer1.0-pipewire, gstreamer1.0-gtk4
 Priority: optional
 Section: misc
-Filename: pool/main/o/openduo-duo-settings/openduo-duo-settings_0.1.0~dev+20261118211558.g6dd1dab_all.deb
-Size: 131884
-SHA256: 316ce349ad34424d4eb46818c21a622167418397f1d2a5e688bc4cbfef434121
-SHA1: 0be3cf4bc0ccb07239e26e6e18a35e803eca918f
-MD5sum: 0b76d50c6f5b5603292dc7407800e37f
+Filename: pool/main/o/openduo-duo-settings/openduo-duo-settings_0.1.0~dev+20261119110112.ga3aed5a_all.deb
+Size: 131888
+SHA256: c0a996404e94005ffcb20308f0f89251855331ec284ea49780f25b3f520165f7
+SHA1: 737a6036e9ce532396272ec2fa571a80efe87580
+MD5sum: db9faca2733eee0ffb59c13c49b038e0
 Description: Duo Settings, OpenDuo's settings app
  Network, display, appearance, battery, sound, mobile and eSIM, hotspot,
  Android apps, pen, security, updates, developer options, About; its root
  helper (exact subcommands) and the panels' refresh rate at boot.
 
 Package: openduo-duo-shell
-Version: 0.1.0~dev+20261118211558.g6dd1dab
+Version: 0.1.0~dev+20261119110112.ga3aed5a
 Architecture: all
 Maintainer: OpenDuo <noreply@example.org>
 Installed-Size: 785
 Depends: python3, sudo, python3-gi, gir1.2-gtk-4.0, gir1.2-gtk4layershell-1.0, libgtk4-layer-shell0, squeekboard, phosh-osk-stub, libpresage-data, hunspell-hu, dconf-gsettings-backend, dconf-cli, adwaita-icon-theme, dbus-daemon, at-spi2-core, libglib2.0-bin, librsvg2-common, libnotify-bin, gir1.2-graphene-1.0, xdg-desktop-portal, xdg-desktop-portal-gtk, python3-pywayland, python3-cffi-backend, wayland-protocols, python3-cairo, python3-gi-cairo, gir1.2-adw-1, gir1.2-gweather-4.0, gir1.2-pango-1.0, fonts-cantarell, gir1.2-modemmanager-1.0, gir1.2-gdkpixbuf-2.0, libjxl-gdk-pixbuf, gnome-backgrounds
 Priority: optional
 Section: misc
-Filename: pool/main/o/openduo-duo-shell/openduo-duo-shell_0.1.0~dev+20261118211558.g6dd1dab_all.deb
-Size: 165256
-SHA256: dc71a2d62bc8faf52a706e8377a7b521fe1ae38eaa0014ae796f77123c3174fe
-SHA1: f62adbf8acdbacefbae439a7551d5ed3f0edb84a
-MD5sum: d8944b83f60de01fbfe884b3b15b6bf6
+Filename: pool/main/o/openduo-duo-shell/openduo-duo-shell_0.1.0~dev+20261119110112.ga3aed5a_all.deb
+Size: 165260
+SHA256: b7885936585e792361529a03ece7845369cc8d6159057540cb6e2c30dc91ba96
+SHA1: 76457536b672de30c5bf3a403391b6c44d184cb1
+MD5sum: f3010a25388a23a091d14197a03ff814
 Description: OpenDuo's shell: status bars, app grid, quick menu, lock screen
  The touch-first home screen, the app drawer, notifications, the dock, the
  lock screen with its PIN store, and the shell's root helper.
 
 Package: openduo-duo-wc
-Version: 0.1.0~dev+20261118211558.g6dd1dab
+Version: 0.1.0~dev+20261119110112.ga3aed5a
 Architecture: arm64
 Maintainer: OpenDuo <noreply@example.org>
 Installed-Size: 68018
 Depends: foot, seatd, libseat1, libdisplay-info2, xwayland, libinput10, libgbm1, libegl1, libgles2, libwayland-server0, libxkbcommon0, systemd
 Priority: optional
 Section: misc
-Filename: pool/main/o/openduo-duo-wc/openduo-duo-wc_0.1.0~dev+20261118211558.g6dd1dab_arm64.deb
-Size: 10036188
-SHA256: 9369933807d8af31859d54e282752e586e8704ed69ad5dac427af9395d18ae9a
-SHA1: 0008c88ae0b71b03ad679da6635923906b1d610e
-MD5sum: fb05f1306e9ab6f95ab150f962392be9
+Filename: pool/main/o/openduo-duo-wc/openduo-duo-wc_0.1.0~dev+20261119110112.ga3aed5a_arm64.deb
+Size: 10034124
+SHA256: edaa59640f31d336f0d2400e808d9202e4cf6f135b537510a0673ccf9cd36af2
+SHA1: faa8895351efe11292508be498894fcd9a3cbf5c
+MD5sum: 5fe64c9bceaea509e5a1ef63f6940da8
 Description: OpenDuo's dual-screen Wayland compositor (duo-wc)
  duo-wc drives both panels: windows span or snap across the hinge, laptop
  and desktop layouts, rotation, screen casting, XWayland. Its session starts
  the shell and the on-screen keyboard.
 
 Package: openduo-firewall
-Version: 0.1.0~dev+20261118211558.g6dd1dab
+Version: 0.1.0~dev+20261119110112.ga3aed5a
 Architecture: all
 Maintainer: OpenDuo <noreply@example.org>
 Installed-Size: 22
 Depends: nftables, systemd-resolved
 Priority: optional
 Section: misc
-Filename: pool/main/o/openduo-firewall/openduo-firewall_0.1.0~dev+20261118211558.g6dd1dab_all.deb
+Filename: pool/main/o/openduo-firewall/openduo-firewall_0.1.0~dev+20261119110112.ga3aed5a_all.deb
 Size: 6368
-SHA256: 2e1050b30917997157b7462ea4eaf1f6fe12d47a27a49be1bba5d5d3f2efe205
-SHA1: 115e0b40610ec2a2db9b463a250163e31de40834
-MD5sum: 24c5825bc893f496084a80ec744c3295
+SHA256: 1a31a32ff51af59c62c9f9b0b1249758d36c9949d52ae03bf789cd98f3f8c970
+SHA1: 67c4552717479a944f04dba5716b8c64c069a57c
+MD5sum: 26dc3b0a20a84705c6757c80ecda880b
 Description: OpenDuo's firewall (closed by default)
  A default-deny nftables firewall and resolved without LLMNR or mDNS.
 
 Package: openduo-homecrypt
-Version: 0.1.0~dev+20261118211558.g6dd1dab
+Version: 0.1.0~dev+20261119110112.ga3aed5a
 Architecture: all
 Maintainer: OpenDuo <noreply@example.org>
 Installed-Size: 96
 Depends: python3, systemd, e2fsprogs
 Priority: optional
 Section: misc
-Filename: pool/main/o/openduo-homecrypt/openduo-homecrypt_0.1.0~dev+20261118211558.g6dd1dab_all.deb
-Size: 25092
-SHA256: 4a58e9d584d815c80f04561590887c564b4636e45f9699c475bca5e805d1647b
-SHA1: 9072ca657e787e24754b11b558d259b0976d941f
-MD5sum: 35a051398c8c6d33e028121544c5d247
+Filename: pool/main/o/openduo-homecrypt/openduo-homecrypt_0.1.0~dev+20261119110112.ga3aed5a_all.deb
+Size: 25088
+SHA256: 76d39cead6769978c5c83ff2a8f215245584de7e8b548d0ea1304c5e61644582
+SHA1: 00de384282c760d6c703a6231ac25a5c8089106b
+MD5sum: 668ffb235614e770b1ade7a81d7e5fc7
 Description: OpenDuo's optional encryption of the user's data (fscrypt, tied to the PIN)
  Settings > Lock screen > Encrypt my data: fscrypt for the home, direct boot
  for the alarms and calls, a recovery key. Nothing is encrypted until the
  user asks.
 
 Package: openduo-hotspot
-Version: 0.1.0~dev+20261118211558.g6dd1dab
+Version: 0.1.0~dev+20261119110112.ga3aed5a
 Architecture: all
 Maintainer: OpenDuo <noreply@example.org>
 Installed-Size: 183
 Depends: python3, sudo, hostapd
 Priority: optional
 Section: misc
-Filename: pool/main/o/openduo-hotspot/openduo-hotspot_0.1.0~dev+20261118211558.g6dd1dab_all.deb
+Filename: pool/main/o/openduo-hotspot/openduo-hotspot_0.1.0~dev+20261119110112.ga3aed5a_all.deb
 Size: 47500
-SHA256: 6350ea65c94f1cf342d0d02c0afb42ffa4e80c87fb9033d9fbe6008080857b4c
-SHA1: 11effde2552ff398358af063a538fb2d97c6e4c5
-MD5sum: 4e71d982434db2591c4ca544f6304ca2
+SHA256: c8b5ce2e58af6d0b87aef794e9f7cb2fec1d5be13fe84eb9d6a51b191f38470e
+SHA1: c0db3bf4f922e2910a16f060a2f2aeab60f32fbc
+MD5sum: 812beb1602b94517a49941677e832c8b
 Description: OpenDuo's mobile hotspot and USB tethering
  Shares mobile data over WiFi (hostapd, run only while sharing) or USB;
  the WiFi country from the mobile network.
 
 Package: openduo-kernel-surface-duo2
-Version: 7.3.4+20261117135231.g332f1f219
+Version: 7.3.4+20261119105507.g98ab3693e
 Architecture: arm64
 Maintainer: OpenDuo <noreply@example.org>
 Installed-Size: 6
-Depends: openduo-kernel-surface-duo2-7.3.4-duo2-g332f1f219 (= 7.3.4+20261117135231.g332f1f219)
+Depends: openduo-kernel-surface-duo2-7.3.4-duo2-g98ab3693e (= 7.3.4+20261119105507.g98ab3693e)
 Priority: optional
 Section: kernel
-Filename: pool/main/o/openduo-kernel-surface-duo2/openduo-kernel-surface-duo2_7.3.4+20261117135231.g332f1f219_arm64.deb
+Filename: pool/main/o/openduo-kernel-surface-duo2/openduo-kernel-surface-duo2_7.3.4+20261119105507.g98ab3693e_arm64.deb
 Size: 1204
-SHA256: a98e855e71248e9474190a78185784f0b437015900d2ba2c5c3ce0dc3e17777d
-SHA1: 8f5aef807ebb72ac3316132c83b52ec496a5d0f7
-MD5sum: 8dd4c826f5218ddd9544052aa5ad3ec3
+SHA256: f938eeecc57ab6099379adaf5108d816dab1b168bbfd42fcec2f0a4b3809aa2d
+SHA1: 55a9dae46da794bc3de37bb26581720791b4d165
+MD5sum: 92c7f5010e80d5e09e5454f049b8c58a
 Description: OpenDuo's kernel for the Surface Duo 2 (always the newest)
  Depends on the newest kernel build; older ones stay until
  duo2-updates removes them (the previous good one is kept).
@@ -708,19 +708,38 @@ Description: OpenDuo's Linux 7.3.4-duo2-g332f1f219 for the Surface Duo 2
  7.3.4-duo2-g332f1f219. Installing it puts it on the ESP with its own boot entry, tried
  three times before the previous kernel comes back (duo2-boot).
 
+Package: openduo-kernel-surface-duo2-7.3.4-duo2-g98ab3693e
+Version: 7.3.4+20261119105507.g98ab3693e
+Architecture: arm64
+Maintainer: OpenDuo <noreply@example.org>
+Installed-Size: 142579
+Depends: kmod, openduo-maint
+Provides: openduo-kernel
+Priority: optional
+Section: kernel
+Filename: pool/main/o/openduo-kernel-surface-duo2-7.3.4-duo2-g98ab3693e/openduo-kernel-surface-duo2-7.3.4-duo2-g98ab3693e_7.3.4+20261119105507.g98ab3693e_arm64.deb
+Size: 25853732
+SHA256: b2077d1459cad9234eb01ee832d45b406c6f2023e469241f49ce2e3af88be1a8
+SHA1: 7901f5dd1d197c1a94fc3d710285fc1db2961ad6
+MD5sum: 639f473653f46260cf8951262d0f549c
+Description: OpenDuo's Linux 7.3.4-duo2-g98ab3693e for the Surface Duo 2
+ The kernel Image, the Surface Duo 2 device trees and the modules of the build
+ 7.3.4-duo2-g98ab3693e. Installing it puts it on the ESP with its own boot entry, tried
+ three times before the previous kernel comes back (duo2-boot).
+
 Package: openduo-maint
-Version: 0.1.0~dev+20261118211558.g6dd1dab
+Version: 0.1.0~dev+20261119110112.ga3aed5a
 Architecture: all
 Maintainer: OpenDuo <noreply@example.org>
 Installed-Size: 180
 Depends: python3, sudo, rsync, dpkg-repack, systemd, util-linux
 Priority: optional
 Section: misc
-Filename: pool/main/o/openduo-maint/openduo-maint_0.1.0~dev+20261118211558.g6dd1dab_all.deb
-Size: 43940
-SHA256: 27b3647f73e21a3fe0a3bb1230d82ae347f33aa9d142e5a8b382ab00cf9a5533
-SHA1: 8b394cc60d45bae9ac056cb7cdb88ab2be426a4b
-MD5sum: 471e8547c4b474538c432f456005fe06
+Filename: pool/main/o/openduo-maint/openduo-maint_0.1.0~dev+20261119110112.ga3aed5a_all.deb
+Size: 43944
+SHA256: 53a725305893a8b18e08109d1744b2f358ec742b3809ca2943ccb225fe6c8841
+SHA1: f48be60a36bc095468d8768103bd1a08d4e5e1fc
+MD5sum: 59e121323cda6b7e8b433c1fd49d8991
 Description: OpenDuo's updates, snapshots, backups and kernel boot entries
  duo2-update (Debian updates with a look first and a way back),
  duo2-snapshot, duo2-backup, duo2-boot (the packaged kernels' boot entries,
@@ -728,61 +747,61 @@ Description: OpenDuo's updates, snapshots, backups and kernel boot entries
  against Debian kernel and firmware packages.
 
 Package: openduo-nibfair
-Version: 0.1.0~dev+20261118211558.g6dd1dab
+Version: 0.1.0~dev+20261119110112.ga3aed5a
 Architecture: arm64
 Maintainer: OpenDuo <noreply@example.org>
 Installed-Size: 854
 Depends: libsdl3-0
 Priority: optional
 Section: misc
-Filename: pool/main/o/openduo-nibfair/openduo-nibfair_0.1.0~dev+20261118211558.g6dd1dab_arm64.deb
-Size: 332500
-SHA256: c1b5ee286976196fa5cbd030c8c2d540e3408647fc12a9ab24490cfea319b251
-SHA1: 07d3e546e1a94b8cbd3493846fb0f979d614e2cd
-MD5sum: ee17d1348cc49a7a4da985eec089c1db
+Filename: pool/main/o/openduo-nibfair/openduo-nibfair_0.1.0~dev+20261119110112.ga3aed5a_arm64.deb
+Size: 332524
+SHA256: fc764bfcba1055aedeabaf377c9aa00a8283f77a1e89cd8021b6212e5cf2c9af
+SHA1: 4e39442dd2f7f4d580090bb6ce76778c8ed6caeb
+MD5sum: 0dbe17c4226f601812ea7380c65dfdd6
 Description: Nibfair, a pen-aware game for OpenDuo
  A game played with the Surface Pen: pressure and tilt.
 
 Package: openduo-plymouth-theme-surface-duo2
-Version: 0.1.0~dev+20261118211558.g6dd1dab
+Version: 0.1.0~dev+20261119110112.ga3aed5a
 Architecture: all
 Maintainer: OpenDuo <noreply@example.org>
 Installed-Size: 31
 Depends: plymouth, plymouth-label, python3
 Priority: optional
 Section: misc
-Filename: pool/main/o/openduo-plymouth-theme-surface-duo2/openduo-plymouth-theme-surface-duo2_0.1.0~dev+20261118211558.g6dd1dab_all.deb
-Size: 9372
-SHA256: 047e52b9cc584f89f6db3fe24274e573c72188b4d5abe906bc0fe00da691fc50
-SHA1: e144377abe4791f772e378ec37ee6d346350968c
-MD5sum: 108d9efcfabdc5217fe6638360370881
+Filename: pool/main/o/openduo-plymouth-theme-surface-duo2/openduo-plymouth-theme-surface-duo2_0.1.0~dev+20261119110112.ga3aed5a_all.deb
+Size: 9368
+SHA256: 419e75273dce6a4f8815c26d2e039b34a42c15b5289179dddb076ba137f8dc37
+SHA1: 0938e7afd4c7e2948ed57daf705a4b9f6e3c6120
+MD5sum: 30bb1445398e2c4cc7130aa07f4bdadd
 Description: OpenDuo's boot splash on both panels of the Surface Duo 2
  The Plymouth theme at the panels' own scale, the start once the display
  driver is there, and the hand-over to the compositor without a black frame.
 
 Package: openduo-power-surface-duo2
-Version: 0.1.0~dev+20261118211558.g6dd1dab
+Version: 0.1.0~dev+20261119110112.ga3aed5a
 Architecture: all
 Maintainer: OpenDuo <noreply@example.org>
 Installed-Size: 175
 Depends: python3, sudo, systemd
 Priority: optional
 Section: misc
-Filename: pool/main/o/openduo-power-surface-duo2/openduo-power-surface-duo2_0.1.0~dev+20261118211558.g6dd1dab_all.deb
-Size: 44148
-SHA256: 1b7d03577d2a81010e25e264946b9f2f512f797b2009114ead9b7108db049da5
-SHA1: 6cfd0bbff86d71627279796979aa6abcf8fdf40c
-MD5sum: bcc44396b43c21cfc3f545ec8e1b06b0
+Filename: pool/main/o/openduo-power-surface-duo2/openduo-power-surface-duo2_0.1.0~dev+20261119110112.ga3aed5a_all.deb
+Size: 44244
+SHA256: 8cb9febb1af9cab12e372ce93b93ba8f900e9d2c202247f9bfe417733a708966
+SHA1: 0b79d59f543b7497c5b729e7fb872af825b773a5
+MD5sum: eab5f93604a945e66c82723d09364595
 Description: OpenDuo's power pieces for the Surface Duo 2
  Automatic sleep (held until the owner switches it on), the charge hold,
  the pen charger, the wall clock from the PMIC RTC, the torch off before a
  suspend, the USB gadget's sleep hook, the try-kernel WiFi watchdog.
 
 Package: openduo-release
-Version: 0.1.0~dev+20261118211558.g6dd1dab
+Version: 0.1.0~dev+20261119110112.ga3aed5a
 Architecture: all
 Maintainer: OpenDuo <noreply@example.org>
-Installed-Size: 20
+Installed-Size: 22
 Depends: base-files, dpkg
 OpenDuo-Changes:
  ## [Unreleased]
@@ -869,6 +888,28 @@ OpenDuo-Changes:
  - Bug reports with personal identifiers masked.
  .
  ### Fixed
+ - WiFi could stop working (connected, nothing getting through) or crash, and
+   once a failed recovery wedged the whole phone: the link to the WiFi chip ran
+   at PCIe Gen3, where it reported errors; it is held at Gen2 now, as the stock
+   kernel does. A WiFi firmware that stops answering without crashing is now
+   restarted by the driver (a few seconds without WiFi instead of hours).
+ - On a fresh install the sensors only logged what they would do: rotation,
+   the poses, the peek screen, the hinge text and blanking a closed phone did
+   nothing until Settings > Rotation & poses > "Use the sensors" was switched
+   on. They are on from the start now; an update switches them on where the
+   configuration was never changed.
+ - A closed phone goes dark also with "Automatic poses" off (it lights again
+   when opened, in the pose it had), and also when it was already closed as
+   the sensors started (the hinge angle decides while the posture sensor has
+   said nothing yet: one night the panels of a closed phone stayed lit).
+ - Automatic sleep was held on every fresh install (a bring-up default), so
+   the phone never slept, closed or not. It is on from the start; an update
+   removes the hold the installer made and keeps one switched off by the user.
+ - The first start's firmware import refused a phone whose copy of the sensor
+   configuration beside its registry was older than the registry itself (the
+   sensors step failed, so no touch, WiFi or sensors). It now checks what the
+   sensor DSP reads: the registry's version against the vendor configuration's
+   (issue #1).
  - An eSIM download that failed said only lpac's internal step name (for
    example `es9p_initiate_authentication`); it now says what went wrong (no
    internet, what the operator's server answered, a confirmation code missing)
@@ -917,47 +958,47 @@ OpenDuo-Changes:
    network) and automatic fallback to the previous kernel ([docs/UPDATES.md](docs/UPDATES.md)).
 Priority: optional
 Section: admin
-Filename: pool/main/o/openduo-release/openduo-release_0.1.0~dev+20261118211558.g6dd1dab_all.deb
-Size: 9380
-SHA256: 055a6c27922c8eb9f06b3724ea38c8320b86f300da65c358506c452c2f95be4d
-SHA1: 21641910f30e052fab2fed199d48879d352e14ea
-MD5sum: cd472c0a70a4360878fe3fb2f0e20287
+Filename: pool/main/o/openduo-release/openduo-release_0.1.0~dev+20261119110112.ga3aed5a_all.deb
+Size: 10496
+SHA256: 162260c6d6bb9f4569b21b9df7aacb799c6e4a3c1e5f3df2930239a37b19bdae
+SHA1: 944bcb32dbccb88eb69eb131d719cdfbcf94cd08
+MD5sum: fad736558de466ec6bc16084a295a842
 Description: OpenDuo's version and build stamp
  /etc/duo2-release (Settings > About, bug reports) and /etc/os-release
  (NAME=OpenDuo, ID_LIKE=debian). Its OpenDuo-Changes field carries the
  newest CHANGELOG.md sections for Settings > Updates.
 
 Package: openduo-sensors-surface-duo2
-Version: 0.1.0~dev+20261118211558.g6dd1dab
+Version: 0.1.0~dev+20261119110112.ga3aed5a
 Architecture: arm64
 Maintainer: OpenDuo <noreply@example.org>
-Installed-Size: 832
+Installed-Size: 835
 Depends: python3, libprotobuf-c1, polkitd, libglib2.0-0t64, libgudev-1.0-0, systemd
 Priority: optional
 Section: misc
-Filename: pool/main/o/openduo-sensors-surface-duo2/openduo-sensors-surface-duo2_0.1.0~dev+20261118211558.g6dd1dab_arm64.deb
-Size: 115152
-SHA256: e8301eedc32640417dd638e00da9b7b5e3e01274a7f67087f44750b970e52438
-SHA1: df367f9225cafef73d825036035100d065e2fab4
-MD5sum: cf19725e21a062bb11e301e4361c5dee
+Filename: pool/main/o/openduo-sensors-surface-duo2/openduo-sensors-surface-duo2_0.1.0~dev+20261119110112.ga3aed5a_arm64.deb
+Size: 115644
+SHA256: 98987a59f37c304f40fc2538844cfecccc34ade612e213c460b990e159f6b607
+SHA1: ab5d3814725c73aa44178a9d28fc8c78aa8bc72c
+MD5sum: 03d8dbbb86973a0d847852f62013c24d
 Description: OpenDuo's sensor stack for the Surface Duo 2 (the free half)
  hexagonrpcd (patched), libssc and iio-sensor-proxy 3.9 for the sensor DSP,
  the posture daemon (duo-posed) and automatic brightness (duo-brightness).
  The DSP's own libraries come from the owner's phone (a post-install step).
 
 Package: openduo-stock-surface-duo2
-Version: 0.1.0~dev+20261118211558.g6dd1dab
+Version: 0.1.0~dev+20261119110112.ga3aed5a
 Architecture: all
 Maintainer: OpenDuo <noreply@example.org>
-Installed-Size: 80
+Installed-Size: 81
 Depends: python3, e2fsprogs, mtools, systemd, udev
 Priority: optional
 Section: misc
-Filename: pool/main/o/openduo-stock-surface-duo2/openduo-stock-surface-duo2_0.1.0~dev+20261118211558.g6dd1dab_all.deb
-Size: 21800
-SHA256: 1061a3a85d033ca110c3855dd2568945ceec1a5c01ef26b7fe2c0b5bee5df8e1
-SHA1: abb2275dff7a79c5096a377072d6aa4e4473e8fd
-MD5sum: e3f1079edc436eba6f0e0fdc3e4db667
+Filename: pool/main/o/openduo-stock-surface-duo2/openduo-stock-surface-duo2_0.1.0~dev+20261119110112.ga3aed5a_all.deb
+Size: 22392
+SHA256: 3c7918a0df7323e0d2f7aad98220e94c283dba898c886e7900c9ae6da012edb0
+SHA1: c42537fda09a3d14031b31cb9a48449472e9d1b0
+MD5sum: 07db503831f58f7b1b654cad344e0c67
 Description: OpenDuo's import of the Surface Duo 2's own stock firmware
  duo2-stock-import reads the phone's own stock partitions (modem, Bluetooth,
  DSP, persist, and vendor, system and system_ext inside super) and installs
@@ -968,52 +1009,52 @@ Description: OpenDuo's import of the Surface Duo 2's own stock firmware
  partitions.
 
 Package: openduo-surface-duo2
-Version: 0.1.0~dev+20261118211558.g6dd1dab
+Version: 0.1.0~dev+20261119110112.ga3aed5a
 Architecture: arm64
 Maintainer: OpenDuo <noreply@example.org>
 Installed-Size: 6
-Depends: openduo-android (>= 0.1.0~dev+20261118211558.g6dd1dab), openduo-battery-surface-duo2 (>= 0.1.0~dev+20261118211558.g6dd1dab), openduo-devmode (>= 0.1.0~dev+20261118211558.g6dd1dab), openduo-duo-apps (>= 0.1.0~dev+20261118211558.g6dd1dab), openduo-duo-screencast (>= 0.1.0~dev+20261118211558.g6dd1dab), openduo-duo-settings (>= 0.1.0~dev+20261118211558.g6dd1dab), openduo-duo-shell (>= 0.1.0~dev+20261118211558.g6dd1dab), openduo-duo-wc (>= 0.1.0~dev+20261118211558.g6dd1dab), openduo-firewall (>= 0.1.0~dev+20261118211558.g6dd1dab), openduo-homecrypt (>= 0.1.0~dev+20261118211558.g6dd1dab), openduo-hotspot (>= 0.1.0~dev+20261118211558.g6dd1dab), openduo-maint (>= 0.1.0~dev+20261118211558.g6dd1dab), openduo-nibfair (>= 0.1.0~dev+20261118211558.g6dd1dab), openduo-plymouth-theme-surface-duo2 (>= 0.1.0~dev+20261118211558.g6dd1dab), openduo-power-surface-duo2 (>= 0.1.0~dev+20261118211558.g6dd1dab), openduo-sensors-surface-duo2 (>= 0.1.0~dev+20261118211558.g6dd1dab), openduo-stock-surface-duo2 (>= 0.1.0~dev+20261118211558.g6dd1dab), openduo-telephony-surface-duo2 (>= 0.1.0~dev+20261118211558.g6dd1dab), openduo-touch-surface-duo2 (>= 0.1.0~dev+20261118211558.g6dd1dab), openduo-release (>= 0.1.0~dev+20261118211558.g6dd1dab), openduo-archive-keyring, openduo-kernel-surface-duo2
+Depends: openduo-android (>= 0.1.0~dev+20261119110112.ga3aed5a), openduo-battery-surface-duo2 (>= 0.1.0~dev+20261119110112.ga3aed5a), openduo-devmode (>= 0.1.0~dev+20261119110112.ga3aed5a), openduo-duo-apps (>= 0.1.0~dev+20261119110112.ga3aed5a), openduo-duo-screencast (>= 0.1.0~dev+20261119110112.ga3aed5a), openduo-duo-settings (>= 0.1.0~dev+20261119110112.ga3aed5a), openduo-duo-shell (>= 0.1.0~dev+20261119110112.ga3aed5a), openduo-duo-wc (>= 0.1.0~dev+20261119110112.ga3aed5a), openduo-firewall (>= 0.1.0~dev+20261119110112.ga3aed5a), openduo-homecrypt (>= 0.1.0~dev+20261119110112.ga3aed5a), openduo-hotspot (>= 0.1.0~dev+20261119110112.ga3aed5a), openduo-maint (>= 0.1.0~dev+20261119110112.ga3aed5a), openduo-nibfair (>= 0.1.0~dev+20261119110112.ga3aed5a), openduo-plymouth-theme-surface-duo2 (>= 0.1.0~dev+20261119110112.ga3aed5a), openduo-power-surface-duo2 (>= 0.1.0~dev+20261119110112.ga3aed5a), openduo-sensors-surface-duo2 (>= 0.1.0~dev+20261119110112.ga3aed5a), openduo-stock-surface-duo2 (>= 0.1.0~dev+20261119110112.ga3aed5a), openduo-telephony-surface-duo2 (>= 0.1.0~dev+20261119110112.ga3aed5a), openduo-touch-surface-duo2 (>= 0.1.0~dev+20261119110112.ga3aed5a), openduo-release (>= 0.1.0~dev+20261119110112.ga3aed5a), openduo-archive-keyring, openduo-kernel-surface-duo2
 Priority: optional
 Section: metapackages
-Filename: pool/main/o/openduo-surface-duo2/openduo-surface-duo2_0.1.0~dev+20261118211558.g6dd1dab_arm64.deb
+Filename: pool/main/o/openduo-surface-duo2/openduo-surface-duo2_0.1.0~dev+20261119110112.ga3aed5a_arm64.deb
 Size: 1324
-SHA256: ab29fe8faeef5ed2d8661cea37b709ece4334f648c08e0e67dc966e8233e6d94
-SHA1: 2c21a6552da0179559d3e13fb63ddf469e733c1b
-MD5sum: 6fe3cb3205bdd43574fac872b3a8f55a
+SHA256: d122c443a4021ecb959ccbd3dc4873642e79bb50760a13a6052e5bee1d50c39e
+SHA1: 4086898d36a283a028213faa439a21777391be91
+MD5sum: 4704f84ad47673848f55caee96a8d814
 Description: OpenDuo for the Surface Duo 2: the whole system
  Every OpenDuo package for the Surface Duo 2, its kernel and the
  repository's key.
 
 Package: openduo-telephony-surface-duo2
-Version: 0.1.0~dev+20261118211558.g6dd1dab
+Version: 0.1.0~dev+20261119110112.ga3aed5a
 Architecture: arm64
 Maintainer: OpenDuo <noreply@example.org>
 Installed-Size: 518
 Depends: python3, sudo, modemmanager, gir1.2-modemmanager-1.0, gnome-calls, callaudiod, feedbackd, gnome-contacts, chatty, mmsd-tng, mobile-broadband-provider-info, libcurl4t64, libpcsclite1
 Priority: optional
 Section: misc
-Filename: pool/main/o/openduo-telephony-surface-duo2/openduo-telephony-surface-duo2_0.1.0~dev+20261118211558.g6dd1dab_arm64.deb
-Size: 140016
-SHA256: e5ff21c43174030adb7f454765a69fe27b42884a273ddc432f63d31fc254d180
-SHA1: 41afeef49656ef821bdaf2c3f86ce10b98839dd4
-MD5sum: a43eaaec9b03da5805496c32a9e8207a
+Filename: pool/main/o/openduo-telephony-surface-duo2/openduo-telephony-surface-duo2_0.1.0~dev+20261119110112.ga3aed5a_arm64.deb
+Size: 139920
+SHA256: ab0cb696624cf6ce2c3364865e29766cff370e72c2b38366339f1b287ae1f968
+SHA1: 9a6be04e00a6b6d5838838350ff8d0f319a9bd79
+MD5sum: 04b01e2374ec5fbde54b06c4dc7ea110
 Description: OpenDuo's telephony for the Surface Duo 2: modem, mobile data, SMS, eSIM
  The modem's low-power hook, the SIM slots, mobile data, call audio, Calls
  and Chatty in the background, the eSIM (lpac), the GNSS assistance helper.
 
 Package: openduo-touch-surface-duo2
-Version: 0.1.0~dev+20261118211558.g6dd1dab
+Version: 0.1.0~dev+20261119110112.ga3aed5a
 Architecture: arm64
 Maintainer: OpenDuo <noreply@example.org>
 Installed-Size: 776
 Depends: python3, systemd, udev, bluez
 Priority: optional
 Section: misc
-Filename: pool/main/o/openduo-touch-surface-duo2/openduo-touch-surface-duo2_0.1.0~dev+20261118211558.g6dd1dab_arm64.deb
-Size: 179484
-SHA256: 4ecf5e6462fa3a3ffcfa3a4341ee5cdc678bba0facbc4b4ecb59a3568ff757a5
-SHA1: da8bb8c23d7d303a820e3c640e9c4d03a2fcfc1c
-MD5sum: 2da05e0bbfbe38d0a2161f610f0a3cc6
+Filename: pool/main/o/openduo-touch-surface-duo2/openduo-touch-surface-duo2_0.1.0~dev+20261119110112.ga3aed5a_arm64.deb
+Size: 179928
+SHA256: 735f3ad8a890ade873346fcf6135b923d54d1c718f7422adb28e76a9c6d5e81a
+SHA1: a52b97250626c97f97acba947939b45c4b479dd2
+MD5sum: 68a7abd24c17c6b5fa742f5bd3c5b080
 Description: OpenDuo's touch and pen pieces for the Surface Duo 2 (not the runtime)
  duo2-touchd (built from source with the Android NDK), its unit, the udev
  rule and the sleep hook, the calibration, the pen's Bluetooth daemon and the
