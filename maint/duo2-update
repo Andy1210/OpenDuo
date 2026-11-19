@@ -388,6 +388,13 @@ def cmd_run(args):
     log = os.path.join(LOGDIR, time.strftime("%Y%m%d-%H%M%S") + ".log")
     say("== apt-get dist-upgrade (log: %s)" % log)
     rc = system.stream(APT + ["-y", "dist-upgrade"], log)
+    # dpkg syncs what it unpacks, but the components' own installers copy
+    # into /usr/local and /etc with plain writes. A phone that froze right
+    # after an install (2026-11-19, the restart button already shown) came
+    # back with 62 of those files empty: the page cache never reached the
+    # disk. Write everything out before the install counts as done.
+    say("== sync")
+    os.sync()
     checks = after(snapshot_name, failed_before, boot_before)
     say("== after the upgrade")
     for ok, text in checks:

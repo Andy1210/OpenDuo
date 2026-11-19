@@ -87,6 +87,12 @@ def apply_setting(cfg, key, value, developer_mode):
     return new, None
 
 
+def try_boot(cmdline):
+    """True on a scripts/duo2-try boot (its entry adds duo2.try=<id>): duo2-update
+    refuses to install there, the known-good kernel has to run."""
+    return any(w.startswith("duo2.try=") or w == "duo2.try" for w in (cmdline or "").split())
+
+
 def may_install(battery, on_charger, minimum=MIN_BATTERY):
     """None when an install may start now, else why not."""
     if on_charger:

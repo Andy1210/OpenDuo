@@ -91,6 +91,11 @@ Development state: `0.1.0-dev`. The first public release will be 0.1.0.
 - Bug reports with personal identifiers masked.
 
 ### Fixed
+- A phone that froze right after an update could come back with OpenDuo's
+  own scripts and services empty (no mobile network, no automatic sleep): the
+  packages' installers wrote them without syncing. Every package and the
+  updater now sync before the update counts as done. Settings > Updates also
+  says plainly that it does not install while a test kernel runs.
 - WiFi could stop working (connected, nothing getting through) or crash, and
   once a failed recovery wedged the whole phone: the link to the WiFi chip ran
   at PCIe Gen3, where it reported errors; it is held at Gen2 now, as the stock

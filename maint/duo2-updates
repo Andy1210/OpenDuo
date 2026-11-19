@@ -251,6 +251,17 @@ def cmd_install():
         return fail("power", why)
     if kernel_being_tried(boot_status()):
         return fail("kernel", "the new kernel is still being checked: restart once it is confirmed")
+    try:
+        with open("/proc/cmdline") as f:
+            cmdline = f.read()
+    except OSError:
+        cmdline = ""
+    if up.try_boot(cmdline):
+        # duo2-update would stop at once (it installs on the known-good kernel
+        # only); saying so here beats a failed install with a log to read.
+        return fail(
+            "kernel", "a test kernel is running (duo2-try): restart the phone, then install"
+        )
     if not confirmed("Settings asks to install the system updates (a snapshot is taken first)."):
         return fail("refused", "not confirmed in the shell")
     return start("install")

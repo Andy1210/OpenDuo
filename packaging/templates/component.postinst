@@ -35,6 +35,10 @@ case "$1" in
 configure)
     @USER_LINE@
     (cd "$DIR" && @ENV@sh ./install-files.sh @ARGS@)
+    # The installer copies with plain writes, outside dpkg's own syncing: on
+    # the disk before any service restarts. A phone that froze right after
+    # an update came back with dozens of these files empty (2026-11-19).
+    sync
     if [ -d /run/systemd/system ]; then
         systemctl daemon-reload || true
     fi

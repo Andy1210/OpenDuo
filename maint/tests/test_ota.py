@@ -239,6 +239,11 @@ class Settings(unittest.TestCase):
         self.assertIsNone(up.may_install(20, True))
         self.assertIsNone(up.may_install(50, False))
         self.assertTrue(up.may_install(49, False))
+
+    def test_try_boot(self):
+        self.assertTrue(up.try_boot("root=x rw duo2.try=20261119-1 quiet\n"))
+        self.assertFalse(up.try_boot("root=x rw duo2.trying=1 quiet"))
+        self.assertFalse(up.try_boot(""))
         self.assertIsNone(up.may_install(None, False))
 
     def test_the_nightly_install(self):
