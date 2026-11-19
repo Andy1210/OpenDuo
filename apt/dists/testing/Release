@@ -2,19 +2,19 @@ Origin: OpenDuo
 Label: OpenDuo
 Suite: testing
 Codename: testing
-Date: Thu, 19 Nov 2026 11:16:28 UTC
+Date: Thu, 19 Nov 2026 13:12:18 UTC
 Architectures: arm64
 Components: main
 Description: OpenDuo for the Surface Duo 2 (testing)
 MD5Sum:
- 4bd2eaa52956966256bad0d0825b1a7f 63679 main/binary-arm64/Packages
- 988079080c0e9388989585c1c7e1e793 17190 main/binary-arm64/Packages.gz
+ a3bd31ec61182779cc68ec6ef3527243 64052 main/binary-arm64/Packages
+ c4141b18814e3a9586bdd21136ec78e6 17334 main/binary-arm64/Packages.gz
  c5fbfdcef94db42fee8a87ca03fbc2f4 137 main/binary-arm64/Release
 SHA1:
- d3288ead4852fece774b2856daff8405c7f0e8f6 63679 main/binary-arm64/Packages
- d45d3f1fac74cf60d21fbba91db7ec154cb9d256 17190 main/binary-arm64/Packages.gz
+ e9b7c4135af634b94a5eed2be18fb9fed4e7fcc2 64052 main/binary-arm64/Packages
+ b8e889c404dba8bb77eb4a68e18d470fc94ce6c1 17334 main/binary-arm64/Packages.gz
  58391dc5931d533406c0324b2f62f8bc93244530 137 main/binary-arm64/Release
 SHA256:
- cf9aa10ce84f92fbc9100e5e2939384c4313f3afd357818e00a8cab46c909088 63679 main/binary-arm64/Packages
- 1da05f91f9f3ef31d10156d3d053a3ff738f1c83ea3aee8c1a3dfa363919547a 17190 main/binary-arm64/Packages.gz
+ 0128fa43ef59485cf645c1cd1426981d9d929049ac6946dd0cfea1d1241b27c5 64052 main/binary-arm64/Packages
+ 8716da6f51a6adfa9eda2c1b491ebd560f19476cb01ee75069a4f14e1111dee0 17334 main/binary-arm64/Packages.gz
  70dd4ec1bd83ad0463c3e8c632a16ce0fe097aab949181e003f30aaeaa74f7af 137 main/binary-arm64/Release
