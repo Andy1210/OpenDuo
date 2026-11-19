@@ -51,6 +51,11 @@ sudo duo2-stock-import             # import again (then restart the phone)
   2023.501.541 images, the release OpenDuo is tested with (on the
   maintainer's phone the active slot matched all six byte for byte). Another
   release is imported too, with a warning in the log and the marker.
+- **The sensor registry** must belong to the vendor's `sns_reg_config`: the
+  registry's own `sns_reg_version` must give the config's version. The copy
+  of the config that Android keeps beside the registry is not read by the
+  sensor DSP and is not always refreshed when Android rebuilds the registry,
+  so an older copy is only noted in the log (issue #1).
 
 ## When it fails
 

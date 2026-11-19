@@ -72,9 +72,20 @@ for d in "$x/vendor/sensors/config" "$x/persist/registry/registry" "$x/dsp/sdsp"
 done
 # The registry must belong to the vendor's configuration (hexagonrpcd is
 # read-only, a mismatch would make the SLPI try to rebuild it and fail).
+# The SLPI reads the vendor's config and the registry's sns_reg_version, not
+# the copy of the config Android keeps beside the registry, which Android does
+# not always refresh when it rebuilds the registry (issue #1): an identical
+# copy passes, otherwise the versions must agree (as stock/duo2stock.py).
+sns_version() { tr '\0' '\n' <"$1" | sed -n 's/^[[:space:]]*[Vv]ersion[[:space:]]*=[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p' | head -n 1; }
 if ! cmp -s "$x/vendor/sensors/sns_reg_config" "$x/persist/registry/sns_reg_config"; then
-    echo "persist registry was built from another sns_reg_config than the vendor image's" >&2
-    exit 1
+    want=$(sns_version "$x/vendor/sensors/sns_reg_config")
+    have=$(sns_version "$x/persist/registry/sns_reg_version")
+    if [ -z "$want" ] || [ "$want" != "$have" ]; then
+        echo "persist registry was built from another sns_reg_config than the vendor image's" \
+            "(config version ${want:-none}, registry version ${have:-none})" >&2
+        exit 1
+    fi
+    echo "the registry's copy of sns_reg_config is older; the registry is version $have, as the vendor's config"
 fi
 
 mkdir -p "$tmp/t/sensors" "$tmp/t/dsp"

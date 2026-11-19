@@ -189,6 +189,32 @@ class Images(unittest.TestCase):
         self.assertIsNone(ds.Images({}, None, "b", h).release())
 
 
+class SensorRegistry(unittest.TestCase):
+    V2 = b"version=2\nfile=hw_platform=/sys/devices/soc0/hw_platform\n"
+    V1 = b"version=1\nfile=hw_platform=/sys/devices/soc0/hw_platform\n"
+
+    def test_versions(self):
+        self.assertEqual(ds.sns_version(self.V2), 2)
+        self.assertEqual(ds.sns_version(b"version=2\0"), 2)  # Android's trailing NUL
+        self.assertEqual(ds.sns_version(b" Version = 3 \n"), 3)
+        self.assertIsNone(ds.sns_version(b"file=x\n"))
+        self.assertIsNone(ds.sns_version(b"version=two\n"))
+
+    def test_identical_copy_passes(self):
+        ds.check_registry(self.V2, self.V2, b"")
+
+    def test_older_copy_passes_when_the_registry_is_the_configs_version(self):
+        # issue #1: the copy beside the registry still version 1
+        ds.check_registry(self.V2, self.V1, b"version=2\0")
+
+    def test_a_registry_of_another_version_is_refused(self):
+        for version in (b"version=1\0", b"", b"garbage"):
+            with self.assertRaises(ds.StockError):
+                ds.check_registry(self.V2, self.V1, version)
+        with self.assertRaises(ds.StockError):
+            ds.check_registry(b"file=x\n", self.V1, b"version=2")
+
+
 class Install(unittest.TestCase):
     def test_merge_keeps_other_files_and_drops_old_imports(self):
         with tempfile.TemporaryDirectory() as d:

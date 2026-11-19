@@ -91,6 +91,11 @@ Development state: `0.1.0-dev`. The first public release will be 0.1.0.
 - Bug reports with personal identifiers masked.
 
 ### Fixed
+- The first start's firmware import refused a phone whose copy of the sensor
+  configuration beside its registry was older than the registry itself (the
+  sensors step failed, so no touch, WiFi or sensors). It now checks what the
+  sensor DSP reads: the registry's version against the vendor configuration's
+  (issue #1).
 - An eSIM download that failed said only lpac's internal step name (for
   example `es9p_initiate_authentication`); it now says what went wrong (no
   internet, what the operator's server answered, a confirmation code missing)

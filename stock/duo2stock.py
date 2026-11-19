@@ -504,6 +504,42 @@ def build_touch(img, work, daemon_dir, out):
     return len(os.listdir(lib))
 
 
+def sns_version(data):
+    """The N of the "version=N" line of an sns_reg_config or sns_reg_version
+    file (bytes), or None. Android writes sns_reg_version with a trailing
+    NUL byte."""
+    for line in data.replace(b"\0", b"\n").splitlines():
+        key, sep, value = line.partition(b"=")
+        if sep and key.strip().lower() == b"version" and value.strip().isdigit():
+            return int(value.strip())
+    return None
+
+
+def check_registry(vendor_config, persist_config, persist_version):
+    """Raise StockError unless the persist registry belongs to the vendor's
+    sns_reg_config. What the SLPI reads is the vendor's config and the
+    registry's sns_reg_version (both served read-only: a mismatch would
+    make it rebuild the registry, which it cannot), not the copy of the
+    config Android keeps beside the registry. Android rebuilds the registry
+    and its sns_reg_version on a config update without always refreshing
+    that copy (a phone's copy said version=1 beside a version=2 registry:
+    OpenDuo issue #1). So an identical copy passes, and otherwise the
+    vendor config's version must be the registry's."""
+    if vendor_config == persist_config:
+        return
+    want, have = sns_version(vendor_config), sns_version(persist_version)
+    if want is None or want != have:
+        raise StockError(
+            "sensors: the persist registry was built from another sns_reg_config than the"
+            " vendor image's (config version %s, registry version %s)" % (want, have)
+        )
+    log(
+        "  sensors: the registry's copy of sns_reg_config is older (version %s); the"
+        " registry itself is version %d, as the vendor's config"
+        % (sns_version(persist_config), have)
+    )
+
+
 def build_sensors(img, work, out):
     """What hexagonrpcd serves to the sensor DSP
     (scripts/build-sensors-runtime.sh: the header there explains each file)."""
@@ -517,11 +553,9 @@ def build_sensors(img, work, out):
         need(os.path.join(x, d))
     a = os.path.join(x, "vendor/sensors/sns_reg_config")
     b = os.path.join(x, "persist/registry/sns_reg_config")
-    with open(need(a), "rb") as fa, open(need(b), "rb") as fb:
-        if fa.read() != fb.read():
-            raise StockError(
-                "sensors: the persist registry was built from another sns_reg_config than the vendor image's"
-            )
+    v = os.path.join(x, "persist/registry/sns_reg_version")
+    with open(need(a), "rb") as fa, open(need(b), "rb") as fb, open(need(v), "rb") as fv:
+        check_registry(fa.read(), fb.read(), fv.read())
     t = out
     os.makedirs(os.path.join(t, "sensors"))
     os.makedirs(os.path.join(t, "dsp"))

@@ -79,6 +79,15 @@ come with their own translations.
   - **Find the trigger:** a long run on WiFi with the panels dark, with and
     without power save, with the firmware's own logs if they can be reached.
 
+## Stability
+
+- **Resets that leave no trace.** The phone restarted by itself once while
+  nobody used it (2026-11-18, about 25 minutes after a boot): the journal
+  goes quiet with nothing unusual before it, no oops, no shutdown, and
+  nothing in pstore (not set up). Keep the kernel's last messages across a
+  reset (ramoops in reserved memory: a device-tree change, tried through
+  `duo2-try`), so the next one can be read.
+
 ## Updates
 
 - Build the image from the OpenDuo packages instead of installing the
